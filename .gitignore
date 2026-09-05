@@ -1,0 +1,15 @@
+# Build outputs
+/bin/
+/services/processor/target/
+
+# Local secrets and environment files (see SPECIFICATIONS.md section 31)
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

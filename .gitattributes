@@ -1,2 +1,10 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Every text file is stored and checked out with LF so that scripts, Makefiles,
+# Dockerfiles and manifests work unchanged inside Linux containers regardless of
+# the host's core.autocrlf setting.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.ico binary
+*.woff2 binary

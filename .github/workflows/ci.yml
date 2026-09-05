@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: make verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.mod
+
+      - name: Install Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' services/processor/rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          rustup default "$channel"
+
+      - run: make verify

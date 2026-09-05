@@ -1,0 +1,9 @@
+{
+  "name": "VitalMesh",
+  "build": { "dockerfile": "Dockerfile" },
+  "customizations": {
+    "vscode": {
+      "extensions": ["golang.go", "rust-lang.rust-analyzer", "EditorConfig.EditorConfig"]
+    }
+  }
+}
