@@ -35,8 +35,17 @@ const (
 type Config struct {
 	Environment Environment
 	HTTP        HTTP
+	Database    Database
 	Readiness   Readiness
 	Log         Log
+}
+
+// Database configures the PostgreSQL connection pool.
+type Database struct {
+	// URL is a libpq-style connection URL. It is mandatory.
+	URL            string
+	MaxConns       int32
+	ConnectTimeout time.Duration
 }
 
 // HTTP configures the public HTTP listener and per-request protection.
@@ -87,6 +96,11 @@ func Load(lookup Lookup) (Config, error) {
 			ShutdownTimeout:   p.duration("HTTP_SHUTDOWN_TIMEOUT", 10*time.Second),
 			RequestTimeout:    p.duration("HTTP_REQUEST_TIMEOUT", 10*time.Second),
 			MaxBodyBytes:      p.bytes("HTTP_MAX_BODY_BYTES", 1<<20),
+		},
+		Database: Database{
+			URL:            p.required("DATABASE_URL"),
+			MaxConns:       p.int32("DATABASE_MAX_CONNS", 10),
+			ConnectTimeout: p.duration("DATABASE_CONNECT_TIMEOUT", 5*time.Second),
 		},
 		Readiness: Readiness{
 			Timeout: p.duration("READINESS_TIMEOUT", 2*time.Second),
@@ -140,6 +154,31 @@ func (p *parser) string(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func (p *parser) required(key string) string {
+	v, ok := p.raw(key)
+	if !ok {
+		p.fail("%s: is required", key)
+	}
+	return v
+}
+
+func (p *parser) int32(key string, def int32) int32 {
+	v, ok := p.raw(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 32)
+	if err != nil {
+		p.fail("%s: must be an integer", key)
+		return def
+	}
+	if n <= 0 {
+		p.fail("%s: must be positive, got %d", key, n)
+		return def
+	}
+	return int32(n)
 }
 
 func (p *parser) duration(key string, def time.Duration) time.Duration {

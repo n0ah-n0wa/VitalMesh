@@ -19,9 +19,12 @@ internal/
     respond/                JSON and error-envelope writers, domain error -> status mapping
   pagination/               cursor primitives and page-size bounds
   validate/                 input validation accumulator producing domain validation errors
+  infra/postgres/           PostgreSQL: pool, migrator, transactions, repositories, error mapping
+    postgrestest/           per-test database helper for integration tests
   observability/logging/    structured logging setup
   requestid/                request identifier generation, validation and context carriage
   buildinfo/                version injected at link time
+migrations/                 embedded SQL migrations (see docs/DATABASE.md)
 ```
 
 ## Layers and dependency rules
@@ -56,6 +59,9 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `HTTP_SHUTDOWN_TIMEOUT` | `10s` | grace period for in-flight requests on SIGTERM/SIGINT; remaining connections are closed when it elapses and the process exits 1 |
 | `HTTP_REQUEST_TIMEOUT` | `10s` | handler execution bound; must be shorter than `HTTP_WRITE_TIMEOUT` |
 | `HTTP_MAX_BODY_BYTES` | `1048576` | largest accepted request body |
+| `DATABASE_URL` | (required) | PostgreSQL connection URL, e.g. `postgres://user:pass@host:5432/db?sslmode=disable` |
+| `DATABASE_MAX_CONNS` | `10` | connection pool size |
+| `DATABASE_CONNECT_TIMEOUT` | `5s` | per-connection dial timeout |
 | `READINESS_TIMEOUT` | `2s` | bound for the whole `/ready` evaluation |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
@@ -65,7 +71,9 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | Route | Purpose |
 |---|---|
 | `GET /health` | liveness; never consults dependencies |
-| `GET /ready` | readiness; `200` when every registered check passes, otherwise `503` with `"status":"not_ready"`. Check failure causes are logged, not returned. |
+| `GET /ready` | readiness; `200` when every registered check passes (currently `postgres`), otherwise `503` with `"status":"not_ready"`. Check failure causes are logged, not returned. |
+
+The binary also carries the schema: `api-gateway migrate up|down|version|force` (see [docs/DATABASE.md](../../docs/DATABASE.md)).
 
 Unknown paths return `404` and wrong methods `405` (with `Allow`), both as the standard error envelope:
 

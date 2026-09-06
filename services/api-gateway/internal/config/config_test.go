@@ -9,10 +9,20 @@ import (
 
 func lookupFrom(values map[string]string) Lookup {
 	return func(key string) (string, bool) {
+		if key == "DATABASE_URL" {
+			if v, ok := values[key]; ok {
+				return v, true
+			}
+			return testDatabaseURL, true
+		}
 		v, ok := values[key]
 		return v, ok
 	}
 }
+
+// testDatabaseURL satisfies the mandatory DATABASE_URL in tests that are not
+// about it; nothing connects to it.
+const testDatabaseURL = "postgres://user:pass@localhost:5432/vitalmesh?sslmode=disable"
 
 func TestLoadDefaults(t *testing.T) {
 	cfg, err := Load(lookupFrom(nil))

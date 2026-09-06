@@ -15,9 +15,21 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/requestid"
 )
 
+// unreachableDatabase is a syntactically valid URL nothing listens on. The
+// pool connects lazily, so wiring succeeds and readiness reports the outage.
+const unreachableDatabase = "postgres://vitalmesh:vitalmesh@127.0.0.1:1/vitalmesh?sslmode=disable"
+
 func testConfig(t *testing.T) config.Config {
 	t.Helper()
-	cfg, err := config.Load(func(string) (string, bool) { return "", false })
+	cfg, err := config.Load(func(key string) (string, bool) {
+		switch key {
+		case "DATABASE_URL":
+			return unreachableDatabase, true
+		case "DATABASE_CONNECT_TIMEOUT", "READINESS_TIMEOUT":
+			return "200ms", true
+		}
+		return "", false
+	})
 	if err != nil {
 		t.Fatalf("config.Load: %v", err)
 	}
@@ -25,37 +37,62 @@ func testConfig(t *testing.T) config.Config {
 	return cfg
 }
 
-func TestWiredHandlerServesHealthWithMiddleware(t *testing.T) {
-	a := New(testConfig(t), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "v-test")
-
-	for _, path := range []string{"/health", "/ready"} {
-		rec := httptest.NewRecorder()
-		a.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-
-		if rec.Code != http.StatusOK {
-			t.Errorf("GET %s: status = %d, want 200", path, rec.Code)
-		}
-		if rec.Header().Get(requestid.Header) == "" {
-			t.Errorf("GET %s: no %s header, middleware chain not applied", path, requestid.Header)
-		}
-		var body model.Health
-		if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
-			t.Fatalf("GET %s: decode: %v", path, err)
-		}
-		if body.Service != ServiceName || body.Version != "v-test" {
-			t.Errorf("GET %s: body = %+v", path, body)
-		}
+func newApp(t *testing.T) *App {
+	t.Helper()
+	a, err := New(context.Background(), testConfig(t), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "v-test")
+	if err != nil {
+		t.Fatalf("New: %v", err)
 	}
+	return a
+}
+
+func TestWiredHandlerServesHealthWithMiddleware(t *testing.T) {
+	a := newApp(t)
+	defer a.pool.Close()
 
 	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/health", nil))
+	if rec.Code != http.StatusOK {
+		t.Errorf("GET /health: status = %d, want 200", rec.Code)
+	}
+	if rec.Header().Get(requestid.Header) == "" {
+		t.Errorf("GET /health: no %s header, middleware chain not applied", requestid.Header)
+	}
+	var body model.Health
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Service != ServiceName || body.Version != "v-test" {
+		t.Errorf("body = %+v", body)
+	}
+
+	rec = httptest.NewRecorder()
 	a.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
 	if rec.Code != http.StatusNotFound || rec.Header().Get("Content-Type") != "application/json" {
 		t.Errorf("GET /nope: %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
 }
 
+func TestReadinessReportsTheDatabaseCheck(t *testing.T) {
+	a := newApp(t)
+	defer a.pool.Close()
+
+	rec := httptest.NewRecorder()
+	a.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/ready", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET /ready with unreachable database: status = %d, want 503", rec.Code)
+	}
+	var body model.Readiness
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != model.StatusNotReady || len(body.Checks) != 1 || body.Checks[0].Name != "postgres" || body.Checks[0].Status != model.StatusFail {
+		t.Errorf("body = %+v", body)
+	}
+}
+
 func TestRunStopsOnContextCancel(t *testing.T) {
-	a := New(testConfig(t), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), "v")
+	a := newApp(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)

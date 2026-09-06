@@ -37,10 +37,13 @@ Run `make help` for the list. The gates that CI runs are exactly the ones `make 
 | `make format` | `gofmt -w` and `cargo fmt` |
 | `make format-check` | fails if any file is not formatted |
 | `make lint` | `go vet` and `cargo clippy --all-targets -D warnings` |
-| `make test` | `go test -race ./...` and `cargo test` |
+| `make test` | unit tests: `go test -race ./...` and `cargo test` |
+| `make dev-db` / `make dev-db-down` | start / stop the local PostgreSQL (`docker compose`) |
+| `make integration-test` | database integration tests against `TEST_DATABASE_URL` (default: the local PostgreSQL) |
+| `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make build` | builds `bin/api-gateway` and `services/processor/target/debug/processor` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
-| `make verify` | `format-check lint test build line-endings` |
+| `make verify` | `format-check lint test integration-test build line-endings`; needs the local PostgreSQL (`make dev-db`) |
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
@@ -51,9 +54,11 @@ Both services read `HTTP_ADDR` and expose `GET /health` (liveness) and `GET /rea
 
 ```bash
 make build
-./bin/api-gateway                                   # listens on :8080
+make dev-db && make migrate
+DATABASE_URL=postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable ./bin/api-gateway   # :8080
 ./services/processor/target/debug/processor         # listens on 0.0.0.0:8081
 curl localhost:8080/health
+curl localhost:8080/ready                           # 503 until PostgreSQL is reachable
 curl localhost:8081/ready
 ```
 

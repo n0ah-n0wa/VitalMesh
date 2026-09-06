@@ -18,6 +18,22 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: vitalmesh
+          POSTGRES_PASSWORD: vitalmesh
+          POSTGRES_DB: vitalmesh
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vitalmesh -d vitalmesh"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+    env:
+      TEST_DATABASE_URL: postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 

@@ -1,0 +1,20 @@
+# Local infrastructure. Application services join this file as they gain
+# container images (see docs/IMPLEMENTATION_PLAN.md, Phase 2).
+#
+#   docker compose up -d --wait postgres
+#
+# The credentials below are for local development only.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vitalmesh
+      POSTGRES_PASSWORD: vitalmesh
+      POSTGRES_DB: vitalmesh
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vitalmesh -d vitalmesh"]
+      interval: 2s
+      timeout: 3s
+      retries: 15

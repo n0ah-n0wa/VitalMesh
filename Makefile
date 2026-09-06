@@ -9,7 +9,11 @@ GO_MODULE := github.com/n0ah-n0wa/VitalMesh/services/api-gateway
 VERSION   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 GO_LDFLAGS := -X $(GO_MODULE)/internal/buildinfo.Version=$(VERSION)
 
-.PHONY: help setup format format-check lint test build line-endings verify clean
+# PostgreSQL used by the database integration tests; `make dev-db` starts one.
+# Tests create and drop their own databases on this server.
+TEST_DATABASE_URL ?= postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
+
+.PHONY: help setup format format-check lint test integration-test build line-endings verify clean dev-db dev-db-down migrate
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -29,12 +33,24 @@ format-check: ## Fail if any source file is not formatted
 	cd $(RUST_DIR) && cargo fmt --check
 
 lint: ## Run static analysis
-	cd $(GO_DIR) && go vet ./...
+	cd $(GO_DIR) && go vet ./... && go vet -tags integration ./...
 	cd $(RUST_DIR) && cargo clippy --all-targets --locked -- -D warnings
 
-test: ## Run all tests
+test: ## Run unit tests
 	cd $(GO_DIR) && go test -race ./...
 	cd $(RUST_DIR) && cargo test --locked
+
+integration-test: ## Run database integration tests against TEST_DATABASE_URL (see make dev-db)
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -tags integration ./internal/infra/postgres/...
+
+dev-db: ## Start the local PostgreSQL used by development and integration tests
+	docker compose up -d --wait postgres
+
+dev-db-down: ## Stop and remove the local PostgreSQL
+	docker compose down
+
+migrate: ## Apply pending migrations to DATABASE_URL (defaults to the local database)
+	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/api-gateway migrate up
 
 build: ## Build both services (Go binary in bin/, Rust binary in services/processor/target/)
 	mkdir -p $(BIN_DIR)
@@ -44,7 +60,7 @@ build: ## Build both services (Go binary in bin/, Rust binary in services/proces
 line-endings: ## Fail if any tracked file is stored with CRLF line endings
 	sh scripts/check-line-endings.sh
 
-verify: format-check lint test build line-endings ## Run every quality gate
+verify: format-check lint test integration-test build line-endings ## Run every quality gate (needs PostgreSQL: make dev-db)
 	@echo "verify: all gates passed"
 
 clean: ## Remove build outputs
