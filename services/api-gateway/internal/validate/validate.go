@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
@@ -48,6 +49,31 @@ func (v *Validator) MaxLength(field, value string, limit int) {
 // OneOf fails when value is not one of allowed.
 func (v *Validator) OneOf(field, value string, allowed ...string) {
 	v.Check(slices.Contains(allowed, value), field, "must be one of: "+strings.Join(allowed, ", "))
+}
+
+// Email fails when value is not shaped like an email address: exactly one
+// "@" with non-empty local and domain parts and no whitespace or control
+// characters. Deliverability is not checked. An empty or blank value passes
+// so that Required reports the absence once.
+func (v *Validator) Email(field, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	v.Check(IsEmail(value), field, "must be a valid email address")
+}
+
+// IsEmail reports whether s has the shape Email accepts.
+func IsEmail(s string) bool {
+	local, domainPart, found := strings.Cut(s, "@")
+	if !found || local == "" || domainPart == "" || strings.Contains(domainPart, "@") {
+		return false
+	}
+	for _, r := range s {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // InRange fails when value is outside [lo, hi].

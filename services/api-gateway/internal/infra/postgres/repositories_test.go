@@ -392,3 +392,29 @@ func TestIdempotencyBeginReplayCompleteExpire(t *testing.T) {
 		t.Fatalf("DeleteExpired when empty = %d, %v; want 0", n, err)
 	}
 }
+
+func TestUsersUpdatePasswordHash(t *testing.T) {
+	t.Parallel()
+	pool, _, _ := postgrestest.New(t)
+	c := ctx(t)
+	users := postgres.NewUsers(pool)
+
+	created, err := users.Create(c, "carol@example.com", "old-hash", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	time.Sleep(10 * time.Millisecond)
+	if err := users.UpdatePasswordHash(c, created.ID, "new-hash"); err != nil {
+		t.Fatalf("UpdatePasswordHash: %v", err)
+	}
+	got, err := users.GetByID(c, created.ID)
+	if err != nil || got.PasswordHash != "new-hash" {
+		t.Fatalf("after update: %+v, %v", got, err)
+	}
+	if !got.UpdatedAt.After(created.UpdatedAt) {
+		t.Error("updated_at was not advanced by the trigger")
+	}
+	if err := users.UpdatePasswordHash(c, uuid.New(), "x"); !isKind(err, domain.KindNotFound) {
+		t.Errorf("unknown id: got %v, want not found", err)
+	}
+}

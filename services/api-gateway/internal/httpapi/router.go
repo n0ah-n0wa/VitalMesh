@@ -5,10 +5,12 @@ package httpapi
 import (
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/respond"
 )
 
@@ -16,7 +18,13 @@ import (
 // with the JSON error envelope instead of net/http's plain-text defaults.
 // Like http.ServeMux it is safe to register routes while serving.
 type Router struct {
-	mux    *http.ServeMux
+	// mux holds only method-qualified patterns plus the "/" fallback, so
+	// literal and wildcard siblings ("/x/batch", "/x/{id}") never conflict.
+	mux *http.ServeMux
+	// paths indexes every registered path without a method, so the
+	// fallback can tell "known path, wrong method" (405) from "unknown
+	// path" (404).
+	paths  *http.ServeMux
 	logger *slog.Logger
 
 	mu      sync.RWMutex
@@ -25,8 +33,13 @@ type Router struct {
 
 // NewRouter returns an empty Router.
 func NewRouter(logger *slog.Logger) *Router {
-	rt := &Router{mux: http.NewServeMux(), logger: logger, allowed: make(map[string][]string)}
-	rt.mux.HandleFunc("/", rt.notFound)
+	rt := &Router{
+		mux:     http.NewServeMux(),
+		paths:   http.NewServeMux(),
+		logger:  logger,
+		allowed: make(map[string][]string),
+	}
+	rt.mux.HandleFunc("/", rt.fallback)
 	return rt
 }
 
@@ -39,7 +52,7 @@ func (rt *Router) Handle(method, path string, h http.Handler) {
 	rt.mu.Unlock()
 
 	if !registered {
-		rt.mux.HandleFunc(path, rt.methodNotAllowed(path))
+		rt.paths.Handle(path, http.NotFoundHandler())
 	}
 	rt.mux.Handle(method+" "+path, h)
 }
@@ -59,30 +72,41 @@ func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	rt.mux.ServeHTTP(w, r)
 }
 
-func (rt *Router) notFound(w http.ResponseWriter, r *http.Request) {
-	respond.Error(w, r, rt.logger, domain.New(domain.KindNotFound, "NOT_FOUND", "The requested resource does not exist."))
-}
-
-func (rt *Router) methodNotAllowed(path string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+// fallback serves every request no method-qualified pattern matched.
+func (rt *Router) fallback(w http.ResponseWriter, r *http.Request) {
+	if _, pattern := rt.paths.Handler(r); pattern != "" {
 		rt.mu.RLock()
-		allow := strings.Join(rt.allowed[path], ", ")
+		allow := strings.Join(rt.allowed[pattern], ", ")
 		rt.mu.RUnlock()
 
 		w.Header().Set("Allow", allow)
 		respond.ErrorStatus(w, r, http.StatusMethodNotAllowed, "METHOD_NOT_ALLOWED", "The method is not allowed for this resource.")
+		return
 	}
+	respond.Error(w, r, rt.logger, domain.New(domain.KindNotFound, "NOT_FOUND", "The requested resource does not exist."))
 }
 
-// Group registers routes under a common prefix.
+// Group registers routes under a common prefix, each wrapped in the group's
+// middleware. Unmatched requests (404, 405) never reach that middleware.
 type Group struct {
-	router *Router
-	prefix string
+	router      *Router
+	prefix      string
+	middlewares []middleware.Middleware
+}
+
+// With returns a Group whose routes additionally pass through m, applied
+// inside any middleware the receiver already has. The receiver is unchanged.
+func (g *Group) With(m ...middleware.Middleware) *Group {
+	return &Group{
+		router:      g.router,
+		prefix:      g.prefix,
+		middlewares: append(slices.Clone(g.middlewares), m...),
+	}
 }
 
 // Handle registers h for method and the prefixed path.
 func (g *Group) Handle(method, path string, h http.Handler) {
-	g.router.Handle(method, g.prefix+path, h)
+	g.router.Handle(method, g.prefix+path, middleware.Chain(h, g.middlewares...))
 }
 
 // HandleFunc is Handle for a handler function.

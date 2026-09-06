@@ -51,6 +51,66 @@ Codes defined by the platform (feature endpoints add their own):
 | `REQUEST_TIMEOUT` | 504 | the request exceeded the server's processing bound |
 | `REQUEST_CANCELLED` | 503 | the request was cancelled before completion |
 | `INTERNAL_ERROR` | 500 | an unexpected failure; the cause is logged server-side under `request_id` |
+| `AUTHENTICATION_REQUIRED` | 401 | the route needs an access token and none was sent |
+| `INVALID_TOKEN` | 401 | the access token is malformed, tampered with, signed with an unknown key, or its subject no longer exists |
+| `TOKEN_EXPIRED` | 401 | the access token is past its expiry; log in again |
+| `INVALID_CREDENTIALS` | 401 | login with an unknown email or wrong password (deliberately indistinguishable) |
+| `ACCOUNT_DISABLED` | 403 | the credentials or token are valid but the account is disabled |
+| `PERMISSION_DENIED` | 403 | the token is valid but the account's role does not permit the operation |
+
+## Authentication
+
+The API uses JWT bearer tokens (SPECIFICATIONS.md section 9.1). Obtain one by logging in:
+
+```http
+POST /api/v1/auth/login
+Content-Type: application/json
+
+{"email": "admin@example.com", "password": "..."}
+```
+
+```json
+{
+  "access_token": "<opaque JWT>",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "expires_at": "2026-09-06T12:15:00Z",
+  "user": {"id": "…", "email": "admin@example.com", "role": "ADMIN", "status": "ACTIVE", "created_at": "…"}
+}
+```
+
+- Email matching is case-insensitive. Both fields are required; the password may be up to 1024 bytes.
+- Present the token on every other `/api/v1` request as `Authorization: Bearer <access_token>`. `GET /api/v1/auth/me` returns the calling account and is the simplest way to check a token.
+- Tokens are signed (HS256), carry `sub` (user id), `role`, `iat`, `exp` and a unique `jti`, and expire after 15 minutes by default. There are no refresh tokens: log in again. Clients must treat the token as opaque.
+- Failures are explicit (see the codes above) and every `401` carries a `WWW-Authenticate: Bearer` challenge. Login failures never say whether the email exists.
+- Accounts are created by an operator with the gateway's command line (`api-gateway users create`); there is no self-registration and no default account.
+- Every successful login is recorded in the audit log under the request's `request_id`. Credentials and tokens are never written to logs.
+
+## Authorization
+
+Every account has exactly one role: `ADMIN`, `OPERATOR` or `USER` (SPECIFICATIONS.md section 9.1). The role is carried in the access token and decides which operations the account may perform. Decisions are made by the server on every request from the verified token alone; nothing a client sends besides the token (headers, body fields, query parameters) can widen them.
+
+| Capability | Operations | ADMIN | OPERATOR | USER |
+|---|---|---|---|---|
+| Manage users and roles | `POST /users`, `GET /users`, `GET /users/{user_id}`, `PATCH /users/{user_id}/role` | yes | no | no |
+| Create and delete patients | `POST /patients`, `DELETE /patients/{patient_id}` | yes | yes | no |
+| Read patients | `GET /patients`, `GET /patients/{patient_id}` | yes | yes | yes |
+| Create and delete measurements | `POST /measurements`, `POST /measurements/batch`, `DELETE /measurements/{measurement_id}` | yes | yes | no |
+| Read measurements | `GET /measurements/{measurement_id}`, `GET /patients/{patient_id}/measurements` | yes | yes | yes |
+| Create and cancel processing jobs | `POST /processing/jobs`, `POST /processing/jobs/{job_id}/cancel` | yes | yes | no |
+| Read jobs and results | `GET /processing/jobs/{job_id}`, `GET /patients/{patient_id}/processing-results` | yes | yes | yes |
+| Own session | `GET /auth/me` | yes | yes | yes |
+| Log in | `POST /auth/login` | anyone | anyone | anyone |
+
+Roles nest: every operation an `OPERATOR` may perform is available to an `ADMIN`, and every `USER` operation to an `OPERATOR`. Operations are listed here before they are implemented; an unimplemented operation answers `404` for everyone.
+
+Outcomes, in the order they are checked:
+
+1. No token, or a token that cannot be verified: `401` with `AUTHENTICATION_REQUIRED`, `INVALID_TOKEN` or `TOKEN_EXPIRED` and a `WWW-Authenticate` challenge, whatever role the token claims.
+2. A verified token whose role lacks the capability: `403 PERMISSION_DENIED`. The response does not say which permission was missing; the server logs the account, role and permission.
+3. Otherwise the operation runs. Rules about specific resources (for example an account acting on itself) are enforced by the operation itself and documented with it.
+
+A role change takes effect for tokens issued after it; tokens live 15 minutes by default.
 
 ## Status codes
 

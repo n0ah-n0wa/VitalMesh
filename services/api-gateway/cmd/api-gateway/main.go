@@ -7,6 +7,9 @@
 //	api-gateway migrate down [steps]    roll back migrations (default 1)
 //	api-gateway migrate version         print the schema version
 //	api-gateway migrate force <version> reset a dirty version (see docs/DATABASE.md)
+//	api-gateway users create <email> <role>
+//	                                    create an account; the password is read
+//	                                    from standard input
 //
 // Exit codes: 0 on success, 1 on a runtime failure, 2 on invalid
 // configuration or usage.
@@ -14,24 +17,32 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/app"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/auth"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/buildinfo"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/logging"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:]))
+	os.Exit(run(os.Args[1:], os.Stdin))
 }
 
-func run(args []string) int {
+func run(args []string, stdin io.Reader) int {
 	if len(args) == 0 {
 		return serve()
 	}
@@ -40,6 +51,8 @@ func run(args []string) int {
 		return serve()
 	case "migrate":
 		return migrate(args[1:])
+	case "users":
+		return users(args[1:], stdin)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q; see the package documentation\n", args[0])
 		return 2
@@ -76,10 +89,18 @@ func serve() int {
 	return 0
 }
 
-func migrate(args []string) int {
+func databaseURL() (string, bool) {
 	url := os.Getenv("DATABASE_URL")
 	if url == "" {
 		fmt.Fprintln(os.Stderr, "DATABASE_URL is required")
+		return "", false
+	}
+	return url, true
+}
+
+func migrate(args []string) int {
+	url, ok := databaseURL()
+	if !ok {
 		return 2
 	}
 	if len(args) == 0 {
@@ -133,4 +154,103 @@ func migrate(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// users implements `users create <email> <role>`. The password comes from
+// standard input (one line) so that it appears in neither the process list
+// nor the environment. This is how the first administrator is bootstrapped.
+func users(args []string, stdin io.Reader) int {
+	const usage = "usage: echo \"$PASSWORD\" | api-gateway users create <email> <ADMIN|OPERATOR|USER>"
+	if len(args) != 3 || args[0] != "create" {
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	email := auth.NormalizeEmail(args[1])
+	role := domain.Role(strings.ToUpper(args[2]))
+	switch role {
+	case domain.RoleAdmin, domain.RoleOperator, domain.RoleUser:
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		return 2
+	}
+	url, ok := databaseURL()
+	if !ok {
+		return 2
+	}
+	hashCfg, err := config.LoadPasswordHash(os.LookupEnv)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+
+	password, err := readPassword(stdin)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	if err := auth.ValidateNewPassword(password); err != nil {
+		var domErr *domain.Error
+		if errors.As(err, &domErr) && len(domErr.Details) > 0 {
+			fmt.Fprintf(os.Stderr, "password %s\n", domErr.Details[0].Message)
+		} else {
+			fmt.Fprintln(os.Stderr, err)
+		}
+		return 2
+	}
+	hash, err := auth.NewHasher(hashCfg).Hash(context.Background(), password)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	pool, err := postgres.Connect(ctx, config.Database{URL: url, MaxConns: 1, ConnectTimeout: 5 * time.Second})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	defer pool.Close()
+
+	var created domain.User
+	err = postgres.WithTx(ctx, pool, func(tx pgx.Tx) error {
+		var err error
+		created, err = postgres.NewUsers(tx).Create(ctx, email, hash, role)
+		if err != nil {
+			return err
+		}
+		_, err = postgres.NewAudit(tx).Append(ctx, postgres.NewAuditEntry{
+			ActorType:    domain.ActorSystem,
+			Action:       domain.AuditUserCreated,
+			ResourceType: "user",
+			ResourceID:   &created.ID,
+			RequestID:    "cli:users-create",
+		})
+		return err
+	})
+	if err != nil {
+		var domErr *domain.Error
+		if errors.As(err, &domErr) && domErr.Kind == domain.KindConflict {
+			fmt.Fprintln(os.Stderr, "a user with that email already exists")
+			return 1
+		}
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	fmt.Printf("created user %s (%s) with role %s\n", created.ID, created.Email, created.Role)
+	return 0
+}
+
+// readPassword reads one line from r, bounded so a stray stream cannot be
+// consumed indefinitely.
+func readPassword(r io.Reader) (string, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, auth.MaxPasswordLength+2))
+	if err != nil {
+		return "", fmt.Errorf("read password from stdin: %w", err)
+	}
+	password := strings.TrimSuffix(strings.TrimSuffix(string(raw), "\n"), "\r")
+	if password == "" {
+		return "", errors.New("a password is required on standard input")
+	}
+	return password, nil
 }

@@ -9,20 +9,25 @@ import (
 
 func lookupFrom(values map[string]string) Lookup {
 	return func(key string) (string, bool) {
-		if key == "DATABASE_URL" {
-			if v, ok := values[key]; ok {
-				return v, true
-			}
-			return testDatabaseURL, true
+		if v, ok := values[key]; ok {
+			return v, true
 		}
-		v, ok := values[key]
-		return v, ok
+		switch key {
+		case "DATABASE_URL":
+			return testDatabaseURL, true
+		case "JWT_SECRET":
+			return testJWTSecret, true
+		}
+		return "", false
 	}
 }
 
-// testDatabaseURL satisfies the mandatory DATABASE_URL in tests that are not
-// about it; nothing connects to it.
-const testDatabaseURL = "postgres://user:pass@localhost:5432/vitalmesh?sslmode=disable"
+// testDatabaseURL and testJWTSecret satisfy the mandatory keys in tests that
+// are not about them; nothing connects to or signs with them.
+const (
+	testDatabaseURL = "postgres://user:pass@localhost:5432/vitalmesh?sslmode=disable"
+	testJWTSecret   = "test-secret-test-secret-test-secret-32"
+)
 
 func TestLoadDefaults(t *testing.T) {
 	cfg, err := Load(lookupFrom(nil))
@@ -63,6 +68,7 @@ func TestLoadRejectsRequestTimeoutAtOrAboveWriteTimeout(t *testing.T) {
 func TestLoadOverrides(t *testing.T) {
 	cfg, err := Load(lookupFrom(map[string]string{
 		"ENVIRONMENT":           "staging",
+		"DATABASE_URL":          "postgres://user:pass@db:5432/vitalmesh?sslmode=require", // staging demands TLS
 		"HTTP_ADDR":             "127.0.0.1:9000",
 		"HTTP_READ_TIMEOUT":     "3s",
 		"HTTP_SHUTDOWN_TIMEOUT": "1m",

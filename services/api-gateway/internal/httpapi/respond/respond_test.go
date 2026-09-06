@@ -194,3 +194,26 @@ func TestErrorStatus(t *testing.T) {
 		t.Errorf("body = %+v", body.Error)
 	}
 }
+
+func TestUnauthorizedResponsesCarryAChallenge(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	rec := httptest.NewRecorder()
+	Error(rec, httptest.NewRequest(http.MethodGet, "/", nil), logger, domain.New(domain.KindUnauthorized, "X", "y"))
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="`+BearerRealm+`"` {
+		t.Errorf("default challenge = %q", got)
+	}
+
+	rec = httptest.NewRecorder()
+	rec.Header().Set("WWW-Authenticate", `Bearer realm="x", error="invalid_token"`)
+	ErrorStatus(rec, httptest.NewRequest(http.MethodGet, "/", nil), http.StatusUnauthorized, "X", "y")
+	if got := rec.Header().Get("WWW-Authenticate"); got != `Bearer realm="x", error="invalid_token"` {
+		t.Errorf("specific challenge overwritten: %q", got)
+	}
+
+	rec = httptest.NewRecorder()
+	Error(rec, httptest.NewRequest(http.MethodGet, "/", nil), logger, domain.New(domain.KindForbidden, "X", "y"))
+	if rec.Header().Get("WWW-Authenticate") != "" {
+		t.Error("a 403 must not challenge for credentials")
+	}
+}

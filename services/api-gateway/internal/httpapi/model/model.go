@@ -3,6 +3,12 @@
 // application layer.
 package model
 
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
 // ErrorResponse is the envelope returned for every failed request.
 type ErrorResponse struct {
 	Error ErrorDetail `json:"error"`
@@ -71,3 +77,29 @@ const (
 	StatusReady    = "ready"
 	StatusNotReady = "not_ready"
 )
+
+// LoginRequest is the body of POST /auth/login. It holds a credential and
+// must never be logged.
+type LoginRequest struct {
+	Email    string `json:"email"`
+	Password string `json:"password"`
+}
+
+// LoginResponse is returned by a successful login.
+type LoginResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	// ExpiresIn is the token lifetime in seconds.
+	ExpiresIn int64     `json:"expires_in"`
+	ExpiresAt time.Time `json:"expires_at"`
+	User      User      `json:"user"`
+}
+
+// User is the client view of an account. It never includes credentials.
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	Status    string    `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+}

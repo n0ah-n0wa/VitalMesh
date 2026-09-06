@@ -76,6 +76,19 @@ func (r *Users) UpdateRole(ctx context.Context, id uuid.UUID, role domain.Role) 
 	return collectOne[domain.User](rows, err)
 }
 
+// UpdatePasswordHash replaces a user's stored password hash. It reports
+// not-found when no such user exists.
+func (r *Users) UpdatePasswordHash(ctx context.Context, id uuid.UUID, passwordHash string) error {
+	tag, err := r.db.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, id, passwordHash)
+	if err != nil {
+		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		return mapError(pgx.ErrNoRows)
+	}
+	return nil
+}
+
 // SetStatus enables or disables a user and returns the updated row.
 func (r *Users) SetStatus(ctx context.Context, id uuid.UUID, status domain.UserStatus) (domain.User, error) {
 	rows, err := r.db.Query(ctx, `

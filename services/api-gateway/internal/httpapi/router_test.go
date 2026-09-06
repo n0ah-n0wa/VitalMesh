@@ -94,3 +94,45 @@ func TestWrongMethodIsJSON405WithAllow(t *testing.T) {
 		t.Errorf("code = %q, want METHOD_NOT_ALLOWED", code)
 	}
 }
+
+func TestLiteralAndWildcardSiblingsCoexist(t *testing.T) {
+	// "/x/batch" and "/x/{id}" under different methods must both register
+	// and each answer 405 for the methods it lacks, with the literal path
+	// winning for its own method.
+	rt := NewRouter(slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+	rt.HandleFunc(http.MethodPost, "/api/v1/measurements/batch", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("batch")) })
+	rt.HandleFunc(http.MethodGet, "/api/v1/measurements/{id}", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("one " + r.PathValue("id"))) })
+	rt.HandleFunc(http.MethodDelete, "/api/v1/measurements/{id}", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+
+	cases := []struct {
+		method, path string
+		status       int
+		body, allow  string
+	}{
+		{http.MethodPost, "/api/v1/measurements/batch", http.StatusOK, "batch", ""},
+		// For GET no literal "batch" route exists, so the wildcard applies.
+		{http.MethodGet, "/api/v1/measurements/batch", http.StatusOK, "one batch", ""},
+		{http.MethodPut, "/api/v1/measurements/batch", http.StatusMethodNotAllowed, "", "POST"},
+		{http.MethodGet, "/api/v1/measurements/abc", http.StatusOK, "one abc", ""},
+		{http.MethodDelete, "/api/v1/measurements/abc", http.StatusNoContent, "", ""},
+		{http.MethodPut, "/api/v1/measurements/abc", http.StatusMethodNotAllowed, "", "GET, DELETE"},
+		{http.MethodGet, "/api/v1/measurements/abc/extra", http.StatusNotFound, "", ""},
+		{http.MethodGet, "/api/v1/measurements", http.StatusNotFound, "", ""},
+	}
+	for _, tc := range cases {
+		rec := httptest.NewRecorder()
+		rt.ServeHTTP(rec, httptest.NewRequest(tc.method, tc.path, nil))
+		if rec.Code != tc.status {
+			t.Errorf("%s %s: status = %d, want %d (%s)", tc.method, tc.path, rec.Code, tc.status, rec.Body.String())
+		}
+		if tc.body != "" && rec.Body.String() != tc.body {
+			t.Errorf("%s %s: body = %q, want %q", tc.method, tc.path, rec.Body.String(), tc.body)
+		}
+		if got := rec.Header().Get("Allow"); got != tc.allow {
+			t.Errorf("%s %s: Allow = %q, want %q", tc.method, tc.path, got, tc.allow)
+		}
+		if tc.status >= 400 && rec.Header().Get("Content-Type") != "application/json" {
+			t.Errorf("%s %s: error is not the JSON envelope", tc.method, tc.path)
+		}
+	}
+}

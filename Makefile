@@ -41,7 +41,7 @@ test: ## Run unit tests
 	cd $(RUST_DIR) && cargo test --locked
 
 integration-test: ## Run database integration tests against TEST_DATABASE_URL (see make dev-db)
-	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -tags integration ./internal/infra/postgres/...
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -tags integration ./internal/infra/postgres/... ./internal/app/...
 
 dev-db: ## Start the local PostgreSQL used by development and integration tests
 	docker compose up -d --wait postgres

@@ -27,6 +27,12 @@ func testConfig(t *testing.T) config.Config {
 			return unreachableDatabase, true
 		case "DATABASE_CONNECT_TIMEOUT", "READINESS_TIMEOUT":
 			return "200ms", true
+		case "JWT_SECRET":
+			return "test-secret-test-secret-test-secret-32", true
+		case "PASSWORD_HASH_MEMORY_KIB":
+			return "8192", true
+		case "PASSWORD_HASH_TIME":
+			return "1", true
 		}
 		return "", false
 	})

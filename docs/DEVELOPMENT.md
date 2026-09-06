@@ -55,12 +55,25 @@ Both services read `HTTP_ADDR` and expose `GET /health` (liveness) and `GET /rea
 ```bash
 make build
 make dev-db && make migrate
-DATABASE_URL=postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable ./bin/api-gateway   # :8080
+export DATABASE_URL=postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
+export JWT_SECRET="$(openssl rand -base64 48)"       # local only; never commit a value (SPECIFICATIONS.md section 31)
+./bin/api-gateway                                   # :8080
 ./services/processor/target/debug/processor         # listens on 0.0.0.0:8081
 curl localhost:8080/health
 curl localhost:8080/ready                           # 503 until PostgreSQL is reachable
 curl localhost:8081/ready
 ```
+
+To call authenticated endpoints, create an account and log in (the password is read from standard input so that it never appears in the shell history or process list):
+
+```bash
+printf '%s\n' 'choose-a-local-password' | ./bin/api-gateway users create admin@example.com ADMIN
+curl -s localhost:8080/api/v1/auth/login -H 'Content-Type: application/json' \
+  -d '{"email":"admin@example.com","password":"choose-a-local-password"}'      # {"access_token":"...","token_type":"Bearer",...}
+curl -s localhost:8080/api/v1/auth/me -H "Authorization: Bearer $TOKEN"
+```
+
+Local secrets belong in a `.env` file (ignored by Git) or the shell, never in tracked files.
 
 `version` is the short git SHA injected by the Makefile (`VERSION=...` overrides it), or `dev` when built directly with `go build` / `cargo build`.
 

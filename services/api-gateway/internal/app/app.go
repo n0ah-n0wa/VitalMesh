@@ -8,12 +8,17 @@ import (
 	"log/slog"
 	"net/http"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/auth"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/authz"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/health"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
 )
 
@@ -37,13 +42,35 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 	}
 
 	readiness := health.NewReadiness(cfg.Readiness.Timeout, postgres.NewChecker(pool))
-	healthHandler := handler.NewHealth(ServiceName, version, readiness, logger)
+	tokens := auth.NewTokens(cfg.Auth.JWT, nil)
+	authService, err := auth.NewService(
+		postgres.NewUsers(pool),
+		auditor{repo: postgres.NewAudit(pool)},
+		auth.NewHasher(cfg.Auth.Password),
+		tokens,
+		logger,
+	)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("auth: %w", err)
+	}
 
+	handlers := httpapi.Handlers{
+		Health:       handler.NewHealth(ServiceName, version, readiness, logger),
+		Auth:         handler.NewAuth(authService, logger),
+		Authenticate: middleware.Authenticate(tokens, logger),
+		Policy:       authz.Default(),
+	}
+	root, err := httpapi.NewHandler(cfg.HTTP, logger, handlers)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("routes: %w", err)
+	}
 	return &App{
 		cfg:     cfg,
 		logger:  logger,
 		pool:    pool,
-		handler: httpapi.NewHandler(cfg.HTTP, logger, healthHandler),
+		handler: root,
 	}, nil
 }
 
@@ -61,4 +88,22 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.logger.Info("stopped")
 	return nil
+}
+
+// auditor adapts the audit repository to the events the auth service
+// records, keeping auth free of persistence types.
+type auditor struct {
+	repo *postgres.Audit
+}
+
+func (a auditor) RecordLogin(ctx context.Context, userID uuid.UUID, requestID string) error {
+	_, err := a.repo.Append(ctx, postgres.NewAuditEntry{
+		ActorID:      &userID,
+		ActorType:    domain.ActorUser,
+		Action:       domain.AuditLogin,
+		ResourceType: "user",
+		ResourceID:   &userID,
+		RequestID:    requestID,
+	})
+	return err
 }

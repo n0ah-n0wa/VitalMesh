@@ -76,7 +76,15 @@ func ErrorStatus(w http.ResponseWriter, r *http.Request, status int, code, messa
 	writeEnvelope(w, r, status, code, message, nil)
 }
 
+// BearerRealm is the protection space named in WWW-Authenticate challenges.
+const BearerRealm = "vitalmesh"
+
 func writeEnvelope(w http.ResponseWriter, r *http.Request, status int, code, message string, details []domain.FieldError) {
+	// RFC 6750: every 401 carries a challenge. Callers that know more (an
+	// invalid token, say) set a more specific one first.
+	if status == http.StatusUnauthorized && w.Header().Get("WWW-Authenticate") == "" {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="`+BearerRealm+`"`)
+	}
 	envelope := model.ErrorResponse{Error: model.ErrorDetail{
 		Code:      code,
 		Message:   message,

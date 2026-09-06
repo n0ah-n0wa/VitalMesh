@@ -65,3 +65,27 @@ func TestErrDetailsAreDetached(t *testing.T) {
 		t.Errorf("Details grew after Err(): %+v", err.Details)
 	}
 }
+
+func TestEmail(t *testing.T) {
+	for _, ok := range []string{"a@b", "alice@example.com", "first.last+tag@sub.example.co.uk", "ünïcode@example.org"} {
+		if !IsEmail(ok) {
+			t.Errorf("IsEmail(%q) = false", ok)
+		}
+	}
+	for _, bad := range []string{"alice", "@example.com", "alice@", "a@@b", "al ice@example.com", "alice@exam\tple.com", "alice@example.com\n"} {
+		if IsEmail(bad) {
+			t.Errorf("IsEmail(%q) = true", bad)
+		}
+	}
+
+	var v Validator
+	v.Email("email", "")
+	v.Email("email", "fine@example.com")
+	if !v.Valid() {
+		t.Errorf("empty or valid email recorded a failure: %v", v.Err())
+	}
+	v.Email("email", "nope")
+	if err := v.Err(); err == nil || err.(*domain.Error).Details[0].Message != "must be a valid email address" {
+		t.Errorf("invalid email: %v", err)
+	}
+}
