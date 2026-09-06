@@ -1,10 +1,29 @@
-//! VitalMesh processor: HTTP router and health endpoints.
+//! VitalMesh processor: the data processing service behind the API gateway.
+//!
+//! Module map:
+//! - `config`: typed configuration loaded from the environment.
+//! - `error`: the classified error type shared by every layer.
+//! - `domain`: job identifiers and the job state machine.
+//! - `concurrency`: the bounded admission limiter.
+//! - `engine`: bounded, cancellable, time-limited job execution.
+//! - `state`: application state shared with request handlers.
+//! - `telemetry`: structured logging.
+//! - `requestid`: request and correlation identifiers.
+//! - `transport`: the HTTP router, middleware and handlers.
+//! - `lifecycle`: start-up, serving and graceful shutdown.
 
-pub mod health;
+pub mod concurrency;
+pub mod config;
+pub mod domain;
+pub mod engine;
+pub mod error;
+pub mod lifecycle;
+pub mod requestid;
+pub mod state;
+pub mod telemetry;
+pub mod transport;
 
-use axum::{Router, routing::get};
-
-/// Service name reported by the health endpoints.
+/// Service name reported in logs and health responses.
 pub const SERVICE_NAME: &str = "processor";
 
 /// Build identifier, injected by the Makefile through `VITALMESH_VERSION`.
@@ -12,10 +31,3 @@ pub const VERSION: &str = match option_env!("VITALMESH_VERSION") {
     Some(version) => version,
     None => "dev",
 };
-
-/// Returns the HTTP router exposing the service's routes.
-pub fn app() -> Router {
-    Router::new()
-        .route("/health", get(health::live))
-        .route("/ready", get(health::ready))
-}

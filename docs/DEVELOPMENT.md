@@ -59,7 +59,7 @@ curl localhost:8081/ready
 
 `version` is the short git SHA injected by the Makefile (`VERSION=...` overrides it), or `dev` when built directly with `go build` / `cargo build`.
 
-The gateway's full configuration surface, package layout and layering rules are documented in [services/api-gateway/README.md](../services/api-gateway/README.md).
+The gateway's full configuration surface, package layout and layering rules are documented in [services/api-gateway/README.md](../services/api-gateway/README.md); the processor's in [services/processor/README.md](../services/processor/README.md).
 
 ## Repository layout
 
