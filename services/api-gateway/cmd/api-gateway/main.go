@@ -1,45 +1,47 @@
 // Command api-gateway runs the VitalMesh public API gateway.
+//
+// Exit codes: 0 on clean shutdown, 1 on a runtime failure, 2 on invalid
+// configuration.
 package main
 
 import (
 	"context"
-	"log/slog"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/app"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/buildinfo"
-	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/health"
-	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpserver"
-)
-
-const (
-	serviceName     = "api-gateway"
-	defaultAddr     = ":8080"
-	shutdownTimeout = 10 * time.Second
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/logging"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
-		"service", serviceName,
-		"version", buildinfo.Version,
-	)
+	os.Exit(run())
+}
 
-	addr := os.Getenv("HTTP_ADDR")
-	if addr == "" {
-		addr = defaultAddr
+func run() int {
+	cfg, err := config.Load(os.LookupEnv)
+	if err != nil {
+		// The logger is configured from cfg, so this is the one message that
+		// cannot be structured.
+		fmt.Fprintln(os.Stderr, err)
+		return 2
 	}
+
+	logger := logging.New(os.Stdout, cfg.Log, logging.Service{
+		Name:        app.ServiceName,
+		Version:     buildinfo.Version,
+		Environment: string(cfg.Environment),
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	router := httpserver.NewRouter(health.NewHandler(serviceName, buildinfo.Version))
-
-	logger.Info("starting", "addr", addr)
-	if err := httpserver.Run(ctx, addr, router, shutdownTimeout); err != nil {
-		logger.Error("server exited", "error", err)
-		os.Exit(1)
+	if err := app.New(cfg, logger, buildinfo.Version).Run(ctx); err != nil {
+		logger.Error("gateway exited", "error", err)
+		return 1
 	}
-	logger.Info("stopped")
+	return 0
 }
