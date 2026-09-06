@@ -1,6 +1,6 @@
 // Package logging configures structured logging. Every record carries the
 // service identity; records logged with a context that holds a request ID
-// carry it too.
+// or a trace ID carry them too.
 package logging
 
 import (
@@ -10,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/requestid"
 )
 
@@ -69,11 +70,17 @@ func (h contextHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h contextHandler) Handle(ctx context.Context, r slog.Record) error {
-	id := requestid.FromContext(ctx)
-	if id == "" {
+	var attrs []slog.Attr
+	if id := requestid.FromContext(ctx); id != "" {
+		attrs = append(attrs, slog.String("request_id", id))
+	}
+	if id := tracing.TraceID(ctx); id != "" {
+		attrs = append(attrs, slog.String("trace_id", id))
+	}
+	if len(attrs) == 0 {
 		return h.derived.Handle(ctx, r)
 	}
-	target := h.root.WithAttrs([]slog.Attr{slog.String("request_id", id)})
+	target := h.root.WithAttrs(attrs)
 	for _, op := range h.ops {
 		target = op(target)
 	}

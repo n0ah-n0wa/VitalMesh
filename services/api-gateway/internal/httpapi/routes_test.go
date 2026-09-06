@@ -47,10 +47,10 @@ func mountedAPI(t *testing.T) (http.Handler, *auth.Tokens, *bytes.Buffer) {
 		})
 	}
 	rt := NewRouter(logger)
-	if err := Mount(rt.Group(APIv1), ops, middleware.Authenticate(tokens, logger), authz.Default(), logger); err != nil {
+	if err := Mount(rt.Group(APIv1), ops, middleware.Authenticate(tokens, logger), authz.Default(), nil, logger); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	return Wrap(config.HTTP{MaxBodyBytes: 1 << 20, RequestTimeout: time.Second}, logger, rt), tokens, &logBuf
+	return Wrap(config.HTTP{MaxBodyBytes: 1 << 20, RequestTimeout: time.Second}, logger, nil, rt), tokens, &logBuf
 }
 
 // concretePath replaces wildcards so the request matches the route.
@@ -271,19 +271,19 @@ func TestMountRejectsUnlistedAndUnguardableOperations(t *testing.T) {
 
 	err := Mount(NewRouter(logger).Group(APIv1), map[authz.RouteKey]http.Handler{
 		{Method: http.MethodDelete, Path: "/users/{user_id}"}: ok,
-	}, middleware.Authenticate(tokens, logger), authz.Default(), logger)
+	}, middleware.Authenticate(tokens, logger), authz.Default(), nil, logger)
 	if err == nil || !strings.Contains(err.Error(), "no authorization rule") {
 		t.Errorf("handler without rule: err = %v", err)
 	}
 
 	err = Mount(NewRouter(logger).Group(APIv1), map[authz.RouteKey]http.Handler{
 		{Method: http.MethodGet, Path: "/auth/me"}: ok,
-	}, nil, authz.Default(), logger)
+	}, nil, authz.Default(), nil, logger)
 	if err == nil || !strings.Contains(err.Error(), "needs authentication") {
 		t.Errorf("protected route without authenticate: err = %v", err)
 	}
 
-	err = Mount(NewRouter(logger).Group(APIv1), nil, middleware.Authenticate(tokens, logger), nil, logger)
+	err = Mount(NewRouter(logger).Group(APIv1), nil, middleware.Authenticate(tokens, logger), nil, nil, logger)
 	if err == nil || !strings.Contains(err.Error(), "no authorization policy") {
 		t.Errorf("nil policy: err = %v", err)
 	}
@@ -291,7 +291,7 @@ func TestMountRejectsUnlistedAndUnguardableOperations(t *testing.T) {
 	// Public operations mount without authentication.
 	err = Mount(NewRouter(logger).Group(APIv1), map[authz.RouteKey]http.Handler{
 		{Method: http.MethodPost, Path: "/auth/login"}: ok,
-	}, nil, authz.Default(), logger)
+	}, nil, authz.Default(), nil, logger)
 	if err != nil {
 		t.Errorf("public route without authenticate: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestUnimplementedOperationsAreNotServed(t *testing.T) {
 	tokens := auth.NewTokens(routesJWT(routesSecret), nil)
 	rt := NewRouter(logger)
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
-	if err := Mount(rt.Group(APIv1), map[authz.RouteKey]http.Handler{{Method: http.MethodPost, Path: "/auth/login"}: ok}, middleware.Authenticate(tokens, logger), authz.Default(), logger); err != nil {
+	if err := Mount(rt.Group(APIv1), map[authz.RouteKey]http.Handler{{Method: http.MethodPost, Path: "/auth/login"}: ok}, middleware.Authenticate(tokens, logger), authz.Default(), nil, logger); err != nil {
 		t.Fatal(err)
 	}
 	rec := httptest.NewRecorder()

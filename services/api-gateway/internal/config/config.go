@@ -35,13 +35,43 @@ const (
 
 // Config is the complete, validated configuration of the gateway.
 type Config struct {
-	Environment Environment
-	HTTP        HTTP
-	Database    Database
-	Auth        Auth
-	Readiness   Readiness
-	Log         Log
+	Environment  Environment
+	HTTP         HTTP
+	Database     Database
+	Auth         Auth
+	Measurements Measurements
+	Idempotency  Idempotency
+	Readiness    Readiness
+	Log          Log
 }
+
+// Measurements bounds measurement ingestion (SPECIFICATIONS.md sections 12,
+// 17 and 89).
+type Measurements struct {
+	// MaxBatchSize is the largest number of readings one batch request may
+	// carry.
+	MaxBatchSize int
+	// MaxMetadataBytes bounds a reading's metadata object, measured as
+	// compact JSON. The schema caps the stored form at 4096 bytes.
+	MaxMetadataBytes int
+	// MaxFutureSkew is how far ahead of the server clock recorded_at may lie.
+	MaxFutureSkew time.Duration
+}
+
+// Idempotency configures Idempotency-Key handling (section 24).
+type Idempotency struct {
+	// TTL is how long a recorded request stays replayable.
+	TTL time.Duration
+}
+
+// Bounds enforced on measurement and idempotency settings.
+const (
+	MaxMeasurementBatchSize    = 10000
+	MaxMeasurementMetadataSize = 4096
+	MaxMeasurementFutureSkew   = time.Hour
+	MinIdempotencyTTL          = time.Minute
+	MaxIdempotencyTTL          = 7 * 24 * time.Hour
+)
 
 // Database configures the PostgreSQL connection pool.
 type Database struct {
@@ -178,6 +208,14 @@ func Load(lookup Lookup) (Config, error) {
 			JWT:      p.jwt(),
 			Password: p.passwordHash(),
 		},
+		Measurements: Measurements{
+			MaxBatchSize:     int(p.uint32("MEASUREMENT_MAX_BATCH_SIZE", 1000)),
+			MaxMetadataBytes: int(p.uint32("MEASUREMENT_MAX_METADATA_BYTES", 2048)),
+			MaxFutureSkew:    p.duration("MEASUREMENT_MAX_FUTURE_SKEW", 5*time.Minute),
+		},
+		Idempotency: Idempotency{
+			TTL: p.duration("IDEMPOTENCY_TTL", 24*time.Hour),
+		},
 		Readiness: Readiness{
 			Timeout: p.duration("READINESS_TIMEOUT", 2*time.Second),
 		},
@@ -200,6 +238,18 @@ func Load(lookup Lookup) (Config, error) {
 	if cfg.HTTP.RequestTimeout >= cfg.HTTP.WriteTimeout {
 		p.fail("HTTP_REQUEST_TIMEOUT: must be shorter than HTTP_WRITE_TIMEOUT (%s >= %s)",
 			cfg.HTTP.RequestTimeout, cfg.HTTP.WriteTimeout)
+	}
+	if cfg.Measurements.MaxBatchSize > MaxMeasurementBatchSize {
+		p.fail("MEASUREMENT_MAX_BATCH_SIZE: must be at most %d", MaxMeasurementBatchSize)
+	}
+	if cfg.Measurements.MaxMetadataBytes > MaxMeasurementMetadataSize {
+		p.fail("MEASUREMENT_MAX_METADATA_BYTES: must be at most %d", MaxMeasurementMetadataSize)
+	}
+	if cfg.Measurements.MaxFutureSkew > MaxMeasurementFutureSkew {
+		p.fail("MEASUREMENT_MAX_FUTURE_SKEW: must be at most %s", MaxMeasurementFutureSkew)
+	}
+	if cfg.Idempotency.TTL < MinIdempotencyTTL || cfg.Idempotency.TTL > MaxIdempotencyTTL {
+		p.fail("IDEMPOTENCY_TTL: must be between %s and %s", MinIdempotencyTTL, MaxIdempotencyTTL)
 	}
 	if cfg.Environment.Deployed() && cfg.Database.URL != "" && !databaseURLRequiresTLS(cfg.Database.URL) {
 		p.fail("DATABASE_URL: sslmode must be require, verify-ca or verify-full in %s (SPECIFICATIONS.md section 30)", cfg.Environment)

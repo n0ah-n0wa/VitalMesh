@@ -149,7 +149,9 @@ func (t *Tokens) Verify(token string) (Claims, error) {
 	if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
 		return Claims{}, ErrTokenMalformed
 	}
-	enc := base64.RawURLEncoding
+	// Strict decoding accepts only the canonical encoding of each segment,
+	// so one token has exactly one string form.
+	enc := base64.RawURLEncoding.Strict()
 
 	rawHeader, err := enc.DecodeString(parts[0])
 	if err != nil {

@@ -54,7 +54,7 @@ func (rt *Router) Handle(method, path string, h http.Handler) {
 	if !registered {
 		rt.paths.Handle(path, http.NotFoundHandler())
 	}
-	rt.mux.Handle(method+" "+path, h)
+	rt.mux.Handle(method+" "+path, middleware.RecordRoute(h))
 }
 
 // HandleFunc is Handle for a handler function.

@@ -50,15 +50,17 @@ func EncodeCursor(payload any) (string, error) {
 func DecodeCursor(cursor string, payload any) error {
 	data, err := base64.RawURLEncoding.DecodeString(cursor)
 	if err != nil {
-		return invalidCursor()
+		return ErrInvalidCursor()
 	}
 	if err := json.Unmarshal(data, payload); err != nil {
-		return invalidCursor()
+		return ErrInvalidCursor()
 	}
 	return nil
 }
 
-func invalidCursor() *domain.Error {
+// ErrInvalidCursor is the error for a cursor this API did not produce or
+// whose fields are not acceptable.
+func ErrInvalidCursor() *domain.Error {
 	return &domain.Error{
 		Kind:    domain.KindValidation,
 		Code:    "INVALID_CURSOR",

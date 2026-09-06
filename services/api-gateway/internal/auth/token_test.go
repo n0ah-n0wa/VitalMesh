@@ -250,8 +250,8 @@ func TestVerifyDetectsTampering(t *testing.T) {
 	cases := map[string]string{
 		"role escalated":       parts[0] + "." + segment(t, escalated) + "." + parts[2],
 		"expiry extended":      parts[0] + "." + segment(t, extended) + "." + parts[2],
-		"signature bit flip":   parts[0] + "." + parts[1] + "." + flipLastChar(parts[2]),
-		"signature truncated":  parts[0] + "." + parts[1] + "." + parts[2][:len(parts[2])-4],
+		"signature bit flip":   parts[0] + "." + parts[1] + "." + flipChar(parts[2], 10),
+		"signature truncated":  parts[0] + "." + parts[1] + "." + parts[2][:40], // canonical length: a valid encoding of a shorter signature
 		"signature from other": parts[0] + "." + parts[1] + "." + strings.Split(forgedToken, ".")[2],
 		"forged with own key":  forgedToken,
 		"header kid swapped":   segment(t, map[string]any{"alg": "HS256", "typ": "JWT", "kid": "k1"}) + "." + parts[1] + "." + parts[2],
@@ -362,11 +362,13 @@ func signedSegments(secret []byte, headSeg, payloadSeg string) string {
 	return input + "." + base64.RawURLEncoding.EncodeToString(sign(secret, input))
 }
 
-func flipLastChar(s string) string {
-	last := s[len(s)-1]
+// flipChar changes the character at index i to a different base64url
+// character. The index must not be the last one: there the low bits are
+// padding and a change can decode to the same bytes.
+func flipChar(s string, i int) string {
 	replacement := byte('A')
-	if last == 'A' {
+	if s[i] == 'A' {
 		replacement = 'B'
 	}
-	return s[:len(s)-1] + string(replacement)
+	return s[:i] + string(replacement) + s[i+1:]
 }

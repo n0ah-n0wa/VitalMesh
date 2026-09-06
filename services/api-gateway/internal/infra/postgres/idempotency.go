@@ -95,3 +95,12 @@ func (r *Idempotency) DeleteExpired(ctx context.Context, now time.Time, limit in
 	}
 	return tag.RowsAffected(), nil
 }
+
+// Delete removes a record, for example one whose request failed before a
+// response could be stored, so that the key can be used again.
+func (r *Idempotency) Delete(ctx context.Context, id uuid.UUID) error {
+	if _, err := r.db.Exec(ctx, `DELETE FROM idempotency_keys WHERE id = $1`, id); err != nil {
+		return mapError(err)
+	}
+	return nil
+}

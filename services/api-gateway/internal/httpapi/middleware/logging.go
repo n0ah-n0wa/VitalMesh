@@ -13,6 +13,7 @@ func Logging(logger *slog.Logger) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
+			r, holder := ensureRouteHolder(r)
 			rw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
 
 			next.ServeHTTP(rw, r)
@@ -20,6 +21,7 @@ func Logging(logger *slog.Logger) Middleware {
 			logger.InfoContext(r.Context(), "request",
 				"method", r.Method,
 				"path", r.URL.Path,
+				"route", holder.route(),
 				"status", rw.status,
 				"bytes", rw.bytes,
 				"duration_ms", time.Since(start).Milliseconds(),

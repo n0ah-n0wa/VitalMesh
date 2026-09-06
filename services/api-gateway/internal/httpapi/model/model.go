@@ -4,6 +4,7 @@
 package model
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
@@ -102,4 +103,62 @@ type User struct {
 	Role      string    `json:"role"`
 	Status    string    `json:"status"`
 	CreatedAt time.Time `json:"created_at"`
+}
+
+// CreatePatientRequest is the body of POST /patients.
+type CreatePatientRequest struct {
+	ExternalReference string `json:"external_reference"`
+	// DateOfBirth is a calendar date in YYYY-MM-DD form.
+	DateOfBirth string `json:"date_of_birth"`
+	Sex         string `json:"sex"`
+}
+
+// Patient is the client view of a synthetic patient (SPECIFICATIONS.md
+// section 11). DateOfBirth is a calendar date in YYYY-MM-DD form.
+type Patient struct {
+	ID                uuid.UUID `json:"id"`
+	ExternalReference string    `json:"external_reference"`
+	DateOfBirth       string    `json:"date_of_birth"`
+	Sex               string    `json:"sex"`
+	Status            string    `json:"status"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// CreateMeasurementRequest is the body of POST /measurements and one item
+// of POST /measurements/batch. Value is a pointer so that an absent value
+// is distinguishable from zero. RecordedAt is an RFC 3339 timestamp.
+type CreateMeasurementRequest struct {
+	PatientID  string          `json:"patient_id"`
+	Type       string          `json:"type"`
+	Value      *float64        `json:"value"`
+	Unit       string          `json:"unit"`
+	RecordedAt string          `json:"recorded_at"`
+	Source     string          `json:"source"`
+	Metadata   json.RawMessage `json:"metadata,omitempty"`
+}
+
+// CreateMeasurementBatchRequest is the body of POST /measurements/batch.
+type CreateMeasurementBatchRequest struct {
+	Items []CreateMeasurementRequest `json:"items"`
+}
+
+// Measurement is the client view of one reading (SPECIFICATIONS.md
+// section 12).
+type Measurement struct {
+	ID         uuid.UUID       `json:"id"`
+	PatientID  uuid.UUID       `json:"patient_id"`
+	Type       string          `json:"type"`
+	Value      float64         `json:"value"`
+	Unit       string          `json:"unit"`
+	RecordedAt time.Time       `json:"recorded_at"`
+	CreatedAt  time.Time       `json:"created_at"`
+	Source     string          `json:"source"`
+	Metadata   json.RawMessage `json:"metadata"`
+}
+
+// MeasurementBatch is returned by POST /measurements/batch: the stored
+// readings in input order.
+type MeasurementBatch struct {
+	Items []Measurement `json:"items"`
 }

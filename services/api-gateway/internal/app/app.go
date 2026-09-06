@@ -20,6 +20,10 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/measurement"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/patient"
 )
 
 // ServiceName identifies the gateway in logs and health responses.
@@ -36,6 +40,11 @@ type App struct {
 // New wires the application. The database pool connects lazily, so New
 // succeeds even when PostgreSQL is down; readiness reports the outage.
 func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version string) (*App, error) {
+	// Observability ports. The observability phase binds Prometheus and
+	// OpenTelemetry here; until then nothing is recorded.
+	var rec metrics.Recorder = metrics.Noop{}
+	var tr tracing.Tracer = tracing.Noop{}
+
 	pool, err := postgres.Connect(ctx, cfg.Database)
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
@@ -55,11 +64,18 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		return nil, fmt.Errorf("auth: %w", err)
 	}
 
+	patients := patient.NewService(postgres.NewPatientStore(pool), logger, patient.Options{Metrics: rec, Tracer: tr})
+	measurements := measurement.NewService(postgres.NewMeasurementStore(pool), cfg.Measurements, logger, measurement.Options{Metrics: rec, Tracer: tr})
+
 	handlers := httpapi.Handlers{
 		Health:       handler.NewHealth(ServiceName, version, readiness, logger),
 		Auth:         handler.NewAuth(authService, logger),
+		Patients:     handler.NewPatients(patients, logger),
+		Measurements: handler.NewMeasurements(measurements, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
+		Idempotency:  middleware.Idempotency(postgres.NewIdempotencyStore(pool), cfg.Idempotency.TTL, logger),
 		Policy:       authz.Default(),
+		Metrics:      rec,
 	}
 	root, err := httpapi.NewHandler(cfg.HTTP, logger, handlers)
 	if err != nil {

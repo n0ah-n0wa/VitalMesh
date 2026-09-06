@@ -10,20 +10,28 @@ internal/
   app/                      composition root: wires packages together, runs the lifecycle
   auth/                     application service: password hashing, access tokens, login, principal
   authz/                    authorization policy (role -> permissions) and the route -> permission table
+  patient/                  application service: Patient API use cases over a Store port
+    patienttest/            in-memory Store for service and API tests
+  measurement/              application service: Measurement API, type catalogue, strict validation, batches
+    measurementtest/        in-memory Store for service and API tests
+  idempotency/              Idempotency-Key rules (key shape, request fingerprint) and the Store port
+    idempotencytest/        in-memory Store for middleware and API tests
   config/                   typed configuration loaded from the environment
   domain/                   vocabulary shared by every feature (error model, entities)
   health/                   application service: readiness evaluation over Checker ports
   httpapi/                  HTTP transport: router, route groups, route table, server lifecycle
     handler/                HTTP handlers (HTTP <-> application translation only)
-    middleware/             request ID, security headers, logging, timeout, recovery, body limit, authentication, authorization
-    model/                  request/response wire models (error envelope, pages, health, login, user)
+    middleware/             request ID, security headers, logging, metrics, timeout, recovery, body limit, authentication, authorization, idempotency
+    model/                  request/response wire models (error envelope, pages, health, login, user, patient, measurement)
     request/                JSON body decoding and pagination parameter parsing
     respond/                JSON and error-envelope writers, domain error -> status mapping
   pagination/               cursor primitives and page-size bounds
   validate/                 input validation accumulator producing domain validation errors
-  infra/postgres/           PostgreSQL: pool, migrator, transactions, repositories, error mapping
+  infra/postgres/           PostgreSQL: pool, migrator, transactions, repositories, error mapping, patient store
     postgrestest/           per-test database helper for integration tests
-  observability/logging/    structured logging setup
+  observability/logging/    structured logging setup (request_id and trace_id from the context)
+  observability/metrics/    metrics port (Recorder) with a no-op default; bounded labels only
+  observability/tracing/    tracing port (Tracer, Span) with a no-op default; trace id carriage
   requestid/                request identifier generation, validation and context carriage
   buildinfo/                version injected at link time
 migrations/                 embedded SQL migrations (see docs/DATABASE.md)
@@ -34,9 +42,9 @@ migrations/                 embedded SQL migrations (see docs/DATABASE.md)
 | Layer | Packages | May import |
 |---|---|---|
 | Transport | `httpapi` and its subpackages | application services, `domain`, `config`, `requestid` |
-| Application | `health`, `auth`, `authz`, and one package per feature as they arrive | `domain`, `config`, `validate`, `requestid`, `auth` (for `authz`), ports it declares itself |
+| Application | `health`, `auth`, `authz`, `patient`, and one package per feature as they arrive | `domain`, `config`, `validate`, `requestid`, `pagination`, `auth` (for the principal), the `observability` ports, ports it declares itself |
 | Domain | `domain` | nothing inside the service |
-| Infrastructure | `observability/logging`, `infra/postgres`; later `infra/redis`, `infra/processor` | the application ports it implements, `domain`, `config` |
+| Infrastructure | `observability/logging`, `infra/postgres`; later `infra/redis`, `infra/processor` | the application ports it implements (and their input types), `domain`, `config` |
 | Composition | `app`, `cmd/api-gateway` | everything |
 
 - Dependencies point inward: transport -> application -> domain. Infrastructure implements application interfaces and is only referenced by `app`.
@@ -74,6 +82,10 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `PASSWORD_HASH_TIME` | `3` | Argon2id iterations (1–100) |
 | `PASSWORD_HASH_PARALLELISM` | `1` | Argon2id lanes (1–64) |
 | `PASSWORD_HASH_MAX_CONCURRENT` | `4` | hash computations allowed at once (1–1024); bounds login memory to this × `PASSWORD_HASH_MEMORY_KIB`. Requests beyond it wait until their request timeout. |
+| `MEASUREMENT_MAX_BATCH_SIZE` | `1000` | readings per batch request (1–10000) |
+| `MEASUREMENT_MAX_METADATA_BYTES` | `2048` | reading metadata as compact JSON (1–4096; the schema caps the stored form at 4096) |
+| `MEASUREMENT_MAX_FUTURE_SKEW` | `5m` | how far ahead of the server clock `recorded_at` may be (at most `1h`) |
+| `IDEMPOTENCY_TTL` | `24h` | how long an `Idempotency-Key` stays replayable (`1m`–`168h`) |
 | `READINESS_TIMEOUT` | `2s` | bound for the whole `/ready` evaluation |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
@@ -86,6 +98,10 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `GET /ready` | readiness; `200` when every registered check passes (currently `postgres`), otherwise `503` with `"status":"not_ready"`. Check failure causes are logged, not returned. |
 | `POST /api/v1/auth/login` | exchanges `{"email","password"}` for an access token (see [docs/API.md](../../docs/API.md#authentication)) |
 | `GET /api/v1/auth/me` | the account behind the presented token; requires `Authorization: Bearer` |
+| `POST /api/v1/patients`, `GET /api/v1/patients`, `GET /api/v1/patients/{patient_id}`, `DELETE /api/v1/patients/{patient_id}` | the Patient API (see [docs/API.md](../../docs/API.md#patients)); soft delete, audit record in the same transaction |
+| `POST /api/v1/measurements`, `POST /api/v1/measurements/batch`, `GET /api/v1/measurements/{measurement_id}`, `GET /api/v1/patients/{patient_id}/measurements`, `DELETE /api/v1/measurements/{measurement_id}` | the Measurement API (see [docs/API.md](../../docs/API.md#measurements)); strict validation against the type catalogue, all-or-nothing batches, one audit record per reading |
+
+Write operations that could duplicate state (`POST /patients`, `POST /measurements`, `POST /measurements/batch`) accept an `Idempotency-Key`; see [docs/API.md](../../docs/API.md#idempotency).
 
 The binary also carries the schema, `api-gateway migrate up|down|version|force` (see [docs/DATABASE.md](../../docs/DATABASE.md)), and creates accounts: `api-gateway users create <email> <ADMIN|OPERATOR|USER>` reads the password (at least 12 characters) from standard input, hashes it with the configured parameters, inserts the user and a `USER_CREATED` audit entry in one transaction. It needs `DATABASE_URL` and honours `PASSWORD_HASH_*`. This is how the first administrator is bootstrapped; there is never a default account.
 
@@ -129,6 +145,21 @@ The client-facing conventions are specified in [docs/API.md](../../docs/API.md).
 - **Output.** `respond.JSON` encodes before writing and sets `Content-Length`; `respond.Error` maps `domain.Kind` to a status, includes `details`, treats context deadline and cancellation explicitly, and turns anything unclassified into a logged generic 500.
 - **Pagination.** `model.NewPage` builds the `items`/`next_cursor`/`has_more` envelope; `pagination.EncodeCursor`/`DecodeCursor` give repositories opaque URL-safe keyset cursors.
 
+## Feature services
+
+A feature is an application package (`patient` is the template) with a `Service` whose methods are the API's use cases, a `Store` interface it declares for persistence, validation through `validate`, client-safe errors with the feature's own codes, and audit events passed to the store so that the PostgreSQL implementation writes them in the same transaction as the state change. The handler in `httpapi/handler` only decodes, calls the service and encodes; the store in `infra/postgres` only composes repositories inside `WithTx`. Tests: service tests over `patienttest.MemoryStore`, API tests through `httpapi.NewHandler` with the same memory store, store tests against PostgreSQL, and one end-to-end test in `app` with real login.
+
+## Measurements and idempotency
+
+- **Type catalogue** (`measurement.Catalog`) mirrors the `measurement_types` table: canonical unit and technical range per type. The service validates against the catalogue so that every failing field is reported at once with the `MEASUREMENT_VALIDATION_FAILED` code of section 25; the database trigger enforces the same rules independently, and an integration test keeps the two identical.
+- **Batches** are validated item by item (`items[i].field`), checked for duplicates within the batch and for patient existence per distinct patient, then stored in one transaction with one `MEASUREMENT_CREATED` record per reading. A reading the database still rejects (a duplicate of a stored one, say) is reported by index through `postgres.BatchItemError` and nothing from the batch is kept. Batch sizes are reported to the metrics port.
+- **Idempotency** (`middleware.Idempotency`) implements section 24 over the `idempotency_keys` table (OQ-10): the key is scoped to `(account, method, path)`, the request fingerprint is a SHA-256 of method, path and body bytes, the first response is stored (jsonb) and replayed, mismatched bodies and in-flight duplicates are refused, `5xx` outcomes release the key, and expired records are replaced lazily. Which operations take part is declared once in `httpapi.idempotentOperations`; the middleware runs inside authentication and authorization so that a key can never act for another account. The retention job that purges expired rows belongs to the retention phase; `Idempotency.DeleteExpired` is ready for it.
+
+## Observability hooks
+
+- **Metrics** (`observability/metrics.Recorder`): `middleware.Metrics` records every request as method, matched route pattern, status and duration; services record each operation with a closed outcome vocabulary (`ok`, `invalid`, `not_found`, `conflict`, `denied`, `error`, `cancelled`). Route patterns come from the router, never from request paths, so labels stay bounded and identifiers never become labels (SPECIFICATIONS.md section 41). `Noop` is wired until the observability phase binds Prometheus.
+- **Tracing** (`observability/tracing.Tracer`): services open one span per operation and record its error; a real tracer places the trace id in the context with `tracing.WithTraceID`, and the logger emits it as `trace_id`. `Noop` is wired until OpenTelemetry arrives.
+
 ## Request logs
 
-One JSON record per request: `timestamp`, `level`, `service`, `version`, `environment`, `request_id`, `message` (`"request"`), `method`, `path`, `status`, `bytes`, `duration_ms`. Clients may supply `X-Request-ID` (1–128 characters of `[A-Za-z0-9._-]`); other values are replaced. The effective ID is echoed in the response header.
+One JSON record per request: `timestamp`, `level`, `service`, `version`, `environment`, `request_id`, `trace_id` (when a tracer set one), `message` (`"request"`), `method`, `path`, `route` (the matched pattern, or `unmatched`), `status`, `bytes`, `duration_ms`. Clients may supply `X-Request-ID` (1–128 characters of `[A-Za-z0-9._-]`); other values are replaced. The effective ID is echoed in the response header. Services add their own records (`patient created`, `patient deleted`) carrying `request_id`, the resource id and the acting `user_id`; never payload contents.

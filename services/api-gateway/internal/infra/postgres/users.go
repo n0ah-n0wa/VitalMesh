@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -123,17 +124,28 @@ func collectAll[T any](rows pgx.Rows, err error) ([]T, error) {
 	return items, nil
 }
 
+// BatchItemError reports which queued statement of a batch failed. It wraps
+// the mapped error, so errors.As still finds the *domain.Error.
+type BatchItemError struct {
+	Index int
+	Err   error
+}
+
+func (e *BatchItemError) Error() string { return fmt.Sprintf("batch item %d: %v", e.Index, e.Err) }
+func (e *BatchItemError) Unwrap() error { return e.Err }
+
 // collectBatch reads one row from each of n queued batch statements. The
 // batch is closed in every case; when a statement fails the remaining
-// results are discarded and the error is returned.
+// results are discarded and the error is returned as a BatchItemError
+// naming the statement.
 func collectBatch[T any](results pgx.BatchResults, n int) ([]T, error) {
 	out := make([]T, 0, n)
-	for range n {
+	for i := range n {
 		rows, err := results.Query()
 		item, err := collectOne[T](rows, err)
 		if err != nil {
 			_ = results.Close()
-			return nil, err
+			return nil, &BatchItemError{Index: i, Err: err}
 		}
 		out = append(out, item)
 	}

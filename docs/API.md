@@ -57,6 +57,9 @@ Codes defined by the platform (feature endpoints add their own):
 | `INVALID_CREDENTIALS` | 401 | login with an unknown email or wrong password (deliberately indistinguishable) |
 | `ACCOUNT_DISABLED` | 403 | the credentials or token are valid but the account is disabled |
 | `PERMISSION_DENIED` | 403 | the token is valid but the account's role does not permit the operation |
+| `INVALID_IDEMPOTENCY_KEY` | 422 | the `Idempotency-Key` header is not 1–255 characters of `[A-Za-z0-9._:-]` |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | the key was already used by this account for a different request |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | the first request under this key is still running; `Retry-After` says when to retry |
 
 ## Authentication
 
@@ -112,6 +115,110 @@ Outcomes, in the order they are checked:
 
 A role change takes effect for tokens issued after it; tokens live 15 minutes by default.
 
+## Patients
+
+Patients are synthetic entities (SPECIFICATIONS.md section 11); the API stores and returns identifiers and demographics and applies no clinical logic. All four operations require a token; the Authorization matrix above says which roles may write.
+
+| Operation | Success | Notes |
+|---|---|---|
+| `POST /api/v1/patients` | `201` with the patient and a `Location` header | OPERATOR or ADMIN |
+| `GET /api/v1/patients/{patient_id}` | `200` with the patient | any role |
+| `GET /api/v1/patients` | `200` with a page (see Pagination) in creation order | any role; deleted patients are never listed |
+| `DELETE /api/v1/patients/{patient_id}` | `204` | OPERATOR or ADMIN; soft delete |
+
+Request body of `POST`:
+
+```json
+{"external_reference": "synthetic-0001", "date_of_birth": "1984-02-29", "sex": "FEMALE"}
+```
+
+- `external_reference`: required, 1–128 characters after trimming, no control characters, unique across patients.
+- `date_of_birth`: required, a calendar date `YYYY-MM-DD` between `1900-01-01` and today (UTC).
+- `sex`: required, one of `FEMALE`, `MALE`, `OTHER`, `UNKNOWN`.
+
+Patient representation:
+
+```json
+{
+  "id": "…",
+  "external_reference": "synthetic-0001",
+  "date_of_birth": "1984-02-29",
+  "sex": "FEMALE",
+  "status": "ACTIVE",
+  "created_at": "2026-09-06T12:00:00Z",
+  "updated_at": "2026-09-06T12:00:00Z"
+}
+```
+
+`status` is `ACTIVE`, `INACTIVE` or `DELETED`. Deletion is a soft delete: the record keeps its identity so that measurements, jobs and results stay valid, and `updated_at` moves. After deletion the patient answers `404` to OPERATOR and USER and is returned with `"status":"DELETED"` to ADMIN; deleting it again is `409`.
+
+| Code | Status | When |
+|---|---|---|
+| `PATIENT_NOT_FOUND` | 404 | no patient has that id, the id is not a UUID, or the patient is deleted and the caller is not ADMIN |
+| `PATIENT_ALREADY_EXISTS` | 409 | another patient has the same `external_reference` |
+| `PATIENT_ALREADY_DELETED` | 409 | the patient was deleted before |
+
+Every creation and deletion writes an audit record (`PATIENT_CREATED`, `PATIENT_DELETED`) with the acting account and the request's `request_id`, in the same transaction as the change: if the record cannot be written the change is not made.
+
+## Measurements
+
+Measurements are synthetic readings attached to a patient (SPECIFICATIONS.md section 12). The API validates and stores them; it applies no clinical interpretation.
+
+| Operation | Success | Notes |
+|---|---|---|
+| `POST /api/v1/measurements` | `201` with the reading and a `Location` header | OPERATOR or ADMIN; accepts `Idempotency-Key` |
+| `POST /api/v1/measurements/batch` | `201` with `{"items":[…]}` in input order | OPERATOR or ADMIN; all readings stored or none; accepts `Idempotency-Key` |
+| `GET /api/v1/measurements/{measurement_id}` | `200` with the reading | any role |
+| `GET /api/v1/patients/{patient_id}/measurements` | `200` with a page in recording order | any role; filters `type`, `from`, `to` |
+| `DELETE /api/v1/measurements/{measurement_id}` | `204` | OPERATOR or ADMIN; hard delete, recorded in the audit log |
+
+Request body of `POST /api/v1/measurements` (a batch wraps the same objects in `{"items":[…]}`):
+
+```json
+{
+  "patient_id": "…",
+  "type": "HEART_RATE",
+  "value": 72,
+  "unit": "bpm",
+  "recorded_at": "2026-09-06T11:59:00Z",
+  "source": "synthetic-monitor",
+  "metadata": {"lead": "II"}
+}
+```
+
+Validation is strict; every failing field is reported in one `422 MEASUREMENT_VALIDATION_FAILED` response, batch items as `items[i].field`:
+
+- `patient_id`: required UUID of an existing, non-deleted patient.
+- `type` and `unit`: `type` is one of the table below and `unit` must be exactly that type's canonical unit. No unit conversion is performed.
+- `value`: required finite number within the type's technical range, inclusive. The ranges reject values that cannot be a reading at all; they are not medical thresholds.
+- `recorded_at`: required RFC 3339 timestamp with a UTC offset, not before `1900-01-01T00:00:00Z` and not more than 5 minutes (configurable) ahead of the server clock. Stored and returned in UTC.
+- `source`: required, 1–64 characters after trimming, no control characters. The same reading (patient, type, `recorded_at`, source) cannot be stored twice: `409 MEASUREMENT_ALREADY_EXISTS`, naming the batch item where applicable.
+- `metadata`: optional JSON object (absent or `null` means `{}`), at most 2048 bytes as compact JSON (configurable, hard limit 4096) and at most 8 levels deep.
+- Batches: 1 to 1000 items (configurable). Two items describing the same reading are rejected (`items[j]` "duplicates items[i]"). A batch is stored in one transaction with one audit record per reading; if any item is rejected, none is stored.
+
+| Type | Unit | Range |
+|---|---|---|
+| `HEART_RATE` | `bpm` | 0 – 300 |
+| `BLOOD_PRESSURE_SYSTOLIC` | `mmHg` | 0 – 300 |
+| `BLOOD_PRESSURE_DIASTOLIC` | `mmHg` | 0 – 200 |
+| `SPO2` | `%` | 0 – 100 |
+| `BODY_TEMPERATURE` | `C` | 20 – 45 |
+| `BLOOD_GLUCOSE` | `mg/dL` | 0 – 1000 |
+| `RESPIRATORY_RATE` | `breaths/min` | 0 – 100 |
+
+Listing `GET /api/v1/patients/{patient_id}/measurements` accepts `type` (one of the table), `from` (inclusive) and `to` (exclusive) as RFC 3339 timestamps, plus `limit` and `cursor`. Readings are ordered by `recorded_at` then id, so pages are stable under concurrent inserts. A deleted patient answers `404 PATIENT_NOT_FOUND` except to ADMIN, and its readings follow the same rule on `GET` and `DELETE /api/v1/measurements/{measurement_id}`: `404 MEASUREMENT_NOT_FOUND` for OPERATOR and USER, visible to ADMIN.
+
+`recorded_at` is stored with microsecond precision; finer digits are dropped on input, and two readings that differ only below a microsecond are the same reading.
+
+| Code | Status | When |
+|---|---|---|
+| `MEASUREMENT_VALIDATION_FAILED` | 422 | one or more fields violate the rules above; see `details` |
+| `MEASUREMENT_ALREADY_EXISTS` | 409 | the same patient, type, `recorded_at` and source is already stored |
+| `MEASUREMENT_NOT_FOUND` | 404 | no reading has that id, or the id is not a UUID |
+| `PATIENT_NOT_FOUND` | 404 | listing readings of an unknown or invisible patient |
+
+Every stored or deleted reading writes an audit record (`MEASUREMENT_CREATED`, `MEASUREMENT_DELETED`) in the same transaction as the change, with the acting account, the request's `request_id`, and the patient and type in its metadata. Request logs never include reading values or metadata.
+
 ## Status codes
 
 | Status | Meaning |
@@ -153,6 +260,18 @@ Clients may send `X-Request-ID` (1–128 characters of `[A-Za-z0-9._-]`). The se
 ## Response headers
 
 Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store`. HSTS is applied by the TLS terminator in deployed environments.
+
+## Idempotency
+
+Write operations that could create duplicate state accept an `Idempotency-Key` header (SPECIFICATIONS.md section 24): `POST /api/v1/patients`, `POST /api/v1/measurements` and `POST /api/v1/measurements/batch`. The header is optional; without it every request runs.
+
+- The key is 1–255 characters of `[A-Za-z0-9._:-]`, chosen by the client (a UUID is a good choice), and is scoped to the calling account and the operation.
+- The first request under a key runs normally and its response (status and body) is stored for 24 hours by default.
+- A repeat with the same body returns the stored response with the header `Idempotency-Replayed: true`. The replay is the same JSON document; byte-for-byte equality is not promised.
+- A repeat with a different body is refused with `422 IDEMPOTENCY_KEY_REUSED`; the original state is untouched.
+- A repeat while the first request is still running is refused with `409 IDEMPOTENCY_IN_PROGRESS` and `Retry-After`.
+- Responses with status `4xx` are stored and replayed like successes: they are the final answer to that request. A `5xx` leaves no record, so the client may retry with the same key.
+- Only the status and body are stored. A replay carries the current request's `X-Request-ID` header while an error body still names the original request's `request_id`, and response headers such as `Location` are not repeated.
 
 ## Timeouts
 

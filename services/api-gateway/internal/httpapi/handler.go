@@ -9,6 +9,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
 )
 
 // APIv1 is the prefix of the current public API version. Breaking changes
@@ -17,12 +18,19 @@ const APIv1 = "/api/v1"
 
 // Handlers are the feature handlers and guards the route table wires.
 type Handlers struct {
-	Health *handler.Health
-	Auth   *handler.Auth
+	Health       *handler.Health
+	Auth         *handler.Auth
+	Patients     *handler.Patients
+	Measurements *handler.Measurements
 	// Authenticate establishes the principal on routes that need one.
 	Authenticate middleware.Middleware
+	// Idempotency applies Idempotency-Key handling to the write operations
+	// listed in idempotentOperations; nil disables it.
+	Idempotency middleware.Middleware
 	// Policy decides what each role may do.
 	Policy *authz.Policy
+	// Metrics receives request measurements; nil means none.
+	Metrics metrics.Recorder
 }
 
 // operations binds implemented handlers to the operations of
@@ -30,11 +38,36 @@ type Handlers struct {
 // the table decides how each is guarded.
 func (h Handlers) operations() map[authz.RouteKey]http.Handler {
 	ops := make(map[authz.RouteKey]http.Handler)
+	bind := func(method, path string, f http.HandlerFunc) {
+		ops[authz.RouteKey{Method: method, Path: path}] = f
+	}
 	if h.Auth != nil {
-		ops[authz.RouteKey{Method: http.MethodPost, Path: "/auth/login"}] = http.HandlerFunc(h.Auth.Login)
-		ops[authz.RouteKey{Method: http.MethodGet, Path: "/auth/me"}] = http.HandlerFunc(h.Auth.Me)
+		bind(http.MethodPost, "/auth/login", h.Auth.Login)
+		bind(http.MethodGet, "/auth/me", h.Auth.Me)
+	}
+	if h.Patients != nil {
+		bind(http.MethodPost, "/patients", h.Patients.Create)
+		bind(http.MethodGet, "/patients", h.Patients.List)
+		bind(http.MethodGet, "/patients/{patient_id}", h.Patients.Get)
+		bind(http.MethodDelete, "/patients/{patient_id}", h.Patients.Delete)
+	}
+	if h.Measurements != nil {
+		bind(http.MethodPost, "/measurements", h.Measurements.Create)
+		bind(http.MethodPost, "/measurements/batch", h.Measurements.CreateBatch)
+		bind(http.MethodGet, "/measurements/{measurement_id}", h.Measurements.Get)
+		bind(http.MethodDelete, "/measurements/{measurement_id}", h.Measurements.Delete)
+		bind(http.MethodGet, "/patients/{patient_id}/measurements", h.Measurements.ListByPatient)
 	}
 	return ops
+}
+
+// idempotentOperations are the write operations that accept an
+// Idempotency-Key (SPECIFICATIONS.md section 24): those where a repeated
+// request could create duplicate state.
+var idempotentOperations = map[authz.RouteKey]bool{
+	{Method: http.MethodPost, Path: "/patients"}:           true,
+	{Method: http.MethodPost, Path: "/measurements"}:       true,
+	{Method: http.MethodPost, Path: "/measurements/batch"}: true,
 }
 
 // NewHandler assembles the route table and wraps it in the middleware chain.
@@ -47,17 +80,19 @@ func NewHandler(cfg config.HTTP, logger *slog.Logger, h Handlers) (http.Handler,
 	rt.HandleFunc(http.MethodGet, "/health", h.Health.Live)
 	rt.HandleFunc(http.MethodGet, "/ready", h.Health.Ready)
 
-	if err := Mount(rt.Group(APIv1), h.operations(), h.Authenticate, h.Policy, logger); err != nil {
+	if err := Mount(rt.Group(APIv1), h.operations(), h.Authenticate, h.Policy, h.Idempotency, logger); err != nil {
 		return nil, err
 	}
-	return Wrap(cfg, logger, rt), nil
+	return Wrap(cfg, logger, h.Metrics, rt), nil
 }
 
 // Mount registers every operation of authz.Routes that has a handler in
 // ops on g, guarded by its rule: public operations are registered bare,
-// every other one behind authenticate and a permission check under policy.
-// It fails when ops contains an operation the table does not list.
-func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middleware.Middleware, policy *authz.Policy, logger *slog.Logger) error {
+// every other one behind authenticate and a permission check under policy,
+// and the idempotent write operations additionally behind idempotent when
+// it is given. It fails when ops contains an operation the table does not
+// list.
+func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middleware.Middleware, policy *authz.Policy, idempotent middleware.Middleware, logger *slog.Logger) error {
 	if policy == nil {
 		return fmt.Errorf("mount routes: no authorization policy")
 	}
@@ -78,7 +113,11 @@ func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middlewar
 		if authenticate == nil {
 			return fmt.Errorf("mount routes: %s %s needs authentication but none is configured", rule.Method, rule.Path)
 		}
-		g.With(authenticate, middleware.Require(policy, rule.Permission, logger)).Handle(rule.Method, rule.Path, h)
+		guarded := g.With(authenticate, middleware.Require(policy, rule.Permission, logger))
+		if idempotent != nil && idempotentOperations[rule.Key()] {
+			guarded = guarded.With(idempotent)
+		}
+		guarded.Handle(rule.Method, rule.Path, h)
 	}
 	for k := range remaining {
 		return fmt.Errorf("mount routes: %s %s has a handler but no authorization rule", k.Method, k.Path)
@@ -87,13 +126,14 @@ func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middlewar
 }
 
 // Wrap applies the standard middleware chain to h, outermost first: request
-// identification, security headers, request logging, the request timeout,
-// panic recovery and the body size limit.
-func Wrap(cfg config.HTTP, logger *slog.Logger, h http.Handler) http.Handler {
+// identification, security headers, request logging, request metrics, the
+// request timeout, panic recovery and the body size limit.
+func Wrap(cfg config.HTTP, logger *slog.Logger, rec metrics.Recorder, h http.Handler) http.Handler {
 	return middleware.Chain(h,
 		middleware.RequestID(),
 		middleware.SecureHeaders(),
 		middleware.Logging(logger),
+		middleware.Metrics(rec),
 		middleware.Timeout(cfg.RequestTimeout),
 		middleware.Recover(logger),
 		middleware.BodyLimit(cfg.MaxBodyBytes),

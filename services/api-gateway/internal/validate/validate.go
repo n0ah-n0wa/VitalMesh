@@ -19,14 +19,26 @@ const (
 	Message = "The request is invalid."
 )
 
-// Validator collects field errors. The zero value is ready to use.
+// Validator collects field errors. The zero value is ready to use. Code and
+// Message, when set, replace the defaults in the error Err builds, so a
+// feature can report its own code (MEASUREMENT_VALIDATION_FAILED). Prefix,
+// when set, is prepended to every field name ("items[3]." for one element
+// of a batch).
 type Validator struct {
-	errs []domain.FieldError
+	Code    string
+	Message string
+	Prefix  string
+	errs    []domain.FieldError
 }
 
 // Add records a failure for field.
 func (v *Validator) Add(field, message string) {
-	v.errs = append(v.errs, domain.FieldError{Field: field, Message: message})
+	v.errs = append(v.errs, domain.FieldError{Field: v.Prefix + field, Message: message})
+}
+
+// Merge appends the failures other has recorded.
+func (v *Validator) Merge(other *Validator) {
+	v.errs = append(v.errs, other.errs...)
 }
 
 // Check records message for field unless ok.
@@ -90,10 +102,17 @@ func (v *Validator) Err() error {
 	if v.Valid() {
 		return nil
 	}
+	code, message := v.Code, v.Message
+	if code == "" {
+		code = Code
+	}
+	if message == "" {
+		message = Message
+	}
 	return &domain.Error{
 		Kind:    domain.KindValidation,
-		Code:    Code,
-		Message: Message,
+		Code:    code,
+		Message: message,
 		Details: slices.Clone(v.errs),
 	}
 }

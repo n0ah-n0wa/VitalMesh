@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/requestid"
 )
 
@@ -105,5 +106,19 @@ func TestTextFormat(t *testing.T) {
 	New(&buf, config.Log{Format: config.LogFormatText}, Service{Name: "s"}).Info("hi")
 	if !strings.Contains(buf.String(), "message=hi") || !strings.Contains(buf.String(), "service=s") {
 		t.Errorf("unexpected text output: %s", buf.String())
+	}
+}
+
+func TestTraceIDFromContextIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	logger := New(&buf, config.Log{Format: config.LogFormatJSON}, Service{Name: "svc"})
+	ctx := tracing.WithTraceID(requestid.NewContext(context.Background(), "req-9"), "trace-9")
+	logger.WithGroup("op").InfoContext(ctx, "hello", "k", "v")
+
+	line := buf.String()
+	for _, want := range []string{`"request_id":"req-9"`, `"trace_id":"trace-9"`, `"op":{"k":"v"}`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("log line lacks %s: %s", want, line)
+		}
 	}
 }
