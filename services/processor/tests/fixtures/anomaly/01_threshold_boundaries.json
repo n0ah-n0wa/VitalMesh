@@ -1,0 +1,34 @@
+{
+  "description": "Threshold tiers: values exactly on a bound are not anomalous; a value inside the critical tier but outside the warning tier is a warning; the reported threshold is the bound crossed.",
+  "rules": {
+    "rules": [
+      {
+        "name": "heart-rate-bounds",
+        "kind": "THRESHOLD",
+        "measurement_types": ["HEART_RATE"],
+        "tiers": {
+          "warning": {"lower": 50, "upper": 100},
+          "critical": {"lower": 40, "upper": 120}
+        }
+      }
+    ]
+  },
+  "parameters": {"measurement_types": ["HEART_RATE"], "windows": ["1h"], "percentiles": []},
+  "measurements": [
+    {"id": "m-1", "type": "HEART_RATE", "value": 50, "unit": "bpm", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "m-2", "type": "HEART_RATE", "value": 49, "unit": "bpm", "recorded_at": "2026-09-06T12:00:01Z"},
+    {"id": "m-3", "type": "HEART_RATE", "value": 100, "unit": "bpm", "recorded_at": "2026-09-06T12:00:02Z"},
+    {"id": "m-4", "type": "HEART_RATE", "value": 100.5, "unit": "bpm", "recorded_at": "2026-09-06T12:00:03Z"},
+    {"id": "m-5", "type": "HEART_RATE", "value": 40, "unit": "bpm", "recorded_at": "2026-09-06T12:00:04Z"},
+    {"id": "m-6", "type": "HEART_RATE", "value": 39, "unit": "bpm", "recorded_at": "2026-09-06T12:00:05Z"},
+    {"id": "m-7", "type": "HEART_RATE", "value": 121, "unit": "bpm", "recorded_at": "2026-09-06T12:00:06Z"},
+    {"id": "m-8", "type": "HEART_RATE", "value": 75, "unit": "bpm", "recorded_at": "2026-09-06T12:00:07Z"}
+  ],
+  "expected": [
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 49, "threshold": 50, "severity": "WARNING", "detected_at": "2026-09-06T12:00:01Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 100.5, "threshold": 100, "severity": "WARNING", "detected_at": "2026-09-06T12:00:03Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 40, "threshold": 50, "severity": "WARNING", "detected_at": "2026-09-06T12:00:04Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 39, "threshold": 40, "severity": "CRITICAL", "detected_at": "2026-09-06T12:00:05Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 121, "threshold": 120, "severity": "CRITICAL", "detected_at": "2026-09-06T12:00:06Z", "algorithm_version": "1.0.0"}
+  ]
+}

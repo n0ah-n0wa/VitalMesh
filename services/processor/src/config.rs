@@ -91,6 +91,13 @@ pub struct Log {
 pub struct Processing {
     pub max_concurrent_jobs: NonZeroUsize,
     pub max_batch_size: NonZeroUsize,
+    /// Largest number of readings one job may carry (SPECIFICATIONS.md
+    /// sections 17 and 89); jobs above it are refused before parsing.
+    pub max_job_measurements: NonZeroUsize,
+    /// Oldest `recorded_at` accepted, relative to the job's request time.
+    pub max_measurement_age: Duration,
+    /// Furthest `recorded_at` ahead of the job's request time accepted.
+    pub max_future_skew: Duration,
     pub timeout: Duration,
 }
 
@@ -182,6 +189,15 @@ impl Config {
                     "a positive integer",
                     |s| s.parse().ok(),
                 ),
+                max_job_measurements: p.value(
+                    "MAX_JOB_MEASUREMENTS",
+                    DEFAULT_MAX_JOB_MEASUREMENTS,
+                    "a positive integer",
+                    |s| s.parse().ok(),
+                ),
+                max_measurement_age: p
+                    .duration("MAX_MEASUREMENT_AGE", Duration::from_secs(400 * 24 * 3600)),
+                max_future_skew: p.duration("MAX_FUTURE_SKEW", Duration::from_secs(300)),
                 timeout: p.duration("PROCESSING_TIMEOUT", Duration::from_secs(300)),
             },
             shutdown_timeout: p.duration("SHUTDOWN_TIMEOUT", Duration::from_secs(30)),
@@ -199,6 +215,7 @@ impl Config {
 
 const DEFAULT_MAX_CONCURRENT_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 const DEFAULT_MAX_BATCH_SIZE: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
+const DEFAULT_MAX_JOB_MEASUREMENTS: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 
 fn default_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 8081))
@@ -288,6 +305,12 @@ mod tests {
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.processing.max_concurrent_jobs.get(), 4);
         assert_eq!(cfg.processing.max_batch_size.get(), 1000);
+        assert_eq!(cfg.processing.max_job_measurements.get(), 100_000);
+        assert_eq!(
+            cfg.processing.max_measurement_age,
+            Duration::from_secs(400 * 24 * 3600)
+        );
+        assert_eq!(cfg.processing.max_future_skew, Duration::from_secs(300));
         assert_eq!(cfg.processing.timeout, Duration::from_secs(300));
         assert_eq!(cfg.shutdown_timeout, Duration::from_secs(30));
     }

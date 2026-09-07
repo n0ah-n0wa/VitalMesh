@@ -36,6 +36,9 @@ fn test_config() -> Config {
         processing: Processing {
             max_concurrent_jobs: NonZeroUsize::MIN,
             max_batch_size: NonZeroUsize::MIN,
+            max_job_measurements: NonZeroUsize::new(1000).unwrap(),
+            max_measurement_age: Duration::from_secs(3600),
+            max_future_skew: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
         },
         shutdown_timeout: Duration::from_secs(1),

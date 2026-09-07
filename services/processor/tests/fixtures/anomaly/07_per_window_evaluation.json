@@ -1,0 +1,24 @@
+{
+  "description": "Detection runs per requested window, so the same outlier is reported once under the 1m window and once under the 1h window (windows in ascending order), each against that window's own statistics. Both windows hold the same nine values here, so the bounds agree.",
+  "rules": {
+    "rules": [
+      {"name": "outliers", "kind": "Z_SCORE", "min_count": 5, "tiers": {"warning": 2.5}}
+    ]
+  },
+  "parameters": {"measurement_types": ["HEART_RATE"], "windows": ["1m", "1h"], "percentiles": []},
+  "measurements": [
+    {"id": "a-1", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "a-2", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:01Z"},
+    {"id": "a-3", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:02Z"},
+    {"id": "a-4", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:03Z"},
+    {"id": "a-5", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:04Z"},
+    {"id": "a-6", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:05Z"},
+    {"id": "a-7", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:06Z"},
+    {"id": "a-8", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T12:00:07Z"},
+    {"id": "a-9", "type": "HEART_RATE", "value": 19, "unit": "bpm", "recorded_at": "2026-09-06T12:00:08Z"}
+  ],
+  "expected": [
+    {"measurement_type": "HEART_RATE", "window": "1m", "metric": "Z_SCORE", "value": 19, "threshold": 18.5, "severity": "WARNING", "detected_at": "2026-09-06T12:00:08Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "Z_SCORE", "value": 19, "threshold": 18.5, "severity": "WARNING", "detected_at": "2026-09-06T12:00:08Z", "algorithm_version": "1.0.0"}
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "description": "An empty rule set flags nothing, whatever the data.",
+  "rules": {"rules": []},
+  "parameters": {"measurement_types": ["HEART_RATE", "BODY_TEMPERATURE"], "windows": ["1m", "7d"], "percentiles": [99]},
+  "measurements": [
+    {"id": "x-1", "type": "HEART_RATE", "value": 0, "unit": "bpm", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "x-2", "type": "HEART_RATE", "value": 300, "unit": "bpm", "recorded_at": "2026-09-06T12:00:01Z"},
+    {"id": "t-1", "type": "BODY_TEMPERATURE", "value": 20, "unit": "C", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "t-2", "type": "BODY_TEMPERATURE", "value": 45, "unit": "C", "recorded_at": "2026-09-06T12:00:01Z"}
+  ],
+  "expected": []
+}

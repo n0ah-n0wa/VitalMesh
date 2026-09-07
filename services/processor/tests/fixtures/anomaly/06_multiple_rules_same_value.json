@@ -1,0 +1,32 @@
+{
+  "description": "One value flagged by two rules yields two anomalies, ordered by rule declaration. Fifteen 10s and one 18: the threshold rule (upper 15, INFO) fires first, then the z-score rule (mean 10.5, std 2, z 3.75, critical tier 3, bound 16.5).",
+  "rules": {
+    "rules": [
+      {"name": "ceiling", "kind": "THRESHOLD", "tiers": {"info": {"upper": 15}}},
+      {"name": "outliers", "kind": "Z_SCORE", "min_count": 5, "tiers": {"critical": 3}}
+    ]
+  },
+  "parameters": {"measurement_types": ["HEART_RATE"], "windows": ["1h"], "percentiles": []},
+  "measurements": [
+    {"id": "b-01", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:00Z"},
+    {"id": "b-02", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:01Z"},
+    {"id": "b-03", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:02Z"},
+    {"id": "b-04", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:03Z"},
+    {"id": "b-05", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:04Z"},
+    {"id": "b-06", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:05Z"},
+    {"id": "b-07", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:06Z"},
+    {"id": "b-08", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:07Z"},
+    {"id": "b-09", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:08Z"},
+    {"id": "b-10", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:09Z"},
+    {"id": "b-11", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:10Z"},
+    {"id": "b-12", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:11Z"},
+    {"id": "b-13", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:12Z"},
+    {"id": "b-14", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:13Z"},
+    {"id": "b-15", "type": "HEART_RATE", "value": 10, "unit": "bpm", "recorded_at": "2026-09-06T13:00:14Z"},
+    {"id": "b-16", "type": "HEART_RATE", "value": 18, "unit": "bpm", "recorded_at": "2026-09-06T13:00:15Z"}
+  ],
+  "expected": [
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "THRESHOLD", "value": 18, "threshold": 15, "severity": "INFO", "detected_at": "2026-09-06T13:00:15Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "Z_SCORE", "value": 18, "threshold": 16.5, "severity": "CRITICAL", "detected_at": "2026-09-06T13:00:15Z", "algorithm_version": "1.0.0"}
+  ]
+}

@@ -19,5 +19,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
 
 [dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1", features = ["io-util"] }
 tower = { version = "0.5", features = ["util"] }
+
+[[bench]]
+name = "stats"
+harness = false
+
+[[bench]]
+name = "pipeline"
+harness = false

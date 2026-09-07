@@ -1,0 +1,34 @@
+{
+  "description": "Rolling deviation against the five preceding values. Baseline [9, 9, 11, 13, 13] has mean 11 and sample std exactly 2. In the 12:00 window 16 deviates by 5 > 2 * 2 (warning, bound 15) but not > 3 * 2; the following 11 is judged against a new baseline and passes. In the 13:00 window 18 deviates by 7 > 3 * 2 (critical, bound 17). The first five values of each window have no baseline.",
+  "rules": {
+    "rules": [
+      {
+        "name": "drift",
+        "kind": "ROLLING_DEVIATION",
+        "window_size": 5,
+        "min_count": 5,
+        "tiers": {"warning": 2, "critical": 3}
+      }
+    ]
+  },
+  "parameters": {"measurement_types": ["HEART_RATE"], "windows": ["1h"], "percentiles": []},
+  "measurements": [
+    {"id": "r-1", "type": "HEART_RATE", "value": 9, "unit": "bpm", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "r-2", "type": "HEART_RATE", "value": 9, "unit": "bpm", "recorded_at": "2026-09-06T12:00:01Z"},
+    {"id": "r-3", "type": "HEART_RATE", "value": 11, "unit": "bpm", "recorded_at": "2026-09-06T12:00:02Z"},
+    {"id": "r-4", "type": "HEART_RATE", "value": 13, "unit": "bpm", "recorded_at": "2026-09-06T12:00:03Z"},
+    {"id": "r-5", "type": "HEART_RATE", "value": 13, "unit": "bpm", "recorded_at": "2026-09-06T12:00:04Z"},
+    {"id": "r-6", "type": "HEART_RATE", "value": 16, "unit": "bpm", "recorded_at": "2026-09-06T12:00:05Z"},
+    {"id": "r-7", "type": "HEART_RATE", "value": 11, "unit": "bpm", "recorded_at": "2026-09-06T12:00:06Z"},
+    {"id": "q-1", "type": "HEART_RATE", "value": 9, "unit": "bpm", "recorded_at": "2026-09-06T13:00:00Z"},
+    {"id": "q-2", "type": "HEART_RATE", "value": 9, "unit": "bpm", "recorded_at": "2026-09-06T13:00:01Z"},
+    {"id": "q-3", "type": "HEART_RATE", "value": 11, "unit": "bpm", "recorded_at": "2026-09-06T13:00:02Z"},
+    {"id": "q-4", "type": "HEART_RATE", "value": 13, "unit": "bpm", "recorded_at": "2026-09-06T13:00:03Z"},
+    {"id": "q-5", "type": "HEART_RATE", "value": 13, "unit": "bpm", "recorded_at": "2026-09-06T13:00:04Z"},
+    {"id": "q-6", "type": "HEART_RATE", "value": 18, "unit": "bpm", "recorded_at": "2026-09-06T13:00:05Z"}
+  ],
+  "expected": [
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "ROLLING_DEVIATION", "value": 16, "threshold": 15, "severity": "WARNING", "detected_at": "2026-09-06T12:00:05Z", "algorithm_version": "1.0.0"},
+    {"measurement_type": "HEART_RATE", "window": "1h", "metric": "ROLLING_DEVIATION", "value": 18, "threshold": 17, "severity": "CRITICAL", "detected_at": "2026-09-06T13:00:05Z", "algorithm_version": "1.0.0"}
+  ]
+}

@@ -91,6 +91,11 @@ impl Engine {
         }
     }
 
+    /// The per-job time bound.
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
     pub fn capacity(&self) -> usize {
         self.limiter.capacity()
     }
@@ -187,6 +192,9 @@ mod tests {
         let processing = Processing {
             max_concurrent_jobs: NonZeroUsize::new(max_jobs).unwrap(),
             max_batch_size: NonZeroUsize::MIN,
+            max_job_measurements: NonZeroUsize::MIN,
+            max_measurement_age: Duration::from_secs(1),
+            max_future_skew: Duration::from_secs(1),
             timeout,
         };
         (Engine::new(&processing, shutdown.clone()), shutdown)

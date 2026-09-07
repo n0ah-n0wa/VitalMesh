@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"testing"
 	"time"
 
@@ -27,6 +28,10 @@ func testConfig(t *testing.T) config.Config {
 			return unreachableDatabase, true
 		case "DATABASE_CONNECT_TIMEOUT", "READINESS_TIMEOUT":
 			return "200ms", true
+		case "HTTP_SHUTDOWN_TIMEOUT":
+			// Short, so a shutdown that waits on something reports an error
+			// instead of stalling the test.
+			return "1s", true
 		case "JWT_SECRET":
 			return "test-secret-test-secret-test-secret-32", true
 		case "PASSWORD_HASH_MEMORY_KIB":
@@ -113,6 +118,8 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 			t.Fatalf("Run returned error: %v", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("Run did not return after cancellation")
+		// Dump every goroutine so a stall under CI load can be diagnosed.
+		buf := make([]byte, 1<<20)
+		t.Fatalf("Run did not return after cancellation; goroutines:\n%s", buf[:runtime.Stack(buf, true)])
 	}
 }

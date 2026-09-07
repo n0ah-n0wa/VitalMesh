@@ -1,0 +1,22 @@
+{
+  "description": "Z-score rules produce nothing for a constant window (zero spread, no z-scores) and for a window below min_count, however extreme the values.",
+  "rules": {
+    "rules": [
+      {"name": "outliers", "kind": "Z_SCORE", "min_count": 5, "tiers": {"info": 1}}
+    ]
+  },
+  "parameters": {"measurement_types": ["SPO2"], "windows": ["1h"], "percentiles": []},
+  "measurements": [
+    {"id": "c-1", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "c-2", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:01Z"},
+    {"id": "c-3", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:02Z"},
+    {"id": "c-4", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:03Z"},
+    {"id": "c-5", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:04Z"},
+    {"id": "c-6", "type": "SPO2", "value": 95, "unit": "%", "recorded_at": "2026-09-06T12:00:05Z"},
+    {"id": "s-1", "type": "SPO2", "value": 99, "unit": "%", "recorded_at": "2026-09-06T13:00:00Z"},
+    {"id": "s-2", "type": "SPO2", "value": 99, "unit": "%", "recorded_at": "2026-09-06T13:00:01Z"},
+    {"id": "s-3", "type": "SPO2", "value": 99, "unit": "%", "recorded_at": "2026-09-06T13:00:02Z"},
+    {"id": "s-4", "type": "SPO2", "value": 1, "unit": "%", "recorded_at": "2026-09-06T13:00:03Z"}
+  ],
+  "expected": []
+}

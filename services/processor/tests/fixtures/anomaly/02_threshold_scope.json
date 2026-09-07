@@ -1,0 +1,23 @@
+{
+  "description": "A rule scoped to SPO2 and the 1h window ignores other types and windows even when their values would cross the bound.",
+  "rules": {
+    "rules": [
+      {
+        "name": "spo2-floor",
+        "kind": "THRESHOLD",
+        "measurement_types": ["SPO2"],
+        "windows": ["1h"],
+        "tiers": {"info": {"lower": 90}}
+      }
+    ]
+  },
+  "parameters": {"measurement_types": ["HEART_RATE", "SPO2"], "windows": ["1m", "1h"], "percentiles": []},
+  "measurements": [
+    {"id": "h-1", "type": "HEART_RATE", "value": 30, "unit": "bpm", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "s-1", "type": "SPO2", "value": 50, "unit": "%", "recorded_at": "2026-09-06T12:00:00Z"},
+    {"id": "s-2", "type": "SPO2", "value": 90, "unit": "%", "recorded_at": "2026-09-06T12:00:01Z"}
+  ],
+  "expected": [
+    {"measurement_type": "SPO2", "window": "1h", "metric": "THRESHOLD", "value": 50, "threshold": 90, "severity": "INFO", "detected_at": "2026-09-06T12:00:00Z", "algorithm_version": "1.0.0"}
+  ]
+}
