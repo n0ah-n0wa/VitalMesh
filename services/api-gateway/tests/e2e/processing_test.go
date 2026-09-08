@@ -26,6 +26,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,11 +45,32 @@ import (
 
 const internalToken = "e2e-internal-token-not-a-secret"
 
+// syncBuffer collects a child process's output. os/exec writes it from
+// goroutines of its own while the test goroutine reads it to report a
+// failure, so every access is guarded; a plain bytes.Buffer is a data race.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // processor is the real Rust service, running as a child process.
 type processor struct {
-	cmd  *exec.Cmd
-	addr string
-	logs *bytes.Buffer
+	cmd      *exec.Cmd
+	addr     string
+	logs     *syncBuffer
+	stopOnce sync.Once
 }
 
 // startProcessor builds nothing: it runs the binary the build produced.
@@ -63,7 +85,7 @@ func startProcessor(t *testing.T, env map[string]string) *processor {
 	}
 
 	addr := freeAddr(t)
-	logs := &bytes.Buffer{}
+	logs := &syncBuffer{}
 	cmd := exec.Command(binary)
 	cmd.Env = append(os.Environ(),
 		"HTTP_ADDR="+addr,
@@ -90,11 +112,16 @@ func startProcessor(t *testing.T, env map[string]string) *processor {
 func (p *processor) url() string { return "http://" + p.addr }
 
 func (p *processor) stop() {
-	if p.cmd.Process == nil {
-		return
-	}
-	_ = p.cmd.Process.Kill()
-	_, _ = p.cmd.Process.Wait()
+	p.stopOnce.Do(func() {
+		if p.cmd.Process == nil {
+			return
+		}
+		_ = p.cmd.Process.Kill()
+		// Wait, not Process.Wait: it also waits for the goroutines copying
+		// the child's output, so nothing writes to the log buffer after
+		// this returns.
+		_ = p.cmd.Wait()
+	})
 }
 
 // waitReady polls the processor's own health endpoint until it answers.
@@ -461,11 +488,15 @@ func TestTheGatewayFailsSafelyWhenTheProcessorIsGone(t *testing.T) {
 // work itself.
 func TestASlowProcessorTimesOut(t *testing.T) {
 	p := startProcessor(t, map[string]string{
-		// The engine refuses to spend more than a millisecond on a job, so
-		// every job of any size times out inside the processor.
+		// The engine refuses to spend more than a millisecond on a job.
 		"PROCESSING_TIMEOUT": "1ms",
 	})
-	s := newSystem(t, 200, p.url())
+	// Enough work that it cannot finish inside that millisecond on any
+	// machine: five thousand readings over all seven windows take tens of
+	// milliseconds even in a release build. A smaller job would make the
+	// test a race between the engine and its own timer, which a fast
+	// runner wins.
+	s := newSystem(t, 5000, p.url())
 
 	rec := s.createJob(t, `"1m","5m","15m","1h","6h","24h","7d"`)
 	if rec.Code != http.StatusGatewayTimeout {
