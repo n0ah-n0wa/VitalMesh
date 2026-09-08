@@ -1,0 +1,129 @@
+# Alerting rules for the local stack. They are deliberately few: an alert
+# that nobody would act on is noise that teaches people to ignore the ones
+# that matter.
+#
+# Each rule alerts on a symptom rather than a cause. "The API is failing" is
+# actionable; "the database pool is at 80%" is only interesting because it
+# might cause that, so saturation is a warning and failure is a page.
+#
+# The `for` clauses are short here because a local stack is watched for
+# minutes, not weeks. A deployment lengthens them.
+groups:
+  - name: availability
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.job }} is not answering scrapes"
+          description: >-
+            Prometheus cannot reach {{ $labels.instance }}. Either the service
+            is down or it is not listening where the scrape configuration
+            says. The service being down is the thing to check first.
+
+  - name: api-gateway
+    rules:
+      - alert: GatewayServerErrorsHigh
+        expr: job:gateway_http_server_error_ratio:rate5m > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 5% of gateway responses are server errors"
+          description: >-
+            {{ $value | humanizePercentage }} of requests are failing with 5xx.
+            Client errors are excluded, so this is the service's own fault
+            rather than callers sending bad requests.
+
+      - alert: GatewayLatencyHigh
+        expr: job:gateway_http_latency:p99 > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Gateway p99 latency is above one second"
+          description: >-
+            p99 is {{ $value | humanizeDuration }}. The request budget is ten
+            seconds, so this is early warning rather than breach; compare the
+            database and Redis latency panels to see whether a dependency is
+            responsible.
+
+      - alert: DatabasePoolNearlyExhausted
+        expr: job:gateway_database_pool_saturation:ratio > 0.9
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The database connection pool is over 90% in use"
+          description: >-
+            Requests will start waiting for a connection. This is what
+            distinguishes a slow database from a gateway that has run out of
+            connections to it.
+
+      - alert: RedisDegraded
+        expr: job:gateway_redis_unavailable:rate5m > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis calls are failing; rate limiting and caching are degraded"
+          description: >-
+            The gateway is taking its degraded path: rate limiting falls back
+            to a per-replica counter, caching is off and idempotency relies on
+            the database alone. Requests still succeed, which is why this is a
+            warning rather than a page.
+
+  - name: processor
+    rules:
+      - alert: ProcessingFailuresHigh
+        expr: job:processor_job_failure_ratio:rate5m > 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "More than 10% of processing jobs are failing"
+          description: >-
+            {{ $value | humanizePercentage }} of admitted jobs ended failed or
+            cancelled. Refused jobs are excluded: those never ran and show up
+            as saturation instead.
+
+      - alert: ProcessorSaturated
+        expr: job:processor_saturation:ratio >= 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The processor is at capacity and refusing jobs"
+          description: >-
+            Every admission slot is in use. The service queues nothing by
+            design, so the next job is refused rather than delayed; the
+            refused series on the job dashboard shows how often that happens.
+
+      - alert: ProcessingSlow
+        expr: job:processor_job_duration:p95 > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Processing p95 is above thirty seconds"
+          description: >-
+            Jobs are taking far longer than usual. Check job sizes on the
+            processing dashboard before suspecting the engine.
+
+  - name: telemetry
+    rules:
+      # The stack watching the services is itself worth watching, but only
+      # as a warning: losing telemetry is not losing the service.
+      - alert: SpanExportFailing
+        expr: rate(otelcol_exporter_send_failed_spans[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "The collector cannot ship spans"
+          description: >-
+            Spans are being dropped. Requests are unaffected: export is
+            batched off the request path by design. What is lost is the
+            ability to follow a request across services.

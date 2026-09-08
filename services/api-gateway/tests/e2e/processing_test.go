@@ -164,6 +164,9 @@ type system struct {
 	patientID uuid.UUID
 	jobs      *postgres.Jobs
 	ctx       context.Context
+	// logs is everything the gateway wrote, so a test can join what the
+	// gateway recorded with what the processor recorded.
+	logs *bytes.Buffer
 }
 
 func newSystem(t *testing.T, readings int, processorURL string) *system {
@@ -264,7 +267,7 @@ func newSystem(t *testing.T, readings int, processorURL string) *system {
 
 	return &system{
 		gateway: gateway, token: token, patientID: patient.ID,
-		jobs: postgres.NewJobs(pool), ctx: ctx,
+		jobs: postgres.NewJobs(pool), ctx: ctx, logs: logs,
 	}
 }
 
@@ -281,6 +284,14 @@ func (s *system) do(t *testing.T, method, path, body string) *httptest.ResponseR
 	rec := httptest.NewRecorder()
 	s.gateway.Handler().ServeHTTP(rec, req)
 	return rec
+}
+
+// jobRequest is the body of a straightforward job, for tests that care
+// about what travels with a request rather than about the work itself.
+func (s *system) jobRequest(t *testing.T) string {
+	t.Helper()
+	return fmt.Sprintf(`{"patient_id":%q,"measurement_types":["HEART_RATE"],
+		"windows":["1m"],"percentiles":[50,95]}`, s.patientID)
 }
 
 func (s *system) createJob(t *testing.T, windows string) *httptest.ResponseRecorder {
@@ -616,5 +627,135 @@ func TestTheTwoServicesAgreeOnTheirVersions(t *testing.T) {
 	if cfg.Processing.MaxJobMeasurements > health.Limits.MaxJobMeasurements {
 		t.Errorf("the gateway would send up to %d readings but the processor accepts %d",
 			cfg.Processing.MaxJobMeasurements, health.Limits.MaxJobMeasurements)
+	}
+}
+
+// ------------------------------------------------------------- tracing
+
+// traceIDs returns every distinct trace id in a JSON log stream.
+func traceIDs(t *testing.T, logs string) map[string]bool {
+	t.Helper()
+	found := map[string]bool{}
+	for _, line := range strings.Split(logs, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			continue // a line the service wrote before its logger was ready
+		}
+		if id, ok := record["trace_id"].(string); ok && id != "" {
+			found[id] = true
+		}
+	}
+	return found
+}
+
+// The whole point of the phase: one request produces one trace across both
+// services. The gateway records a trace id, injects W3C trace context into
+// its call, and the processor records the same id, which is what lets an
+// operator follow a request from the client to the engine and back.
+func TestOneTraceSpansTheGatewayAndTheProcessor(t *testing.T) {
+	p := startProcessor(t, map[string]string{"LOG_LEVEL": "info"})
+	s := newSystem(t, 200, p.url())
+
+	rec := s.do(t, http.MethodPost, "/api/v1/processing/jobs", s.jobRequest(t))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create a job = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	gateway := traceIDs(t, s.logs.String())
+	if len(gateway) == 0 {
+		t.Fatalf("the gateway recorded no trace id:\n%s", s.logs.String())
+	}
+	processor := traceIDs(t, p.logs.String())
+	if len(processor) == 0 {
+		t.Fatalf("the processor recorded no trace id:\n%s", p.logs.String())
+	}
+
+	shared := false
+	for id := range processor {
+		if gateway[id] {
+			shared = true
+			break
+		}
+	}
+	if !shared {
+		t.Errorf("the two services are on different traces\ngateway: %v\nprocessor: %v", gateway, processor)
+	}
+}
+
+// A trace that starts in a client must be the trace both services join,
+// rather than each starting one of their own. This is what W3C trace
+// context is for.
+func TestAClientsTraceIsContinuedByBothServices(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+
+	p := startProcessor(t, map[string]string{"LOG_LEVEL": "info"})
+	s := newSystem(t, 200, p.url())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/processing/jobs", strings.NewReader(s.jobRequest(t)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("traceparent", "00-"+traceID+"-00f067aa0ba902b7-01")
+	rec := httptest.NewRecorder()
+	s.gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create a job = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !traceIDs(t, s.logs.String())[traceID] {
+		t.Errorf("the gateway started its own trace instead of continuing the client's:\n%s", s.logs.String())
+	}
+	if !traceIDs(t, p.logs.String())[traceID] {
+		t.Errorf("the processor did not continue the client's trace:\n%s", p.logs.String())
+	}
+}
+
+// Correlation identifiers travel alongside trace context and must survive
+// the hop too, because they are what a human quotes in a ticket.
+func TestCorrelationIdentifiersReachTheProcessor(t *testing.T) {
+	const correlation = "corr-e2e-12345"
+
+	p := startProcessor(t, map[string]string{"LOG_LEVEL": "info"})
+	s := newSystem(t, 200, p.url())
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/processing/jobs", strings.NewReader(s.jobRequest(t)))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("X-Correlation-ID", correlation)
+	rec := httptest.NewRecorder()
+	s.gateway.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create a job = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	if !strings.Contains(p.logs.String(), correlation) {
+		t.Errorf("the correlation id did not reach the processor:\n%s", p.logs.String())
+	}
+	if got := rec.Header().Get("X-Correlation-ID"); got != correlation {
+		t.Errorf("the response carried correlation id %q, want %q", got, correlation)
+	}
+}
+
+// No identifier of a patient and no reading may appear in what the
+// processor records for a traced request: a span leaves the process for a
+// backend that is not the record's custodian.
+func TestATracedRequestLeaksNoPayloadToTheProcessorsRecords(t *testing.T) {
+	p := startProcessor(t, map[string]string{"LOG_LEVEL": "info"})
+	s := newSystem(t, 200, p.url())
+
+	rec := s.do(t, http.MethodPost, "/api/v1/processing/jobs", s.jobRequest(t))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create a job = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	logs := p.logs.String()
+	if strings.Contains(logs, s.patientID.String()) {
+		t.Errorf("the patient id reached the processor's records:\n%s", logs)
+	}
+	// The route pattern is recorded, never the path that carried the id.
+	if !strings.Contains(logs, `"route":"/internal/v1/process"`) {
+		t.Errorf("the processor did not record the route pattern:\n%s", logs)
 	}
 }

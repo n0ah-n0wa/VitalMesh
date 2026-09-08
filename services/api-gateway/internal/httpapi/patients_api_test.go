@@ -34,15 +34,13 @@ import (
 var patientsNow = time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 
 type httpMetrics struct {
-	requests []string
+	metrics.Noop // the measurements this test does not care about
+	requests     []string
 }
 
 func (m *httpMetrics) HTTPRequest(method, route string, status int, _ time.Duration) {
 	m.requests = append(m.requests, fmt.Sprintf("%s %s %d", method, route, status))
 }
-func (m *httpMetrics) Operation(string, metrics.Outcome, time.Duration) {}
-func (m *httpMetrics) Batch(string, int)                                {}
-func (m *httpMetrics) Cache(string, bool)                               {}
 
 type patientsAPI struct {
 	handler http.Handler

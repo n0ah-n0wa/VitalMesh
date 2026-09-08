@@ -1,0 +1,430 @@
+{
+  "uid": "vitalmesh-infrastructure",
+  "title": "VitalMesh \u00b7 Infrastructure and resources",
+  "description": "The resources the services run on and the dependencies they rely on. Application metrics rarely answer 'is the process healthy'; these do.",
+  "tags": [
+    "vitalmesh",
+    "infrastructure"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Targets up",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "sum(up)",
+          "legendFormat": "up",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 4
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "How many scrape targets are answering. Anything less than the expected count is an outage."
+    },
+    {
+      "type": "timeseries",
+      "title": "Database connections",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_database_connections_acquired",
+          "legendFormat": "in use",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_database_connections_idle",
+          "legendFormat": "idle",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_database_connections_max",
+          "legendFormat": "limit",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "What separates a slow database from a gateway that has run out of connections to it."
+    },
+    {
+      "type": "timeseries",
+      "title": "Redis command outcomes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 15,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(vitalmesh_redis_command_duration_seconds_count[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "An unavailable series is the degraded path being taken, which is correct behaviour."
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway memory",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "go_memstats_alloc_bytes{job=\"api-gateway\"}",
+          "legendFormat": "heap in use",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "process_resident_memory_bytes{job=\"api-gateway\"}",
+          "legendFormat": "resident",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Gateway goroutines",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 8,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "go_goroutines{job=\"api-gateway\"}",
+          "legendFormat": "goroutines",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "A number that climbs and never falls is a leak."
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU seconds per second",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 8,
+        "x": 16,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "rate(process_cpu_seconds_total[5m])",
+          "legendFormat": "{{job}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "One means one core fully used."
+    },
+    {
+      "type": "timeseries",
+      "title": "Cache hit ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "sum by (operation) (rate(vitalmesh_cache_reads_total{result=\"hit\"}[5m])) / clamp_min(sum by (operation) (rate(vitalmesh_cache_reads_total[5m])), 0.001)",
+          "legendFormat": "{{operation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "A ratio that collapses usually means Redis is unavailable rather than that the cache is cold."
+    },
+    {
+      "type": "timeseries",
+      "title": "Spans accepted and dropped by the collector",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "rate(otelcol_receiver_accepted_spans[5m])",
+          "legendFormat": "accepted",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "rate(otelcol_receiver_refused_spans[5m])",
+          "legendFormat": "refused",
+          "refId": "B"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "rate(otelcol_exporter_sent_spans[5m])",
+          "legendFormat": "sent onwards",
+          "refId": "C"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "rate(otelcol_exporter_send_failed_spans[5m])",
+          "legendFormat": "send failed",
+          "refId": "D"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Whether tracing is working. Accepted is what the services sent; refused is what the collector shed under load; send failed is what it could not pass on. Losing spans never affects requests: export is batched off the request path."
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

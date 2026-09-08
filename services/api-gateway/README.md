@@ -96,6 +96,10 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `PROCESSING_MAX_JOB_MEASUREMENTS` | `100000` | readings one job may carry; must not exceed the processor's own bound |
 | `PROCESSING_ALGORITHM_VERSION` | `1.0.0` | the algorithm version jobs ask for; the processor refuses any other |
 | `PROCESSING_FAILURE_RECORD_TIMEOUT` | `5s` | bound on the write that records why a job failed |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | none | OTLP/HTTP collector; empty propagates trace context but exports nothing |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` | `10s` | bound on one export attempt |
+| `OTEL_EXPORTER_OTLP_INSECURE` | `false` | permits plain HTTP to the collector; refused outside local development |
+| `OTEL_TRACES_SAMPLER_ARG` | `1.0` | fraction of traces this service starts that are recorded; a decision made upstream is always honoured |
 | `REDIS_URL` | none | `redis://` or `rediss://`; empty disables Redis and every feature that uses it degrades |
 | `REDIS_TIMEOUT` | `250ms` | bound on one Redis command; must be shorter than `HTTP_REQUEST_TIMEOUT` |
 | `REDIS_DIAL_TIMEOUT` | `2s` | bound on establishing a connection |
@@ -211,8 +215,62 @@ A feature is an application package (`patient` is the template) with a `Service`
 ## Observability hooks
 
 - **Metrics** (`observability/metrics.Recorder`): `middleware.Metrics` records every request as method, matched route pattern, status and duration; services record each operation with a closed outcome vocabulary (`ok`, `invalid`, `not_found`, `conflict`, `denied`, `error`, `cancelled`). Route patterns come from the router, never from request paths, so labels stay bounded and identifiers never become labels (SPECIFICATIONS.md section 41). `Noop` is wired until the observability phase binds Prometheus.
-- **Tracing** (`observability/tracing.Tracer`): services open one span per operation and record its error; a real tracer places the trace id in the context with `tracing.WithTraceID`, and the logger emits it as `trace_id`. `Noop` is wired until OpenTelemetry arrives.
+- **Metrics endpoint**: `GET /metrics` serves the Prometheus exposition, unversioned and unauthenticated like the health probes, because it serves the platform's scraper rather than clients. It carries no identifiers by construction; deployments restrict it at the network.
+- **Tracing** (`observability/tracing`): OpenTelemetry, with W3C trace context in and out. A request's trace covers the gateway's own span, every PostgreSQL statement, every Redis command, each service operation, and the call to the processor, which continues the same trace on its side.
 
 ## Request logs
 
 One JSON record per request: `timestamp`, `level`, `service`, `version`, `environment`, `request_id`, `trace_id` (when a tracer set one), `message` (`"request"`), `method`, `path`, `route` (the matched pattern, or `unmatched`), `status`, `bytes`, `duration_ms`. Clients may supply `X-Request-ID` (1–128 characters of `[A-Za-z0-9._-]`); other values are replaced. The effective ID is echoed in the response header. Services add their own records (`patient created`, `patient deleted`) carrying `request_id`, the resource id and the acting `user_id`; never payload contents.
+
+## Tracing
+
+One trace covers client, gateway, processor and the dependencies each touches. W3C `traceparent` arrives on the request and is read before the span opens, so a trace a client started continues here rather than restarting; the same header is injected into the call to the processor.
+
+**Propagation does not depend on having a backend.** A real tracer is built whether or not a collector is configured, so trace ids exist, reach the logs as `trace_id`, and are injected into outgoing calls even with `OTEL_EXPORTER_OTLP_ENDPOINT` unset. Without an endpoint the spans are recorded and dropped rather than exported. Making propagation conditional on a backend would be exactly backwards.
+
+**A telemetry backend is never on the critical path.** Spans go to a batch processor and are exported on their own goroutine, so a collector that is slow, refused or absent costs a request nothing. An outage is one log line, not one per attempt, and shutdown is bounded so a collector that has gone away cannot hold up exit.
+
+**What a span may carry.** The method, the matched route pattern, the status, resource identifiers, counts and durations. Never a path, a query string, a header or a body. The attribute conversion enforces the last part: a value that is not a string, number, boolean, duration or `Stringer` is recorded as its type rather than its contents, so a struct holding readings cannot be serialised into a span by being passed as an interface. Every string attribute and every recorded error then passes through the same rules the logger applies, from the shared `observability/redact` package: a name that is a credential or a personal fact is refused, a token is removed by shape wherever it appears, and any value is bounded in length. Logs and spans are two exits from the process and cannot drift apart in what they refuse to carry (SPECIFICATIONS.md sections 40 and 41).
+
+**The call to the processor is a span of its own.** Each attempt opens a client span carrying the method, the processor's host and the status, and records its error, so a retried call shows in the trace as what it was: several attempts with their own outcomes, rather than one long gap between the gateway's span and the processor's. The processor's server span nests under the attempt that made the call.
+
+**Probes are not traced.** `/health`, `/ready` and `/metrics` are polled by the platform every few seconds per replica; traced, they would outnumber real traffic in any trace store and bury the traces that matter. They stay visible in metrics and logs.
+
+## What the metrics publish
+
+Everything is prefixed `vitalmesh_` and registered when the recorder is built, so two components cannot publish the same series under different meanings.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_requests_total` | counter | method, route, status |
+| `http_errors_total` | counter | method, route, class (client or server) |
+| `http_request_duration_seconds` | histogram | method, route |
+| `operation_total` | counter | operation, outcome |
+| `operation_duration_seconds` | histogram | operation |
+| `operation_in_flight` | gauge | operation |
+| `database_query_duration_seconds` | histogram | statement, outcome |
+| `database_connections_*` | gauge | none |
+| `redis_command_duration_seconds` | histogram | command, outcome |
+| `batch_size` | histogram | operation |
+| `cache_reads_total` | counter | operation, result |
+| `rate_limit_decisions_total` | counter | decision, backend |
+
+Processing jobs, their duration and their failures are the `processing.*` series of the operation family, so a rate of jobs and a rate of failures come from one query. Active jobs is `operation_in_flight{operation="processing.job"}`, moved around the call to the processor so that it counts work actually running.
+
+**Cardinality is a property of the port, not of its callers.** Every label comes from a closed vocabulary: routes are the patterns the router registered, statement verbs are normalised to eight keywords, and outcomes, decisions and backends are fixed sets. No method on the recorder takes a value that varies per request, so a user id, patient id, request id or trace id cannot become a label even by mistake, because there is no parameter to put one in (SPECIFICATIONS.md section 41).
+
+The one label a client controls is the request method: HTTP permits any token as a method, so recording it verbatim would let a caller create a series per request. The recorder keeps only the methods the router can route and folds everything else into `OTHER`. The smoke test sends invented methods at both services and fails if either creates a series.
+
+Series whose labels form a small closed set are published at zero from start-up, so an alert works from the first scrape rather than from the first occurrence. Where the label space is open, such as route by method by status, the series appears with the first request.
+
+## What never reaches a log
+
+Call sites pass identifiers rather than values, and `observability/logging` enforces that rather than trusting it (SPECIFICATIONS.md section 41). Every attribute passes through one hook on its way to the handler, so there is no path into the output that skips the rules, including attributes a logger was derived with and attributes nested in a group.
+
+- **By name.** An attribute called `password`, `secret`, `token`, `authorization`, `cookie`, `signature`, `email`, `date_of_birth`, `phone`, `external_reference`, `body` or `payload`, or one ending in `_token`, `_secret`, `_password`, `_hash`, `_email` or `_signature`, is replaced with `[redacted]`. The list names credentials and facts about people, not their neighbours: `token_id` identifies a token and survives, as do `key`, `count` and every `*_id`.
+- **By shape.** A JSON Web Token is removed wherever it appears, including inside a message, an error, a URL or an `Authorization` header echoed into one. Detection anchors on the `eyJ` prefix every JWT header carries, so a hostname or a version string cannot trip it.
+- **By size.** Any single string is bounded at 512 bytes and says how much it dropped, so a request body or a batch of readings logged by mistake is truncated rather than stored whole.
+
+What stays is what an incident needs: opaque identifiers (`user_id`, `patient_id`, `measurement_id`, `job_id`, `request_id`), counts, statuses and durations. Redaction costs nothing operationally: a failed login still logs `login failed` with its reason and the `user_id`, just never the address or the password.
+
+The processor applies the same three rules in `redact.rs`, at the point its JSON formatter writes a record, so span fields are covered as well as event fields.

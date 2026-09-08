@@ -24,7 +24,7 @@ type Service struct {
 // New returns a logger writing to w. Time and message attributes are named
 // "timestamp" and "message" to match the repository's log schema.
 func New(w io.Writer, cfg config.Log, svc Service) *slog.Logger {
-	opts := &slog.HandlerOptions{Level: cfg.Level, ReplaceAttr: renameStandardAttrs}
+	opts := &slog.HandlerOptions{Level: cfg.Level, ReplaceAttr: sanitize}
 
 	var h slog.Handler
 	if cfg.Format == config.LogFormatText {
@@ -41,17 +41,26 @@ func New(w io.Writer, cfg config.Log, svc Service) *slog.Logger {
 	return slog.New(contextHandler{root: h, derived: h})
 }
 
-func renameStandardAttrs(groups []string, a slog.Attr) slog.Attr {
-	if len(groups) > 0 {
-		return a
+// sanitize is the single hook every attribute passes through. It names the
+// standard attributes as the repository's schema does, and then removes
+// anything that must never be logged (see redact.go).
+//
+// slog applies it to attributes added at the call site and to those a
+// logger was derived with, so there is no way into the output that skips
+// it.
+func sanitize(groups []string, a slog.Attr) slog.Attr {
+	if len(groups) == 0 {
+		switch a.Key {
+		case slog.TimeKey:
+			a.Key = "timestamp"
+		case slog.MessageKey:
+			// The message is written by the developer, not by a client, but
+			// it is scrubbed like everything else: a handler that formats a
+			// value into its message would otherwise bypass every rule.
+			a.Key = "message"
+		}
 	}
-	switch a.Key {
-	case slog.TimeKey:
-		a.Key = "timestamp"
-	case slog.MessageKey:
-		a.Key = "message"
-	}
-	return a
+	return sanitizeAttr(a)
 }
 
 // contextHandler adds request-scoped attributes taken from the context as

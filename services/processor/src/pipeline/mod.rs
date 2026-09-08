@@ -290,6 +290,12 @@ impl Processor {
         &self.pipeline
     }
 
+    /// The engine as a shared handle, for a collector that must outlive
+    /// the borrow.
+    pub fn engine_handle(&self) -> Arc<Engine> {
+        Arc::clone(&self.engine)
+    }
+
     pub fn engine(&self) -> &Engine {
         &self.engine
     }

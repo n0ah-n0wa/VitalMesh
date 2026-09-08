@@ -32,6 +32,7 @@ import (
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/processing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/requestid"
 )
@@ -55,6 +56,7 @@ type Client struct {
 	token    string
 	cfg      config.Processor
 	logger   *slog.Logger
+	tracer   tracing.Tracer
 	sleep    func(context.Context, time.Duration) error
 	now      func() time.Time
 	contract string
@@ -68,6 +70,8 @@ type Options struct {
 	HTTPClient *http.Client
 	Sleep      func(context.Context, time.Duration) error
 	Now        func() time.Time
+	// Tracer opens one client span per attempt; nil records none.
+	Tracer tracing.Tracer
 }
 
 // New returns a client for the processor described by cfg.
@@ -89,6 +93,7 @@ func New(cfg config.Processor, logger *slog.Logger, opts Options) *Client {
 		baseURL:  strings.TrimSuffix(cfg.BaseURL, "/"),
 		token:    string(cfg.Token),
 		cfg:      cfg,
+		tracer:   tracing.OrNoop(opts.Tracer),
 		logger:   logger,
 		sleep:    sleep,
 		now:      now,
@@ -194,14 +199,34 @@ func (c *Client) Process(ctx context.Context, in processing.Request) (processing
 }
 
 // attempt performs one call. It never retries.
+// host is the processor's address for a span: scheme and host only, never
+// a path, so nothing derived from a request reaches the attribute.
+func (c *Client) host() string {
+	if u, err := url.Parse(c.baseURL); err == nil {
+		return u.Host
+	}
+	return ""
+}
+
 func (c *Client) attempt(ctx context.Context, body []byte, jobID string) (processing.Outcome, error) {
 	// Every attempt gets the same bound, and the caller's deadline always
 	// wins because it is already on ctx.
 	attemptCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
 
+	// One client span per attempt, so a retried call shows in the trace as
+	// what it was: several attempts, each with its own outcome, rather
+	// than one long gap between the gateway's span and the processor's.
+	// The span is what the processor's server span becomes a child of,
+	// because the trace context injected below comes from its context.
+	attemptCtx, span := c.tracer.Start(attemptCtx, "processor.process")
+	defer span.End()
+	span.SetAttribute("http.request.method", http.MethodPost)
+	span.SetAttribute("server.address", c.host())
+
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, c.baseURL+processPath, bytes.NewReader(body))
 	if err != nil {
+		span.RecordError(err)
 		return processing.Outcome{}, c.protocolError("build the processing request", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -219,12 +244,16 @@ func (c *Client) attempt(ctx context.Context, body []byte, jobID string) (proces
 
 	res, err := c.http.Do(req)
 	if err != nil {
+		span.RecordError(err)
 		return processing.Outcome{}, c.transportError(err)
 	}
 	defer drain(res)
+	span.SetAttribute("http.response.status_code", res.StatusCode)
 
 	if res.StatusCode != http.StatusOK {
-		return processing.Outcome{}, c.failure(res, &jobID)
+		failure := c.failure(res, &jobID)
+		span.RecordError(failure)
+		return processing.Outcome{}, failure
 	}
 	var outcome processing.Outcome
 	if err := decode(res, &outcome); err != nil {
@@ -237,8 +266,11 @@ func (c *Client) attempt(ctx context.Context, body []byte, jobID string) (proces
 	return outcome, nil
 }
 
-// setCorrelation propagates the identifiers of the request being served.
+// setCorrelation propagates the identifiers of the request being served,
+// and the W3C trace context that makes the processor's work part of this
+// request's trace rather than a trace of its own.
 func (c *Client) setCorrelation(ctx context.Context, req *http.Request) {
+	tracing.Inject(ctx, req.Header)
 	if id := requestid.FromContext(ctx); requestid.Valid(id) {
 		req.Header.Set(requestid.Header, id)
 	}

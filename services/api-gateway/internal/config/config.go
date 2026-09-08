@@ -44,11 +44,36 @@ type Config struct {
 	Processor    Processor
 	Idempotency  Idempotency
 	Redis        Redis
+	Tracing      Tracing
 	RateLimit    RateLimit
 	Cache        Cache
 	Readiness    Readiness
 	Log          Log
 }
+
+// Tracing configures distributed tracing (SPECIFICATIONS.md section 40).
+//
+// Tracing is optional by design. With no endpoint the gateway still takes
+// part in a trace: it reads and forwards W3C trace context, so a trace
+// started by a client survives the hop, and the trace id still reaches the
+// logs. What it does not do is export spans of its own.
+type Tracing struct {
+	// Endpoint is the OTLP/HTTP collector, scheme and host only. Empty
+	// means no exporter.
+	Endpoint string
+	// SampleRatio is the fraction of traces recorded, between 0 and 1. A
+	// sampling decision made upstream is always honoured, so this only
+	// decides for traces that start here.
+	SampleRatio float64
+	// Timeout bounds one export attempt.
+	Timeout time.Duration
+	// Insecure permits plain HTTP to the collector. It is refused outside
+	// local development, where a collector is reached over the network.
+	Insecure bool
+}
+
+// Enabled reports whether spans are exported.
+func (t Tracing) Enabled() bool { return t.Endpoint != "" }
 
 // Redis configures the shared ephemeral store (SPECIFICATIONS.md section
 // 23). Redis is never a record of truth: it holds rate-limit counters,
@@ -402,6 +427,12 @@ func Load(lookup Lookup) (Config, error) {
 			Admin:            int(p.uint32("RATE_LIMIT_ADMIN", 1000)),
 			TrustedProxyHops: int(p.count("TRUSTED_PROXY_HOPS", 0)),
 		},
+		Tracing: Tracing{
+			Endpoint:    p.string("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
+			SampleRatio: p.ratio("OTEL_TRACES_SAMPLER_ARG", 1.0),
+			Timeout:     p.duration("OTEL_EXPORTER_OTLP_TIMEOUT", 10*time.Second),
+			Insecure:    p.bool("OTEL_EXPORTER_OTLP_INSECURE", false),
+		},
 		Cache: Cache{
 			Enabled:    p.bool("CACHE_ENABLED", true),
 			PatientTTL: p.duration("CACHE_PATIENT_TTL", 30*time.Second),
@@ -482,6 +513,17 @@ func Load(lookup Lookup) (Config, error) {
 		}
 		if cfg.RateLimit.TrustedProxyHops > MaxTrustedProxyHops {
 			p.fail("TRUSTED_PROXY_HOPS: must be at most %d", MaxTrustedProxyHops)
+		}
+	}
+	if cfg.Tracing.Endpoint != "" {
+		if err := validEndpoint(cfg.Tracing.Endpoint); err != nil {
+			p.fail("OTEL_EXPORTER_OTLP_ENDPOINT: %v", err)
+		}
+		if cfg.Tracing.SampleRatio < 0 || cfg.Tracing.SampleRatio > 1 {
+			p.fail("OTEL_TRACES_SAMPLER_ARG: must be between 0 and 1")
+		}
+		if cfg.Environment.Deployed() && cfg.Tracing.Insecure {
+			p.fail("OTEL_EXPORTER_OTLP_INSECURE: spans must not cross the network in the clear in %s (SPECIFICATIONS.md section 30)", cfg.Environment)
 		}
 	}
 	if cfg.Cache.Enabled && (cfg.Cache.PatientTTL < time.Second || cfg.Cache.PatientTTL > MaxCacheTTL) {
@@ -640,6 +682,23 @@ func (p *parser) passwordHash() PasswordHash {
 		p.fail("PASSWORD_HASH_TIME: must be at most %d", MaxPasswordHashTime)
 	}
 	return cfg
+}
+
+// validEndpoint checks a collector address without connecting to it. Like
+// the Redis check it never echoes the address, which may carry a
+// credential.
+func validEndpoint(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("must be a valid URL")
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("must be an http:// or https:// URL")
+	}
+	if u.Host == "" {
+		return errors.New("must name a host")
+	}
+	return nil
 }
 
 // validRedisURL checks a Redis address without connecting to it.
@@ -814,6 +873,20 @@ func (p *parser) count(key string, def uint32) uint32 {
 		return def
 	}
 	return uint32(n)
+}
+
+// ratio is a fraction between 0 and 1, such as a sampling rate.
+func (p *parser) ratio(key string, def float64) float64 {
+	v, ok := p.raw(key)
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		p.fail("%s: must be a number between 0 and 1", key)
+		return def
+	}
+	return f
 }
 
 func (p *parser) duration(key string, def time.Duration) time.Duration {

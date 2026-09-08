@@ -119,6 +119,7 @@ pub struct Config {
     pub environment: Environment,
     pub http: Http,
     pub log: Log,
+    pub tracing: Tracing,
     pub processing: Processing,
     /// How long in-flight jobs may run after shutdown is requested before
     /// they are cancelled.
@@ -138,6 +139,24 @@ pub struct Http {
     /// test environment the internal endpoints are served without
     /// authentication, which start-up says out loud.
     pub internal_token: Option<Secret>,
+}
+
+/// Distributed tracing (SPECIFICATIONS.md section 40). With no endpoint
+/// the service still reads and honours incoming W3C trace context; it
+/// simply exports nothing of its own.
+#[derive(Debug, Clone)]
+pub struct Tracing {
+    /// OTLP/HTTP collector. Empty means no exporter.
+    pub endpoint: String,
+    /// Bounds one export attempt.
+    pub timeout: std::time::Duration,
+}
+
+impl Tracing {
+    /// Whether spans are exported.
+    pub fn enabled(&self) -> bool {
+        !self.endpoint.is_empty()
+    }
 }
 
 /// Logging settings.
@@ -242,6 +261,13 @@ impl Config {
                     "json or text",
                     LogFormat::parse,
                 ),
+            },
+            tracing: Tracing {
+                endpoint: p
+                    .raw("OTEL_EXPORTER_OTLP_ENDPOINT")
+                    .map(|v| v.trim().to_owned())
+                    .unwrap_or_default(),
+                timeout: p.duration("OTEL_EXPORTER_OTLP_TIMEOUT", Duration::from_secs(10)),
             },
             processing: Processing {
                 max_concurrent_jobs: p.value(

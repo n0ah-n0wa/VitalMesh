@@ -20,6 +20,9 @@ src/
                       moving standard deviation, epoch-aligned tumbling windows, aggregation
   jobs.rs             bounded registry of the jobs this instance is running or ran
   telemetry.rs        structured JSON logging with the repository's field schema
+  metrics.rs          Prometheus metrics and the exposition served at /metrics
+  tracing_otel.rs     W3C trace context propagation and OpenTelemetry export
+  redact.rs           removes credentials, personal facts and payloads from every log record
   requestid.rs        request and correlation id validation and generation
   transport/          axum router, middleware, health handlers, error envelope
   lifecycle.rs        serve until shutdown, then drain and cancel
@@ -174,13 +177,42 @@ Every failure uses one envelope, on every route:
 
 Every request logs one structured record with the request id, correlation id, method, path, status and duration. A job adds a `process` span carrying its id, algorithm version and reading count, and one record on completion with the status, duration, and the counts of accepted, skipped and rejected readings, results and anomalies. Nothing from a payload is logged: not a value, not an identifier of a measurement, and never the internal token. Prometheus metrics and OpenTelemetry export arrive with the observability phase; the log fields above are the ones those exporters will read.
 
+## Metrics
+
+`GET /metrics` serves the Prometheus exposition, unversioned and needing no credential, like the probes: it serves the platform's scraper. Everything is prefixed `vitalmesh_processor_`.
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_requests_total` | counter | method, route, status |
+| `http_errors_total` | counter | method, route, class |
+| `http_request_duration_seconds` | histogram | method, route |
+| `jobs_total` | counter | outcome (completed, failed, cancelled, refused) |
+| `job_duration_seconds` | histogram | outcome |
+| `active_jobs`, `job_capacity`, `job_slots_available` | gauge | none |
+
+The route label is the pattern axum matched, never the request path, so asking about a thousand jobs is one series and no job id reaches the exposition. The method label keeps only routable methods and folds anything else into `OTHER`, because the method is the one label a client controls and HTTP permits any token as one. Job outcomes are published at zero from start-up, so an alert on failures works before the first failure. The saturation gauges read the engine at scrape time rather than being copied on a timer, so they cannot drift from what admission sees.
+
+**On queue depth.** The specification asks for it; this service has none. Admission is a semaphore that never waits, and work that cannot get a permit is refused at once, so a depth gauge would read zero for ever. Saturation answers the same question: `job_slots_available` shows how close to full the service is, and `jobs_total{outcome="refused"}` shows how often it was.
+
+## Tracing
+
+This service is the far end of a trace that starts in a client and passes through the gateway. The gateway injects W3C `traceparent`; this service extracts it and makes its request span a child of the gateway's, so one trace covers both. The trace id is recorded on the span, so it appears in every log line of that request and a log and a span can be joined without the log pipeline knowing about OpenTelemetry.
+
+`OTEL_EXPORTER_OTLP_ENDPOINT` names an OTLP/HTTP collector; `OTEL_EXPORTER_OTLP_TIMEOUT` bounds one export attempt. With no endpoint the service still reads and honours incoming trace context and still logs the trace id; it simply exports nothing of its own. Export is batched onto its own task, so a collector that is slow, refused or absent costs a request nothing, and a malformed `traceparent` is ignored rather than trusted or refused.
+
+A span carries the route pattern rather than the path, because a path carries a job id and a span leaves this process for a backend that is not the record's custodian. Readings never appear: what a job records is its id, its algorithm version and counts.
+
+That is enforced at the exit rather than trusted at each call site. Log records are redacted by the JSON formatter, but the OpenTelemetry layer reads span fields directly and would export them untouched, so the OTLP exporter is wrapped in `RedactingExporter`, which applies the same `redact.rs` rules to every span attribute and every event before anything leaves the process. Probe requests (`/health`, `/ready`, `/metrics`) run under a span named `probe`, which the exporter filter drops: a liveness probe every few seconds per replica would bury the traces that matter, and probes stay visible in metrics and logs.
+
 ## Request identification
 
 Clients may send `X-Request-ID` (per hop) and `X-Correlation-ID` (end to end), 1–128 characters of `[A-Za-z0-9._-]`. Invalid or missing request ids are replaced by a generated one; a missing correlation id defaults to the request id. Both are echoed in the response, included in every error envelope, and attached as top-level fields to every log record emitted while handling the request.
 
 ## Logs
 
-One JSON object per line with `timestamp`, `level`, `service`, `version`, `environment`, `message`, any event fields, and the fields of enclosing spans (`request_id`, `correlation_id`, `method`, `path` inside a request). The access log record is `message: "request"` with `status` and `duration_ms`.
+One JSON object per line with `timestamp`, `level`, `service`, `version`, `environment`, `message`, any event fields, and the fields of enclosing spans (`request_id`, `correlation_id`, `method`, `path` inside a request). The access log record is `message: "request"` with `status` and `duration_ms`. This service has no trace of its own to name; the gateway propagates `X-Request-ID` and `X-Correlation-ID`, and a `trace_id` joins the schema when the observability phase adds trace propagation.
+
+Every record passes through `redact.rs` as the formatter writes it, so the guarantee does not depend on remembering it at each call site, and span fields are covered as well as event fields. Three rules apply: a field named as a credential or a personal fact (`token`, `secret`, `password`, `authorization`, `email`, `date_of_birth`, `external_reference`, `body`, `payload`, or a name ending in `_token`, `_secret`, `_password`, `_hash`) is replaced with `[redacted]`; a JSON Web Token is removed wherever it appears in a string, recognised by the `eyJ` prefix rather than by the field it arrived in; and any string is bounded at 512 bytes so a payload logged by mistake is truncated rather than stored whole. Identifiers and counts are deliberately kept, because they are what makes a record useful during an incident: `job_id`, `request_id`, `token_id`, `readings`, `accepted`.
 
 ## Shutdown
 

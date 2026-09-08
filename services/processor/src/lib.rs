@@ -25,11 +25,14 @@ pub mod engine;
 pub mod error;
 pub mod jobs;
 pub mod lifecycle;
+pub mod metrics;
 pub mod pipeline;
+mod redact;
 pub mod requestid;
 pub mod state;
 pub mod stats;
 pub mod telemetry;
+pub mod tracing_otel;
 pub mod transport;
 
 /// Service name reported in logs and health responses.

@@ -10,6 +10,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 )
 
 // APIv1 is the prefix of the current public API version. Breaking changes
@@ -32,10 +33,16 @@ type Handlers struct {
 	// it. It runs after authentication so that an authenticated request is
 	// counted against its account rather than its address.
 	RateLimit middleware.Middleware
+	// Metrics is served at GET /metrics when the recorder can expose a
+	// handler; nil serves nothing there.
+	MetricsHandler http.Handler
 	// Policy decides what each role may do.
 	Policy *authz.Policy
 	// Metrics receives request measurements; nil means none.
 	Metrics metrics.Recorder
+	// Tracer opens one span per request and continues the caller's trace;
+	// nil records none.
+	Tracer tracing.Tracer
 }
 
 // operations binds implemented handlers to the operations of
@@ -90,11 +97,18 @@ func NewHandler(cfg config.HTTP, logger *slog.Logger, h Handlers) (http.Handler,
 	rt := NewRouter(logger)
 	rt.HandleFunc(http.MethodGet, "/health", h.Health.Live)
 	rt.HandleFunc(http.MethodGet, "/ready", h.Health.Ready)
+	if h.MetricsHandler != nil {
+		// Unversioned and unauthenticated, like the health endpoints: it
+		// serves the platform's scraper, not clients (SPECIFICATIONS.md
+		// sections 10 and 41). It carries no identifiers, by construction
+		// of the metrics port. Deployments restrict it at the network.
+		rt.HandleFunc(http.MethodGet, "/metrics", h.MetricsHandler.ServeHTTP)
+	}
 
 	if err := Mount(rt.Group(APIv1), h.operations(), h.Authenticate, h.Policy, h.Idempotency, h.RateLimit, logger); err != nil {
 		return nil, err
 	}
-	return Wrap(cfg, logger, h.Metrics, rt), nil
+	return Wrap(cfg, logger, h.Metrics, h.Tracer, rt), nil
 }
 
 // Mount registers every operation of authz.Routes that has a handler in
@@ -155,9 +169,13 @@ func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middlewar
 // Wrap applies the standard middleware chain to h, outermost first: request
 // identification, security headers, request logging, request metrics, the
 // request timeout, panic recovery and the body size limit.
-func Wrap(cfg config.HTTP, logger *slog.Logger, rec metrics.Recorder, h http.Handler) http.Handler {
+func Wrap(cfg config.HTTP, logger *slog.Logger, rec metrics.Recorder, tracer tracing.Tracer, h http.Handler) http.Handler {
 	return middleware.Chain(h,
 		middleware.RequestID(),
+		// Inside request identification so that a span carries the same
+		// identifiers as the log record for the request, and outside
+		// everything else so that the span covers the whole of it.
+		middleware.Trace(tracing.OrNoop(tracer)),
 		middleware.SecureHeaders(),
 		middleware.Logging(logger),
 		middleware.Metrics(rec),

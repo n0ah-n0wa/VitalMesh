@@ -1,0 +1,45 @@
+# Local Prometheus. It scrapes the two services and the collector; it is
+# not the deployed configuration, which comes with the cluster.
+#
+# The services run as host processes during development, so they are
+# scraped through host.docker.internal. `extra_hosts` in docker-compose.yml
+# makes that name resolve on Linux as well as on Docker Desktop. When a
+# service runs as a container on this network instead, replace the target
+# with its container name and port.
+global:
+  scrape_interval: 5s
+  scrape_timeout: 4s
+  evaluation_interval: 5s
+  external_labels:
+    environment: local
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: api-gateway
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          service: api-gateway
+
+  - job_name: processor
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["host.docker.internal:8081"]
+        labels:
+          service: processor
+
+  # The collector's own health: how many spans it accepted, refused or
+  # failed to send. It is what answers "is tracing working" without a trace
+  # store.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888"]
+        labels:
+          service: otel-collector
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

@@ -84,6 +84,19 @@ pub async fn ready(State(state): State<SharedState>) -> (StatusCode, Json<Readin
     (status, Json(body))
 }
 
+/// The Prometheus exposition, served at the unversioned `/metrics`. It is
+/// plain text in the format a scraper expects, not JSON, because that is
+/// what the format is.
+pub async fn metrics(State(state): State<SharedState>) -> impl axum::response::IntoResponse {
+    (
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        state.metrics.encode(),
+    )
+}
+
 /// The contract's health endpoint. It answers 200 whenever the process is
 /// serving and consults no dependency, so it never blocks; readiness is the
 /// unversioned `/ready`, which is outside the contract.

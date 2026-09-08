@@ -100,7 +100,7 @@ func New(t *testing.T) (pool *pgxpool.Pool, dbURL, schema string) {
 		URL:            dbURL,
 		MaxConns:       4,
 		ConnectTimeout: 5 * time.Second,
-	})
+	}, postgres.Options{})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}

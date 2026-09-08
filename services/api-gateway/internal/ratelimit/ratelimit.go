@@ -35,6 +35,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/redisclient"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
 )
 
 // Backend names which counter decided a request, for logs and metrics.
@@ -42,10 +43,10 @@ type Backend string
 
 const (
 	// BackendShared is the Redis counter every replica shares.
-	BackendShared Backend = "shared"
+	BackendShared Backend = metrics.BackendShared
 	// BackendLocal is this replica's own counter, used while Redis is
 	// unavailable.
-	BackendLocal Backend = "local"
+	BackendLocal Backend = metrics.BackendLocal
 )
 
 // Decision is the outcome of one rate-limit check.
@@ -108,16 +109,19 @@ return {count, ttl}
 
 // Limiter decides whether a request may proceed.
 type Limiter struct {
-	cfg    config.RateLimit
-	redis  *redisclient.Client
-	local  *localLimiter
-	logger *slog.Logger
-	now    func() time.Time
+	cfg     config.RateLimit
+	redis   *redisclient.Client
+	local   *localLimiter
+	logger  *slog.Logger
+	metrics metrics.Recorder
+	now     func() time.Time
 }
 
 // Options tune a Limiter. Nil fields take safe defaults.
 type Options struct {
 	Now func() time.Time
+	// Metrics receives one event per decision; nil records none.
+	Metrics metrics.Recorder
 }
 
 // New returns a limiter. A nil or disabled Redis client is not an error:
@@ -128,11 +132,12 @@ func New(cfg config.RateLimit, client *redisclient.Client, logger *slog.Logger, 
 		now = time.Now
 	}
 	return &Limiter{
-		cfg:    cfg,
-		redis:  client,
-		local:  newLocalLimiter(cfg.Window, now),
-		logger: logger,
-		now:    now,
+		cfg:     cfg,
+		redis:   client,
+		local:   newLocalLimiter(cfg.Window, now),
+		logger:  logger,
+		metrics: metrics.OrNoop(opts.Metrics),
+		now:     now,
 	}
 }
 
@@ -165,10 +170,19 @@ func (l *Limiter) Allow(ctx context.Context, id Identity) Decision {
 	if !l.cfg.Enabled {
 		return Decision{Allowed: true, Limit: id.Limit, Remaining: id.Limit, Backend: BackendLocal}
 	}
-	if decision, ok := l.allowShared(ctx, id); ok {
-		return decision
+	decision, ok := l.allowShared(ctx, id)
+	if !ok {
+		decision = l.local.allow(id)
 	}
-	return l.local.allow(id)
+	// The decision and which counter made it, never who it was about: a
+	// budget belongs to an account or an address, and both are unbounded
+	// (SPECIFICATIONS.md section 41).
+	outcome := metrics.DecisionAllowed
+	if !decision.Allowed {
+		outcome = metrics.DecisionLimited
+	}
+	l.metrics.RateLimit(outcome, string(decision.Backend))
+	return decision
 }
 
 // allowShared asks Redis. The second return is false when Redis could not

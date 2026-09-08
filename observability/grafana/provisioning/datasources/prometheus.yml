@@ -1,0 +1,14 @@
+# Provisioned rather than clicked: a datasource created by hand is not
+# reproducible, and a dashboard that refers to one by uid needs it to exist
+# under that uid on every machine.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: vitalmesh-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 5s

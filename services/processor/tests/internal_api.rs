@@ -19,7 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 
 use processor::anomaly::{ALGORITHM_VERSION, RuleSet};
-use processor::config::{Config, Environment, Http, Log, LogFormat, Processing, Secret};
+use processor::config::{Config, Environment, Http, Log, LogFormat, Processing, Secret, Tracing};
 use processor::lifecycle;
 
 const TOKEN: &str = "example-internal-token-for-tests";
@@ -223,6 +223,10 @@ fn config() -> Config {
         log: Log {
             level: tracing::Level::WARN,
             format: LogFormat::Json,
+        },
+        tracing: Tracing {
+            endpoint: String::new(),
+            timeout: Duration::from_secs(10),
         },
         processing: Processing {
             max_concurrent_jobs: NonZeroUsize::new(4).unwrap(),
@@ -956,4 +960,185 @@ async fn wait_until_running(addr: SocketAddr, job_id: &str) {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+// ------------------------------------------------------------ metrics
+
+/// The endpoint the specification names, served next to the probes and
+/// needing no credential: it serves the platform's scraper.
+#[tokio::test]
+async fn metrics_are_served_without_a_credential() {
+    let service = Service::start(config()).await;
+    let response = Request::get("/metrics").send(service.addr).await;
+
+    assert_eq!(response.status, 200);
+    let body = response.body.clone();
+    for family in [
+        "vitalmesh_processor_jobs_total",
+        "vitalmesh_processor_active_jobs",
+        "vitalmesh_processor_job_capacity",
+        "vitalmesh_processor_job_slots_available",
+    ] {
+        assert!(body.contains(family), "{family} is not exposed in\n{body}");
+    }
+    // Saturation is published before any work, so a dashboard shows an idle
+    // service rather than nothing.
+    assert!(body.contains("vitalmesh_processor_active_jobs 0"), "{body}");
+    assert!(
+        body.contains("vitalmesh_processor_jobs_total{outcome=\"failed\"} 0"),
+        "{body}"
+    );
+
+    service.stop().await;
+}
+
+/// A job that really runs must move the job counter, the duration histogram
+/// and the request metrics, with the route recorded as its pattern.
+#[tokio::test]
+async fn processing_a_job_moves_the_metrics() {
+    let service = Service::start(config()).await;
+
+    let response = Request::json("/internal/v1/process", &request_body("job-metrics-1", 200))
+        .authorized()
+        .send(service.addr)
+        .await;
+    assert_eq!(response.status, 200, "{}", response.body);
+
+    let body = Request::get("/metrics").send(service.addr).await.body;
+
+    assert!(
+        body.contains("vitalmesh_processor_jobs_total{outcome=\"completed\"} 1"),
+        "the job was not counted:\n{body}"
+    );
+    assert!(
+        body.contains("vitalmesh_processor_job_duration_seconds_count{outcome=\"completed\"} 1"),
+        "the job was not timed:\n{body}"
+    );
+    assert!(
+        body.contains(
+            r#"vitalmesh_processor_http_requests_total{method="POST",route="/internal/v1/process",status="200"} 1"#
+        ),
+        "the request was not counted:\n{body}"
+    );
+    // The job finished, so nothing is running.
+    assert!(body.contains("vitalmesh_processor_active_jobs 0"), "{body}");
+
+    service.stop().await;
+}
+
+/// The route label is the pattern, so asking about many jobs cannot widen
+/// the label space (SPECIFICATIONS.md section 41).
+#[tokio::test]
+async fn asking_about_many_jobs_produces_one_series_and_leaks_no_identifier() {
+    let service = Service::start(config()).await;
+
+    let mut ids = Vec::new();
+    for i in 0..5 {
+        let id = format!("00000000-0000-4000-8000-00000000000{i}");
+        Request::get(format!("/internal/v1/jobs/{id}"))
+            .authorized()
+            .send(service.addr)
+            .await;
+        ids.push(id);
+    }
+
+    let body = Request::get("/metrics").send(service.addr).await.body;
+
+    let series = body
+        .lines()
+        .filter(|line| line.starts_with("vitalmesh_processor_http_requests_total{"))
+        .filter(|line| line.contains(r#"route="/internal/v1/jobs/{job_id}""#))
+        .count();
+    assert_eq!(series, 1, "five job ids produced {series} series:\n{body}");
+
+    for id in ids {
+        assert!(
+            !body.contains(&id),
+            "a job id reached the exposition: {id}\n{body}"
+        );
+    }
+
+    service.stop().await;
+}
+
+// ------------------------------------------------------------ tracing
+
+/// A request carrying W3C trace context is served normally: adopting a
+/// caller's trace must never change what the caller gets back. That the
+/// trace is actually continued across the two services is asserted by the
+/// gateway's end-to-end suite, which can see both sides.
+#[tokio::test]
+async fn a_request_carrying_trace_context_is_served_normally() {
+    const TRACE_ID: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
+    let service = Service::start(config()).await;
+
+    let response = Request::json("/internal/v1/process", &request_body("job-traced", 50))
+        .authorized()
+        .header("traceparent", &format!("00-{TRACE_ID}-00f067aa0ba902b7-01"))
+        .send(service.addr)
+        .await;
+
+    assert_eq!(response.status, 200, "{}", response.body);
+    service.stop().await;
+}
+
+/// A request with no trace context is served normally too. Tracing is never
+/// a precondition for work.
+#[tokio::test]
+async fn a_request_without_trace_context_is_served_normally() {
+    let service = Service::start(config()).await;
+
+    let response = Request::json("/internal/v1/process", &request_body("job-untraced", 50))
+        .authorized()
+        .send(service.addr)
+        .await;
+
+    assert_eq!(response.status, 200, "{}", response.body);
+    service.stop().await;
+}
+
+/// A malformed traceparent is ignored rather than trusted or refused: a
+/// broken header from a caller must not cost them their request.
+#[tokio::test]
+async fn a_malformed_trace_header_does_not_fail_the_request() {
+    let service = Service::start(config()).await;
+
+    for value in ["not-a-valid-traceparent", "", "00-tooshort-x-01"] {
+        let response = Request::get("/internal/v1/health")
+            .header("traceparent", value)
+            .send(service.addr)
+            .await;
+        assert_eq!(response.status, 200, "{value}: {}", response.body);
+    }
+
+    service.stop().await;
+}
+
+/// A collector that does not exist must cost a request nothing: export is
+/// batched onto its own task, so an unreachable endpoint is an outage of
+/// telemetry rather than of the service.
+#[tokio::test]
+async fn an_unreachable_collector_does_not_affect_requests() {
+    let mut cfg = config();
+    cfg.tracing = Tracing {
+        // Nothing listens here.
+        endpoint: "http://127.0.0.1:1".to_owned(),
+        timeout: Duration::from_millis(100),
+    };
+    let service = Service::start(cfg).await;
+
+    let response = Request::json(
+        "/internal/v1/process",
+        &request_body("job-no-collector", 50),
+    )
+    .authorized()
+    .header(
+        "traceparent",
+        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    )
+    .send(service.addr)
+    .await;
+
+    assert_eq!(response.status, 200, "{}", response.body);
+    service.stop().await;
 }

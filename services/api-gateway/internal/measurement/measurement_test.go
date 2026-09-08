@@ -30,12 +30,12 @@ var now = time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 var limits = config.Measurements{MaxBatchSize: 5, MaxMetadataBytes: 64, MaxFutureSkew: 5 * time.Minute}
 
 type recorder struct {
-	mu      sync.Mutex
-	ops     []string
-	batches []int
+	metrics.Noop // the measurements this test does not care about
+	mu           sync.Mutex
+	ops          []string
+	batches      []int
 }
 
-func (r *recorder) HTTPRequest(string, string, int, time.Duration) {}
 func (r *recorder) Operation(name string, outcome metrics.Outcome, _ time.Duration) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

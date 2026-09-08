@@ -1,0 +1,16 @@
+# Dashboards are files in the repository, not state in Grafana's database.
+# Editing one in the browser is fine for exploring; keeping the change means
+# saving the JSON back into observability/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: vitalmesh
+    orgId: 1
+    folder: VitalMesh
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

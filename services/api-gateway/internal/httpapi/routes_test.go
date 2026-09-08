@@ -50,7 +50,7 @@ func mountedAPI(t *testing.T) (http.Handler, *auth.Tokens, *bytes.Buffer) {
 	if err := Mount(rt.Group(APIv1), ops, middleware.Authenticate(tokens, logger), authz.Default(), nil, nil, logger); err != nil {
 		t.Fatalf("Mount: %v", err)
 	}
-	return Wrap(config.HTTP{MaxBodyBytes: 1 << 20, RequestTimeout: time.Second}, logger, nil, rt), tokens, &logBuf
+	return Wrap(config.HTTP{MaxBodyBytes: 1 << 20, RequestTimeout: time.Second}, logger, nil, nil, rt), tokens, &logBuf
 }
 
 // concretePath replaces wildcards so the request matches the route.

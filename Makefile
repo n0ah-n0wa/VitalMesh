@@ -25,7 +25,7 @@ TEST_DATABASE_URL ?= postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?ssl
 # keys, so one server serves them all.
 TEST_REDIS_URL ?= redis://localhost:6379
 
-.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -71,6 +71,18 @@ dev-db: ## Start the local PostgreSQL used by development and integration tests
 
 dev-redis: ## Start the local Redis used by development and integration tests
 	docker compose up -d --wait redis
+
+observability-up: ## Start Prometheus, Grafana and the OpenTelemetry collector
+	docker compose --profile observability up -d --wait prometheus grafana otel-collector
+	@echo "Grafana    http://localhost:3000"
+	@echo "Prometheus http://localhost:9090"
+	@echo "Collector  OTLP/HTTP on http://localhost:4318 (set OTEL_EXPORTER_OTLP_ENDPOINT to it)"
+
+observability-down: ## Stop the observability stack, leaving the database and Redis running
+	docker compose --profile observability rm -sf prometheus grafana otel-collector
+
+observability-smoke: ## Check the running stack is scraping, recording and receiving spans
+	sh scripts/observability-smoke.sh
 
 dev-db-down: ## Stop and remove the local infrastructure
 	docker compose down

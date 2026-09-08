@@ -205,7 +205,7 @@ func users(args []string, stdin io.Reader) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	pool, err := postgres.Connect(ctx, config.Database{URL: url, MaxConns: 1, ConnectTimeout: 5 * time.Second})
+	pool, err := postgres.Connect(ctx, config.Database{URL: url, MaxConns: 1, ConnectTimeout: 5 * time.Second}, postgres.Options{})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1

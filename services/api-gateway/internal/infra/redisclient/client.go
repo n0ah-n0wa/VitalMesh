@@ -36,6 +36,8 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 )
 
 // ErrUnavailable means Redis could not serve the operation. Callers degrade
@@ -52,6 +54,8 @@ type Client struct {
 	rdb       *redis.Client
 	cfg       config.Redis
 	logger    *slog.Logger
+	metrics   metrics.Recorder
+	tracer    tracing.Tracer
 	now       func() time.Time
 	namespace string
 
@@ -66,6 +70,10 @@ type Client struct {
 // Options tune a Client. Nil fields take safe defaults.
 type Options struct {
 	Now func() time.Time
+	// Metrics receives the latency of every command; nil records none.
+	Metrics metrics.Recorder
+	// Tracer opens one span per command; nil records none.
+	Tracer tracing.Tracer
 }
 
 // New returns a client for cfg. It does not connect: go-redis dials lazily,
@@ -99,6 +107,8 @@ func New(cfg config.Redis, logger *slog.Logger, opts Options) (*Client, error) {
 		rdb:       redis.NewClient(parsed),
 		cfg:       cfg,
 		logger:    logger,
+		metrics:   metrics.OrNoop(opts.Metrics),
+		tracer:    tracing.OrNoop(opts.Tracer),
 		now:       now,
 		namespace: cfg.Namespace,
 	}, nil
@@ -108,7 +118,7 @@ func New(cfg config.Redis, logger *slog.Logger, opts Options) (*Client, error) {
 // configured without Redis. Callers take their degraded path and nothing
 // dials anything.
 func Disabled(logger *slog.Logger) *Client {
-	return &Client{logger: logger, now: time.Now}
+	return &Client{logger: logger, metrics: metrics.Noop{}, tracer: tracing.Noop{}, now: time.Now}
 }
 
 // Enabled reports whether Redis is configured at all.
@@ -142,7 +152,7 @@ func (c *Client) Close() error {
 // so failing readiness would take a healthy gateway out of rotation
 // (SPECIFICATIONS.md section 90, OPEN_QUESTIONS OQ-27).
 func (c *Client) Ping(ctx context.Context) error {
-	return c.do(ctx, func(ctx context.Context) error {
+	return c.do(ctx, "ping", func(ctx context.Context) error {
 		return c.rdb.Ping(ctx).Err()
 	})
 }
@@ -157,7 +167,7 @@ func (c *Client) Key(parts ...string) string {
 // [ErrUnavailable].
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 	var out []byte
-	err := c.do(ctx, func(ctx context.Context) error {
+	err := c.do(ctx, "get", func(ctx context.Context) error {
 		value, err := c.rdb.Get(ctx, key).Bytes()
 		if errors.Is(err, redis.Nil) {
 			// A miss is an answer, not a failure: it must not count
@@ -180,7 +190,7 @@ func (c *Client) Set(ctx context.Context, key string, value []byte, ttl time.Dur
 	if ttl <= 0 {
 		return fmt.Errorf("redis set %q: a time to live is required", key)
 	}
-	return c.do(ctx, func(ctx context.Context) error {
+	return c.do(ctx, "set", func(ctx context.Context) error {
 		return c.rdb.Set(ctx, key, value, ttl).Err()
 	})
 }
@@ -190,7 +200,7 @@ func (c *Client) Delete(ctx context.Context, keys ...string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	return c.do(ctx, func(ctx context.Context) error {
+	return c.do(ctx, "delete", func(ctx context.Context) error {
 		return c.rdb.Del(ctx, keys...).Err()
 	})
 }
@@ -205,7 +215,7 @@ func (c *Client) Acquire(ctx context.Context, key string, ttl time.Duration) (bo
 		return false, fmt.Errorf("redis lock %q: a time to live is required", key)
 	}
 	var acquired bool
-	err := c.do(ctx, func(ctx context.Context) error {
+	err := c.do(ctx, "setnx", func(ctx context.Context) error {
 		ok, err := c.rdb.SetNX(ctx, key, lockValue, ttl).Result()
 		acquired = ok
 		return err
@@ -228,7 +238,7 @@ const lockValue = "held"
 // cannot interleave with another replica doing the same.
 func (c *Client) Eval(ctx context.Context, script *redis.Script, keys []string, args ...any) (any, error) {
 	var out any
-	err := c.do(ctx, func(ctx context.Context) error {
+	err := c.do(ctx, "eval", func(ctx context.Context) error {
 		value, err := script.Run(ctx, c.rdb, keys, args...).Result()
 		if errors.Is(err, redis.Nil) {
 			// A script that returns nothing is a result, not a failure.
@@ -247,13 +257,16 @@ var errNotFoundSentinel = errors.New("redis: miss")
 
 // do runs one operation under the client's timeout and the caller's
 // context, and maintains the availability state around it.
-func (c *Client) do(caller context.Context, fn func(context.Context) error) error {
+func (c *Client) do(caller context.Context, command string, fn func(context.Context) error) error {
 	if !c.Enabled() {
 		return ErrUnavailable
 	}
 	if !c.Available() {
 		// Inside the recovery interval, fail locally rather than spending
 		// this request's time discovering what the last one already found.
+		// It is still recorded: a degraded period should be visible as
+		// unavailability rather than as an absence of traffic.
+		c.metrics.Redis(command, metrics.OutcomeUnavailable, 0)
 		return ErrUnavailable
 	}
 	// Bounded by the client's own timeout and by the caller's deadline,
@@ -261,12 +274,22 @@ func (c *Client) do(caller context.Context, fn func(context.Context) error) erro
 	ctx, cancel := context.WithTimeout(caller, c.cfg.Timeout)
 	defer cancel()
 
+	ctx, span := c.tracer.Start(ctx, "redis."+command)
+	span.SetAttribute("db.system", "redis")
+	span.SetAttribute("db.operation.name", command)
+	defer span.End()
+
+	started := time.Now()
 	err := fn(ctx)
+	elapsed := time.Since(started)
 	switch {
 	case err == nil:
+		c.metrics.Redis(command, metrics.OutcomeOK, elapsed)
 		c.markUp()
 		return nil
 	case errors.Is(err, errNotFoundSentinel):
+		// A miss is a successful command that found nothing.
+		c.metrics.Redis(command, metrics.OutcomeOK, elapsed)
 		c.markUp()
 		return err
 	case caller.Err() != nil:
@@ -275,8 +298,10 @@ func (c *Client) do(caller context.Context, fn func(context.Context) error) erro
 		// would then be denied a working dependency because this one was
 		// abandoned. Note this tests the *caller's* context, not the
 		// derived one, which also ends when the client's own timeout fires.
+		c.metrics.Redis(command, metrics.OutcomeCancelled, elapsed)
 		return ErrUnavailable
 	default:
+		c.metrics.Redis(command, metrics.OutcomeUnavailable, elapsed)
 		c.markDown(err)
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}

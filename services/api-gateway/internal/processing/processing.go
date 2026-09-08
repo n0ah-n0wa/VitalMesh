@@ -416,6 +416,12 @@ func (s *Service) run(ctx context.Context, job domain.ProcessingJob, valid NewJo
 	}
 
 	// The external call. No transaction is open here.
+	//
+	// The gauge spans exactly the call, so "active jobs" means jobs whose
+	// work is running right now rather than rows in some state. It is moved
+	// in a defer so that a panic or an early return cannot leave it high.
+	s.metrics.InFlight(metrics.ProcessingJob, 1)
+	defer s.metrics.InFlight(metrics.ProcessingJob, -1)
 	outcome, callErr := s.processor.Process(ctx, s.request(started, valid, readings))
 	if callErr != nil {
 		return domain.ProcessingJob{}, s.recordFailure(ctx, started, callErr)

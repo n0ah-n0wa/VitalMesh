@@ -7,16 +7,24 @@ description = "VitalMesh data processing service"
 publish = false
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
+# matched-path gives middleware the route pattern, which is what keeps the
+# metric labels bounded: a path carries identifiers, a pattern does not.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "matched-path"] }
 serde = { version = "1", features = ["derive"] }
 # float_roundtrip makes parsing correctly rounded, so a finite f64 survives a
 # JSON round trip bit-for-bit (the default parser can be off by one ULP).
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# Metrics: the protobuf and push features are not used, so they are off.
+prometheus = { version = "0.14", default-features = false }
 time = { version = "0.3", default-features = false, features = ["std", "parsing", "formatting"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["trace", "http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.33.0", default-features = false }
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

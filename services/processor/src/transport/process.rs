@@ -57,6 +57,10 @@ pub async fn process(
     match state.processor.process_within(request, budget).await {
         Ok(outcome) => {
             running.completed();
+            state.metrics.job(
+                crate::metrics::OUTCOME_COMPLETED,
+                started.elapsed().as_secs_f64(),
+            );
             tracing::info!(
                 status = "COMPLETED",
                 duration_ms = started.elapsed().as_millis() as u64,
@@ -78,8 +82,17 @@ pub async fn process(
             // record; anything else ended and keeps its diagnosis.
             if admission_refused(&error) {
                 running.never_started();
+                // A refused job never ran, so it is counted apart from the
+                // jobs that did and contributes no duration.
+                state.metrics.job_refused();
             } else {
                 running.ended(&error);
+                let outcome = if error.kind() == Kind::Cancelled {
+                    crate::metrics::OUTCOME_CANCELLED
+                } else {
+                    crate::metrics::OUTCOME_FAILED
+                };
+                state.metrics.job(outcome, started.elapsed().as_secs_f64());
             }
             tracing::info!(
                 status = %if error.kind() == Kind::Cancelled { "CANCELLED" } else { "FAILED" },

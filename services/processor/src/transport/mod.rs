@@ -31,7 +31,17 @@ pub use process::REQUEST_TIMEOUT_HEADER;
 /// middleware chain.
 pub fn router(state: SharedState) -> Router {
     let http = state.config.http.clone();
-    with_middleware(routes(&http), &http).with_state(state)
+    with_middleware(routes(&http), &http)
+        // route_layer rather than layer: the matched route pattern only
+        // exists once the router has matched, and that pattern is what
+        // keeps the metric's labels bounded. The cost is that a request
+        // matching no route is not counted; it has no route to be counted
+        // under, and the fallback answers it.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            middleware::record_metrics,
+        ))
+        .with_state(state)
 }
 
 /// The route table without middleware or state.
@@ -64,6 +74,11 @@ pub fn routes(http: &Http) -> Router<SharedState> {
         .route("/health", get(health::live))
         .route("/ready", get(health::ready))
         .route("/internal/v1/health", get(health::internal))
+        // Unversioned and unauthenticated like the probes: it serves the
+        // platform's scraper, not the gateway (SPECIFICATIONS.md sections 10
+        // and 41). It carries no identifiers, by construction of the metrics
+        // module. Deployments restrict it at the network.
+        .route("/metrics", get(health::metrics))
         .merge(protected)
 }
 

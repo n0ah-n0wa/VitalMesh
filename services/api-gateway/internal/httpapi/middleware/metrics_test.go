@@ -16,14 +16,14 @@ type captured struct {
 	duration      time.Duration
 }
 
-type recordingMetrics struct{ got []captured }
+type recordingMetrics struct {
+	metrics.Noop // the measurements this test does not care about
+	got          []captured
+}
 
 func (r *recordingMetrics) HTTPRequest(method, route string, status int, d time.Duration) {
 	r.got = append(r.got, captured{method, route, status, d})
 }
-func (r *recordingMetrics) Operation(string, metrics.Outcome, time.Duration) {}
-func (r *recordingMetrics) Batch(string, int)                                {}
-func (r *recordingMetrics) Cache(string, bool)                               {}
 
 func TestMetricsRecordsRouteStatusAndDuration(t *testing.T) {
 	rec := &recordingMetrics{}

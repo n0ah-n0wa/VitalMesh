@@ -21,6 +21,9 @@ type Tracer interface {
 type Span interface {
 	// SetAttribute records a key/value pair on the span.
 	SetAttribute(key string, value any)
+	// SetName renames the span. A server span is named after the route it
+	// matched, which is only known once the router has matched it.
+	SetName(name string)
 	// RecordError marks the span as failed with err. A nil err is ignored.
 	RecordError(err error)
 	End()
@@ -34,6 +37,7 @@ func (Noop) Start(ctx context.Context, _ string) (context.Context, Span) { retur
 type noopSpan struct{}
 
 func (noopSpan) SetAttribute(string, any) {}
+func (noopSpan) SetName(string)           {}
 func (noopSpan) RecordError(error)        {}
 func (noopSpan) End()                     {}
 

@@ -1,0 +1,420 @@
+{
+  "uid": "vitalmesh-processing",
+  "title": "VitalMesh \u00b7 Rust processing and job status",
+  "description": "The processing service: how much work it is doing, how long it takes, how it ends, and how close to full it is. The service queues nothing, so saturation is what predicts refusals.",
+  "tags": [
+    "vitalmesh",
+    "processor"
+  ],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "10s",
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Active jobs",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_processor_active_jobs",
+          "legendFormat": "running",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "Jobs running in the engine right now."
+    },
+    {
+      "type": "stat",
+      "title": "Free admission slots",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 5,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_processor_job_slots_available",
+          "legendFormat": "free",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1
+              },
+              {
+                "color": "green",
+                "value": 2
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "Zero means the next job is refused: this service queues nothing."
+    },
+    {
+      "type": "stat",
+      "title": "Job failure ratio",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 5,
+        "x": 10,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "job:processor_job_failure_ratio:rate5m",
+          "legendFormat": "failed",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.02
+              },
+              {
+                "color": "red",
+                "value": 0.1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "description": "Failed or cancelled over everything admitted. Refusals are excluded: they never ran."
+    },
+    {
+      "type": "timeseries",
+      "title": "Jobs per second by outcome",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 9,
+        "x": 15,
+        "y": 0
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "job:processor_jobs:rate5m",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Completed, failed, cancelled and refused. All four are published from start-up, so a flat zero line means no failures rather than no instrumentation."
+    },
+    {
+      "type": "timeseries",
+      "title": "Job duration percentiles",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "job:processor_job_duration:p95",
+          "legendFormat": "p95",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "job:processor_job_duration:p99",
+          "legendFormat": "p99",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Engine saturation",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 5
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "job:processor_saturation:ratio",
+          "legendFormat": "in use",
+          "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "vitalmesh_processor_job_capacity",
+          "legendFormat": "capacity",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Saturation reaching one is when refusals begin."
+    },
+    {
+      "type": "timeseries",
+      "title": "Processing operations at the gateway",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(vitalmesh_operation_total{operation=~\"processing.*\"}[5m]))",
+          "legendFormat": "{{operation}} {{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "The gateway's view of the same work, including failures that never reached the engine."
+    },
+    {
+      "type": "timeseries",
+      "title": "Job sizes",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "vitalmesh-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "vitalmesh-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, operation) (rate(vitalmesh_batch_size_bucket[5m])))",
+          "legendFormat": "p95 {{operation}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Check this before suspecting the engine of being slow."
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

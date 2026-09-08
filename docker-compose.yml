@@ -33,3 +33,80 @@ services:
       interval: 2s
       timeout: 3s
       retries: 15
+
+  # ------------------------------------------------------ observability
+  #
+  # Everything below is behind the `observability` profile, so the ordinary
+  # `docker compose up -d --wait postgres redis` does not start it and no
+  # test, build or verification gate depends on it. The application does not
+  # know whether any of it is running: metrics are served whether or not
+  # anyone scrapes them, and traces are exported to a collector that may or
+  # may not exist (SPECIFICATIONS.md sections 40 and 41).
+  #
+  #   docker compose --profile observability up -d --wait
+  #
+  # The services themselves run as host processes during development, so
+  # Prometheus reaches them through host.docker.internal, which
+  # `extra_hosts` makes resolvable on Linux as well as Docker Desktop.
+
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+    ports:
+      - "9090:9090"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.5.1
+    environment:
+      # Local only: an unauthenticated Grafana is convenient on a laptop and
+      # unacceptable anywhere else, which is why this file is not the
+      # deployed configuration.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: light
+      GF_LOG_LEVEL: warn
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3000/api/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.117.0
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./observability/otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP, which both services use
+      - "8888:8888"   # the collector's own metrics
+    # No healthcheck: the image carries no shell or wget to run one with, and
+    # a check that cannot run is worse than none. `docker compose up --wait`
+    # treats a container with no healthcheck as ready once it is running, and
+    # the smoke test verifies the collector for real by asking it for its
+    # metrics.

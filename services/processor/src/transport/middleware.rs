@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use axum::extract::{Request, State};
+use axum::extract::{MatchedPath, Request, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -12,8 +12,68 @@ use tracing::Instrument;
 use crate::config::Secret;
 use crate::error::Error;
 use crate::requestid::{self, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
+use crate::state::SharedState;
 use crate::transport::context::{self, RequestContext};
 use crate::transport::error;
+
+/// Reduces a request path to the route it names, so that nothing derived
+/// from a path carries an identifier.
+///
+/// The table is this service's own routes, which are few and fixed. A path
+/// matching none of them is "unmatched" rather than being repeated: an
+/// unknown path is exactly the kind that might carry anything.
+fn route_of(path: &str) -> &'static str {
+    match path {
+        "/health" => "/health",
+        "/ready" => "/ready",
+        "/metrics" => "/metrics",
+        "/internal/v1/health" => "/internal/v1/health",
+        "/internal/v1/process" => "/internal/v1/process",
+        _ if path.starts_with("/internal/v1/jobs/") => "/internal/v1/jobs/{job_id}",
+        _ => "unmatched",
+    }
+}
+
+/// Attaches an OpenTelemetry parent context to a span, so a trace that
+/// began in the gateway continues here. It is a separate function because
+/// the trait it needs is only in scope for this line.
+fn set_parent(span: &tracing::Span, parent: opentelemetry::Context) {
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    // A parent that cannot be attached leaves this span the root of its own
+    // trace, which is a worse trace but a served request. Nothing here is
+    // worth failing a request over.
+    let _ = span.set_parent(parent);
+}
+
+/// Records one served request: its count, its latency and, when it failed,
+/// its class.
+///
+/// The route label is the pattern axum matched, never the request path. A
+/// path carries identifiers, and a metric labelled by one grows without
+/// bound and leaks what it names (SPECIFICATIONS.md section 41). A request
+/// that matched nothing is recorded as "unmatched" rather than by its path.
+pub async fn record_metrics(
+    State(state): State<SharedState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let method = request.method().as_str().to_owned();
+    let route = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+
+    let started = Instant::now();
+    let response = next.run(request).await;
+    state.metrics.http_request(
+        &method,
+        &route,
+        response.status().as_u16(),
+        started.elapsed().as_secs_f64(),
+    );
+    response
+}
 
 /// Assigns request and correlation ids, makes them available to handlers,
 /// echoes them in the response, and logs one record per request.
@@ -27,13 +87,46 @@ pub async fn request_context(request: Request, next: Next) -> Response {
         .map(str::to_owned)
         .unwrap_or_else(|| request_id.clone());
 
-    let span = tracing::info_span!(
-        "request",
-        request_id = %request_id,
-        correlation_id = %correlation_id,
-        method = %request.method(),
-        path = %request.uri().path(),
-    );
+    // W3C trace context, when the caller sent it, makes this span a child
+    // of the gateway's rather than the root of a trace of its own.
+    let parent = crate::tracing_otel::context_from_headers(request.headers());
+    let trace_id = crate::tracing_otel::trace_id_from_headers(request.headers());
+
+    // Two names for the same span, so the exporter can drop probes by name
+    // (the one thing a filter can see before fields exist) while the log
+    // formatter still records them. A liveness probe every few seconds per
+    // replica is not an important request and would bury the ones that are.
+    let path = request.uri().path();
+    let route = route_of(path);
+    let span = if crate::tracing_otel::is_probe(path) {
+        tracing::info_span!(
+            crate::tracing_otel::PROBE_SPAN,
+            request_id = %request_id,
+            correlation_id = %correlation_id,
+            method = %request.method(),
+            route = %route,
+            trace_id = tracing::field::Empty,
+        )
+    } else {
+        tracing::info_span!(
+            "request",
+            request_id = %request_id,
+            correlation_id = %correlation_id,
+            method = %request.method(),
+            // The route rather than the path. A span leaves this process
+            // for a backend that is not the record's custodian, and a path
+            // carries a job id (SPECIFICATIONS.md sections 40 and 41). The
+            // matched pattern does not exist yet here, since routing happens
+            // further in, so the path is reduced to its route by the table
+            // below.
+            route = %route,
+            trace_id = tracing::field::Empty,
+        )
+    };
+    if let Some(id) = trace_id {
+        span.record("trace_id", id.as_str());
+    }
+    set_parent(&span, parent);
     let ids = RequestContext {
         request_id,
         correlation_id,

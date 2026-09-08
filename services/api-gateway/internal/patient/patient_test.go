@@ -26,15 +26,14 @@ var now = time.Date(2026, 9, 6, 12, 0, 0, 0, time.UTC)
 
 // recorder captures what the service reports to the observability ports.
 type recorder struct {
-	mu         sync.Mutex
-	operations []string // "name:outcome"
-	spans      []string
-	errors     []error
+	metrics.Noop // the measurements this test does not care about
+	mu           sync.Mutex
+	operations   []string // "name:outcome"
+	spans        []string
+	errors       []error
 }
 
-func (r *recorder) HTTPRequest(string, string, int, time.Duration) {}
-func (r *recorder) Batch(string, int)                              {}
-func (r *recorder) Cache(string, bool)                             {}
+func (r *recorder) Cache(string, bool) {}
 
 func (r *recorder) Operation(name string, outcome metrics.Outcome, _ time.Duration) {
 	r.mu.Lock()
@@ -52,6 +51,7 @@ func (r *recorder) Start(ctx context.Context, name string) (context.Context, tra
 type span struct{ r *recorder }
 
 func (s *span) SetAttribute(string, any) {}
+func (s *span) SetName(string)           {}
 func (s *span) RecordError(err error) {
 	if err != nil {
 		s.r.mu.Lock()

@@ -29,9 +29,17 @@ async fn main() -> ExitCode {
         version: VERSION,
         environment: config.environment.as_str(),
     };
-    if let Err(error) = telemetry::init(&config.log, info) {
-        eprintln!("cannot initialise logging: {error}");
-        return ExitCode::from(1);
+    let traces = match telemetry::init(&config.log, &config.tracing, info) {
+        Ok(provider) => provider,
+        Err(error) => {
+            eprintln!("cannot initialise logging: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    if !config.tracing.enabled() {
+        tracing::info!(
+            "OTEL_EXPORTER_OTLP_ENDPOINT is not set: trace context is propagated but no spans are exported"
+        );
     }
 
     let shutdown = CancellationToken::new();
@@ -48,7 +56,16 @@ async fn main() -> ExitCode {
         }
     };
 
-    match lifecycle::run(config, listener, shutdown).await {
+    let outcome = lifecycle::run(config, listener, shutdown).await;
+
+    // Flush what was recorded before the process ends. A collector that has
+    // gone away must not hold up exit, so the provider's own bounded
+    // shutdown is what waits, not this.
+    if let Some(Err(error)) = traces.map(|provider| provider.shutdown()) {
+        tracing::warn!(error = %error, "recorded spans were not flushed");
+    }
+
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             tracing::error!(error = %error, "processor exited");

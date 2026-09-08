@@ -41,6 +41,8 @@ Run `make help` for the list. The gates that CI runs are exactly the ones `make 
 | `make contracts-check` | checks the API contracts and that both services' types agree with them |
 | `make contracts-lock` | re-records a reviewed contract change in its lock file |
 | `make dev-db` / `make dev-redis` | start the local PostgreSQL / Redis (`docker compose`) |
+| `make observability-up` / `-down` | start / stop Prometheus, Grafana and the OpenTelemetry collector |
+| `make observability-smoke` | check the running stack is scraping, recording and receiving spans |
 | `make dev-db-down` | stop and remove the local infrastructure |
 | `make integration-test` | integration tests against `TEST_DATABASE_URL` and `TEST_REDIS_URL` (default: the local PostgreSQL and Redis) |
 | `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
@@ -51,6 +53,35 @@ Run `make help` for the list. The gates that CI runs are exactly the ones `make 
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
+
+## Watching what the services do
+
+The observability stack is optional and nothing depends on it, which is why
+it lives behind a compose profile and no gate touches it.
+
+```bash
+make observability-up      # Prometheus :9090, Grafana :3000, collector :4318
+make observability-smoke   # asserts it is actually observing something
+```
+
+Grafana needs no login locally and opens on four provisioned dashboards:
+API traffic, latency and errors, Rust processing and job status, and
+infrastructure. Both services must be running for them to show anything;
+Prometheus reaches host processes through `host.docker.internal`.
+
+Traces appear in the collector's own output, so a request crossing both
+services can be followed without a trace store:
+
+```bash
+docker compose logs -f otel-collector
+```
+
+Set `OTEL_EXPORTER_OTLP_ENDPOINT` before starting a service to export from
+it. Leaving it unset is a supported way to run: trace context still
+propagates and trace ids still reach the logs, and nothing is exported.
+
+See [`observability/README.md`](../observability/README.md) for the rules,
+the dashboards and how to add to them.
 
 ## Changing an API contract
 
@@ -72,6 +103,7 @@ make dev-db && make dev-redis && make migrate
 export DATABASE_URL=postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
 export REDIS_URL=redis://localhost:6379                 # optional: without it the gateway runs degraded
 export JWT_SECRET="$(openssl rand -base64 48)"       # local only; never commit a value (SPECIFICATIONS.md section 31)
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 # optional: only if the collector is running
 ./bin/api-gateway                                   # :8080
 ./services/processor/target/debug/processor         # listens on 0.0.0.0:8081
 curl localhost:8080/health

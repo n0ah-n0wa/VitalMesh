@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 use super::{ErrorResponse, context, routes, with_middleware};
-use crate::config::{Config, Environment, Http, Log, LogFormat, Processing};
+use crate::config::{Config, Environment, Http, Log, LogFormat, Processing, Tracing};
 use crate::error::{Error, Kind};
 use crate::requestid::{CORRELATION_ID_HEADER, REQUEST_ID_HEADER, is_valid};
 use crate::state::{AppState, SharedState};
@@ -33,6 +33,10 @@ fn test_config() -> Config {
         log: Log {
             level: tracing::Level::INFO,
             format: LogFormat::Json,
+        },
+        tracing: Tracing {
+            endpoint: String::new(),
+            timeout: Duration::from_secs(10),
         },
         processing: Processing {
             max_concurrent_jobs: NonZeroUsize::MIN,

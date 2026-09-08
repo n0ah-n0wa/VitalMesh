@@ -11,6 +11,7 @@ use crate::anomaly::Detector;
 use crate::config::Config;
 use crate::engine::Engine;
 use crate::jobs::JobRegistry;
+use crate::metrics::Metrics;
 use crate::pipeline::{Limits, Pipeline, Processor};
 
 /// Everything handlers need.
@@ -21,6 +22,8 @@ pub struct AppState {
     pub processor: Processor,
     /// This instance's view of the jobs it is running or recently ran.
     pub jobs: JobRegistry,
+    /// What the service publishes at `GET /metrics`.
+    pub metrics: Metrics,
     pub readiness: Readiness,
 }
 
@@ -42,9 +45,15 @@ impl AppState {
             },
             crate::VERSION,
         );
+        let processor = Processor::new(pipeline, engine);
+        let metrics = Metrics::new();
+        // The saturation gauges read the engine at scrape time, so they can
+        // never drift from what admission actually sees.
+        metrics.observe_engine(processor.engine_handle());
         Self {
-            processor: Processor::new(pipeline, engine),
+            processor,
             jobs: JobRegistry::new(config.processing.job_retention),
+            metrics,
             readiness: Readiness::default(),
             config,
         }

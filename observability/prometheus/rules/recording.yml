@@ -1,0 +1,129 @@
+# Recording rules precompute the expressions a dashboard or an alert would
+# otherwise repeat. They exist for two reasons: a panel that reads one
+# series is faster and cheaper than one that reads thousands, and an alert
+# and a dashboard that share a rule cannot disagree about what "the error
+# rate" means.
+#
+# Naming follows the Prometheus convention:
+#   level:metric:operation
+# so a reader can tell from the name what a series aggregates over.
+groups:
+  - name: api-gateway.traffic
+    interval: 10s
+    rules:
+      # Requests per second, over everything and by route, which is what
+      # every traffic panel starts from.
+      - record: job:gateway_http_requests:rate5m
+        expr: sum(rate(vitalmesh_http_requests_total[5m]))
+
+      - record: route:gateway_http_requests:rate5m
+        expr: sum by (method, route) (rate(vitalmesh_http_requests_total[5m]))
+
+      # Failures split by whose fault they are. A client error rate and a
+      # server error rate answer different questions and are alerted on
+      # differently.
+      - record: job:gateway_http_errors:rate5m
+        expr: sum by (class) (rate(vitalmesh_http_errors_total[5m]))
+
+      # The ratio an alert fires on.
+      #
+      # Two guards, both learned the hard way. `clamp_min` on the
+      # denominator keeps a division by zero from producing an infinity when
+      # there is no traffic. `or vector(0)` on the numerator is what makes a
+      # service with no errors report zero rather than nothing at all: the
+      # error counter has no series until the first failure, and an empty
+      # numerator makes the whole expression empty, so a panel would read
+      # "No data" and an alert could not tell a healthy service from an
+      # uninstrumented one.
+      - record: job:gateway_http_server_error_ratio:rate5m
+        expr: |
+          (sum(rate(vitalmesh_http_errors_total{class="server"}[5m])) or vector(0))
+            /
+          clamp_min(sum(rate(vitalmesh_http_requests_total[5m])), 0.001)
+
+      # Per route there is no vector(0) to fall back on, because a zero
+      # would need a route label to belong to. A route with no errors is
+      # simply absent here, which is what a "routes by error ratio" table
+      # wants anyway.
+      - record: route:gateway_http_server_error_ratio:rate5m
+        expr: |
+          sum by (route) (rate(vitalmesh_http_errors_total{class="server"}[5m]))
+            /
+          clamp_min(sum by (route) (rate(vitalmesh_http_requests_total[5m])), 0.001)
+
+  - name: api-gateway.latency
+    interval: 10s
+    rules:
+      # Quantiles from the histogram. The p99 is what a client feels; the
+      # p50 is what the service usually does. Both are kept because a rise
+      # in one and not the other says something different.
+      - record: job:gateway_http_latency:p50
+        expr: histogram_quantile(0.50, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_http_latency:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_http_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: route:gateway_http_latency:p99
+        expr: histogram_quantile(0.99, sum by (le, route) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+  - name: api-gateway.dependencies
+    interval: 10s
+    rules:
+      - record: job:gateway_database_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_database_query_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_redis_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_redis_command_duration_seconds_bucket[5m])))
+
+      # Redis calls the client could not make or that failed. A rising
+      # value is the degraded path being taken, which is correct behaviour
+      # and still worth seeing.
+      - record: job:gateway_redis_unavailable:rate5m
+        expr: sum(rate(vitalmesh_redis_command_duration_seconds_count{outcome="unavailable"}[5m])) or vector(0)
+
+      # The rate-limit series are published at zero from start-up, so this
+      # needs no fallback: a service that has refused nobody still reports.
+      - record: job:gateway_rate_limited:rate5m
+        expr: sum by (backend) (rate(vitalmesh_rate_limit_decisions_total{decision="limited"}[5m]))
+
+      # Pool saturation as a fraction, which is comparable across
+      # deployments in a way a raw count is not.
+      - record: job:gateway_database_pool_saturation:ratio
+        expr: |
+          vitalmesh_database_connections_acquired
+            /
+          clamp_min(vitalmesh_database_connections_max, 1)
+
+  - name: processor.jobs
+    interval: 10s
+    rules:
+      - record: job:processor_jobs:rate5m
+        expr: sum by (outcome) (rate(vitalmesh_processor_jobs_total[5m]))
+
+      # Everything that is not a completed job, over everything that was
+      # admitted. Refusals are excluded from the denominator because a
+      # refused job never ran.
+      # The job outcome series are published at zero from start-up, so the
+      # numerator always exists; only the denominator needs guarding.
+      - record: job:processor_job_failure_ratio:rate5m
+        expr: |
+          sum(rate(vitalmesh_processor_jobs_total{outcome=~"failed|cancelled"}[5m]))
+            /
+          clamp_min(sum(rate(vitalmesh_processor_jobs_total{outcome=~"completed|failed|cancelled"}[5m])), 0.001)
+
+      - record: job:processor_job_duration:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(vitalmesh_processor_job_duration_seconds_bucket[5m])))
+
+      - record: job:processor_job_duration:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_processor_job_duration_seconds_bucket[5m])))
+
+      # How full the engine is. The service queues nothing, so saturation
+      # is what predicts refusals.
+      - record: job:processor_saturation:ratio
+        expr: |
+          vitalmesh_processor_active_jobs
+            /
+          clamp_min(vitalmesh_processor_job_capacity, 1)

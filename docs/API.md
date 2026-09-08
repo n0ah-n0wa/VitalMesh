@@ -4,7 +4,7 @@ This document describes the conventions every VitalMesh public endpoint follows.
 
 ## Versioning
 
-All public endpoints live under `/api/v1`. Breaking changes are published under a new prefix (`/api/v2`); the previous version keeps working until it is retired explicitly. Health endpoints (`/health`, `/ready`) are unversioned because they serve the platform, not clients.
+All public endpoints live under `/api/v1`. Breaking changes are published under a new prefix (`/api/v2`); the previous version keeps working until it is retired explicitly. Health endpoints (`/health`, `/ready`) and the Prometheus exposition (`/metrics`) are unversioned because they serve the platform, not clients. `/metrics` needs no credential and carries no identifiers; deployments restrict it at the network.
 
 ## Content
 
@@ -260,6 +260,10 @@ The request selects what to process:
 A `5xx` here is transient and worth retrying. Because a `5xx` leaves no idempotency record, the same `Idempotency-Key` can be used for the retry; it creates a new job, and the failed one stays on record. The processing service's own error messages are never repeated to you: they are written for that service's operators and can name internal detail.
 
 **Timeouts and retries.** The call to the processing service is bounded per attempt and is retried a bounded number of times for failures worth repeating, all inside this request's own deadline. You never wait longer than the request timeout below.
+
+## Tracing
+
+Send W3C `traceparent` and your trace continues through the gateway, the processing service and the databases they touch, rather than restarting at our edge. Without it a trace starts here. `X-Request-ID` and `X-Correlation-ID` travel alongside and are echoed back; quote the correlation identifier in a support request.
 
 ## Rate limiting
 

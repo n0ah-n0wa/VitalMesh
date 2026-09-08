@@ -85,7 +85,7 @@ func newAPI(t *testing.T) (http.Handler, *bytes.Buffer) {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	return Wrap(cfg, logger, nil, rt), &logBuf
+	return Wrap(cfg, logger, nil, nil, rt), &logBuf
 }
 
 func call(h http.Handler, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
