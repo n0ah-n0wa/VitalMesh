@@ -40,13 +40,14 @@ Run `make help` for the list. The gates that CI runs are exactly the ones `make 
 | `make test` | unit tests: `go test -race ./...` and `cargo test` |
 | `make contracts-check` | checks the API contracts and that both services' types agree with them |
 | `make contracts-lock` | re-records a reviewed contract change in its lock file |
-| `make dev-db` / `make dev-db-down` | start / stop the local PostgreSQL (`docker compose`) |
-| `make integration-test` | database integration tests against `TEST_DATABASE_URL` (default: the local PostgreSQL) |
+| `make dev-db` / `make dev-redis` | start the local PostgreSQL / Redis (`docker compose`) |
+| `make dev-db-down` | stop and remove the local infrastructure |
+| `make integration-test` | integration tests against `TEST_DATABASE_URL` and `TEST_REDIS_URL` (default: the local PostgreSQL and Redis) |
 | `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make build` | builds `bin/api-gateway` and `services/processor/target/debug/processor` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
-| `make verify` | `format-check lint test contracts-check integration-test e2e-test build line-endings`; needs the local PostgreSQL (`make dev-db`) |
+| `make verify` | `format-check lint test contracts-check integration-test e2e-test build line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
@@ -67,8 +68,9 @@ Both services read `HTTP_ADDR` and expose `GET /health` (liveness) and `GET /rea
 
 ```bash
 make build
-make dev-db && make migrate
+make dev-db && make dev-redis && make migrate
 export DATABASE_URL=postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
+export REDIS_URL=redis://localhost:6379                 # optional: without it the gateway runs degraded
 export JWT_SECRET="$(openssl rand -base64 48)"       # local only; never commit a value (SPECIFICATIONS.md section 31)
 ./bin/api-gateway                                   # :8080
 ./services/processor/target/debug/processor         # listens on 0.0.0.0:8081

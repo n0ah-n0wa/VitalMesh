@@ -261,6 +261,22 @@ A `5xx` here is transient and worth retrying. Because a `5xx` leaves no idempote
 
 **Timeouts and retries.** The call to the processing service is bounded per attempt and is retried a bounded number of times for failures worth repeating, all inside this request's own deadline. You never wait longer than the request timeout below.
 
+## Rate limiting
+
+Every request under `/api/v1` is counted against a budget (SPECIFICATIONS.md section 29). The unversioned health endpoints are not, because they serve the platform's own probes. An authenticated request counts against the account behind the token; an unauthenticated one counts against the client address. Defaults are 60 requests a minute for an anonymous caller, 300 for an authenticated one and 1000 for an administrator, and every limit is configurable per deployment.
+
+Every response carries the budget, allowed or refused:
+
+| Header | Meaning |
+|---|---|
+| `RateLimit-Limit` | requests allowed in the window |
+| `RateLimit-Remaining` | how many are left |
+| `RateLimit-Reset` | seconds until the window rolls over |
+
+A caller over budget receives `429 RATE_LIMIT_EXCEEDED` with `Retry-After` in seconds. Pace yourself from the headers rather than by hitting the limit.
+
+The counter is shared by every replica. If the shared store is briefly unavailable each replica falls back to its own counter, so a limit still applies but may be more generous than usual; requests are never refused because of that outage.
+
 ## Status codes
 
 | Status | Meaning |
@@ -310,12 +326,12 @@ Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY
 Write operations that could create duplicate state accept an `Idempotency-Key` header (SPECIFICATIONS.md section 24): `POST /api/v1/patients`, `POST /api/v1/measurements`, `POST /api/v1/measurements/batch` and `POST /api/v1/processing/jobs`. The header is optional; without it every request runs.
 
 - The key is 1–255 characters of `[A-Za-z0-9._:-]`, chosen by the client (a UUID is a good choice), and is scoped to the calling account and the operation.
-- The first request under a key runs normally and its response (status and body) is stored for 24 hours by default.
+- The first request under a key runs normally and its response is stored for 24 hours by default. Once that period passes the record is deleted and the key is free again.
 - A repeat with the same body returns the stored response with the header `Idempotency-Replayed: true`. The replay is the same JSON document; byte-for-byte equality is not promised.
 - A repeat with a different body is refused with `422 IDEMPOTENCY_KEY_REUSED`; the original state is untouched.
 - A repeat while the first request is still running is refused with `409 IDEMPOTENCY_IN_PROGRESS` and `Retry-After`.
 - Responses with status `4xx` are stored and replayed like successes: they are the final answer to that request. A `5xx` leaves no record, so the client may retry with the same key.
-- Only the status and body are stored. A replay carries the current request's `X-Request-ID` header while an error body still names the original request's `request_id`, and response headers such as `Location` are not repeated.
+- A replay reproduces the status, the body and the response headers that describe the result, so a `Location` returned by the original `201` is returned again. Headers that belong to the individual request are not replayed: a replay carries the current request's `X-Request-ID`, while an error body still names the original request's `request_id`.
 
 ## Timeouts
 

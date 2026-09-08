@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -154,9 +155,14 @@ func (s *IdempotencyStore) Begin(ctx context.Context, req idempotency.Request) (
 }
 
 // Complete implements idempotency.Store.
-func (s *IdempotencyStore) Complete(ctx context.Context, id uuid.UUID, status int, body json.RawMessage) error {
-	_, err := s.repo.Complete(ctx, id, status, body)
+func (s *IdempotencyStore) Complete(ctx context.Context, id uuid.UUID, status int, headers map[string]string, body json.RawMessage) error {
+	_, err := s.repo.Complete(ctx, id, status, headers, body)
 	return err
+}
+
+// DeleteExpired implements idempotency.Expirer.
+func (s *IdempotencyStore) DeleteExpired(ctx context.Context, now time.Time, limit int) (int64, error) {
+	return s.repo.DeleteExpired(ctx, now, limit)
 }
 
 // Delete implements idempotency.Store.

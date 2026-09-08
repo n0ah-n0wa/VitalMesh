@@ -57,7 +57,7 @@ func newMeasurementsAPI(t *testing.T) *measurementsAPI {
 		Health:       handler.NewHealth("test", "v", health.NewReadiness(time.Second), logger),
 		Measurements: handler.NewMeasurements(service, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
-		Idempotency:  middleware.Idempotency(idem, time.Hour, logger),
+		Idempotency:  middleware.Idempotency(idem, time.Hour, nil, logger),
 		Policy:       authz.Default(),
 	})
 	if err != nil {

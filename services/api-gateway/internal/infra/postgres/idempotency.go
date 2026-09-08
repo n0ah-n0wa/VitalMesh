@@ -11,7 +11,7 @@ import (
 )
 
 const idempotencyColumns = `id, user_id, method, path, key, request_fingerprint, status,
-	response_status, response_body, created_at, expires_at`
+	response_status, response_headers, response_body, created_at, expires_at`
 
 // Idempotency persists idempotency records.
 type Idempotency struct {
@@ -63,14 +63,19 @@ func (r *Idempotency) Get(ctx context.Context, userID uuid.UUID, method, path, k
 	return collectOne[domain.IdempotencyRecord](rows, err)
 }
 
-// Complete stores the response for an IN_PROGRESS record.
-func (r *Idempotency) Complete(ctx context.Context, id uuid.UUID, responseStatus int, responseBody json.RawMessage) (domain.IdempotencyRecord, error) {
+// Complete stores the response for an IN_PROGRESS record. Only a record
+// still in progress is completed, so a record another request already
+// finished or released is never overwritten.
+func (r *Idempotency) Complete(ctx context.Context, id uuid.UUID, responseStatus int, responseHeaders map[string]string, responseBody json.RawMessage) (domain.IdempotencyRecord, error) {
+	if responseHeaders == nil {
+		responseHeaders = map[string]string{}
+	}
 	rows, err := r.db.Query(ctx, `
 		UPDATE idempotency_keys
-		SET status = 'COMPLETED', response_status = $2, response_body = $3
+		SET status = 'COMPLETED', response_status = $2, response_headers = $3, response_body = $4
 		WHERE id = $1 AND status = 'IN_PROGRESS'
 		RETURNING `+idempotencyColumns,
-		id, responseStatus, responseBody)
+		id, responseStatus, responseHeaders, responseBody)
 	return collectOne[domain.IdempotencyRecord](rows, err)
 }
 

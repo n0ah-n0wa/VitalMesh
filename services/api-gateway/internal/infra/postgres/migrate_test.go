@@ -4,6 +4,8 @@ package postgres_test
 
 import (
 	"context"
+	"io/fs"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -13,6 +15,7 @@ import (
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres/postgrestest"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/migrations"
 )
 
 var requiredTables = []string{
@@ -45,6 +48,32 @@ func tableNames(t *testing.T, dbURL, schema string) map[string]bool {
 	return set
 }
 
+// latestMigration is the highest version the embedded migrations define.
+// Reading it rather than pinning a number means adding a migration does not
+// need this test edited, while Up reaching anything else still fails.
+func latestMigration(t *testing.T) uint {
+	t.Helper()
+	entries, err := fs.Glob(migrations.FS, "*.up.sql")
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("reading migrations: %v (%d found)", err, len(entries))
+	}
+	var highest uint
+	for _, name := range entries {
+		number, _, ok := strings.Cut(name, "_")
+		if !ok {
+			t.Fatalf("migration %q is not named NNNNNN_description.up.sql", name)
+		}
+		value, err := strconv.ParseUint(number, 10, 32)
+		if err != nil {
+			t.Fatalf("migration %q has a non-numeric version: %v", name, err)
+		}
+		if uint(value) > highest {
+			highest = uint(value)
+		}
+	}
+	return highest
+}
+
 func TestMigrateUpFromEmptyThenDownToEmpty(t *testing.T) {
 	t.Parallel()
 	dbURL, schema := postgrestest.NewSchema(t)
@@ -64,8 +93,8 @@ func TestMigrateUpFromEmptyThenDownToEmpty(t *testing.T) {
 		t.Fatalf("Up: %v", err)
 	}
 	version, dirty, err = m.Version()
-	if err != nil || version != 9 || dirty {
-		t.Fatalf("after Up: version=%d dirty=%v err=%v", version, dirty, err)
+	if want := latestMigration(t); err != nil || version != want || dirty {
+		t.Fatalf("after Up: version=%d dirty=%v err=%v, want version %d", version, dirty, err, want)
 	}
 	tables := tableNames(t, dbURL, schema)
 	for _, want := range requiredTables {
@@ -78,14 +107,15 @@ func TestMigrateUpFromEmptyThenDownToEmpty(t *testing.T) {
 		t.Fatalf("second Up must be a no-op, got %v", err)
 	}
 
+	// One step back lands on the previous version, whichever migration is
+	// currently last. DownAll below is what checks that every migration
+	// undoes itself.
 	if err := m.Down(1); err != nil {
 		t.Fatalf("Down(1): %v", err)
 	}
-	if version, _, _ = m.Version(); version != 8 {
-		t.Fatalf("after Down(1): version=%d, want 8", version)
-	}
-	if tableNames(t, dbURL, schema)["idempotency_keys"] {
-		t.Error("idempotency_keys still exists after rolling back its migration")
+	version, _, _ = m.Version()
+	if want := latestMigration(t) - 1; version != want {
+		t.Fatalf("after Down(1): version=%d, want %d", version, want)
 	}
 
 	if err := m.DownAll(); err != nil {

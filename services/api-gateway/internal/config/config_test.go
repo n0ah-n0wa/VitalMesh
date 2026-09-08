@@ -137,3 +137,112 @@ func TestLoadReportsEveryInvalidValue(t *testing.T) {
 		}
 	}
 }
+
+// The documented defaults of SPECIFICATIONS.md section 29. They are what a
+// deployment that configures nothing gets, so they are worth pinning.
+func TestRateLimitDefaults(t *testing.T) {
+	cfg, err := Load(lookupFrom(nil))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if !cfg.RateLimit.Enabled {
+		t.Error("rate limiting is off by default")
+	}
+	if cfg.RateLimit.Window != time.Minute {
+		t.Errorf("Window = %s, want 1m", cfg.RateLimit.Window)
+	}
+	limits := []struct {
+		name string
+		got  int
+		want int
+	}{
+		{"anonymous", cfg.RateLimit.Anonymous, 60},
+		{"authenticated", cfg.RateLimit.Authenticated, 300},
+		{"admin", cfg.RateLimit.Admin, 1000},
+	}
+	for _, l := range limits {
+		if l.got != l.want {
+			t.Errorf("%s limit = %d, want %d per window", l.name, l.got, l.want)
+		}
+	}
+	// A caller must never gain by authenticating less.
+	if !(cfg.RateLimit.Anonymous < cfg.RateLimit.Authenticated && cfg.RateLimit.Authenticated < cfg.RateLimit.Admin) {
+		t.Errorf("the default limits are not ordered by privilege: %+v", cfg.RateLimit)
+	}
+	// A client cannot choose its own identity unless a proxy is declared.
+	if cfg.RateLimit.TrustedProxyHops != 0 {
+		t.Errorf("TrustedProxyHops = %d, want 0", cfg.RateLimit.TrustedProxyHops)
+	}
+}
+
+func TestRateLimitsAreConfigurable(t *testing.T) {
+	cfg, err := Load(lookupFrom(map[string]string{
+		"RATE_LIMIT_WINDOW":        "30s",
+		"RATE_LIMIT_ANONYMOUS":     "5",
+		"RATE_LIMIT_AUTHENTICATED": "50",
+		"RATE_LIMIT_ADMIN":         "500",
+		"TRUSTED_PROXY_HOPS":       "2",
+	}))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	want := RateLimit{
+		Enabled: true, Window: 30 * time.Second,
+		Anonymous: 5, Authenticated: 50, Admin: 500, TrustedProxyHops: 2,
+	}
+	if cfg.RateLimit != want {
+		t.Errorf("RateLimit = %+v, want %+v", cfg.RateLimit, want)
+	}
+
+	off, err := Load(lookupFrom(map[string]string{"RATE_LIMIT_ENABLED": "false"}))
+	if err != nil {
+		t.Fatalf("Load with rate limiting off: %v", err)
+	}
+	if off.RateLimit.Enabled {
+		t.Error("RATE_LIMIT_ENABLED=false did not turn rate limiting off")
+	}
+}
+
+func TestRateLimitConfigurationIsBounded(t *testing.T) {
+	cases := map[string]map[string]string{
+		"a window too short to be meaningful":  {"RATE_LIMIT_WINDOW": "500ms"},
+		"a window too long to hold in memory":  {"RATE_LIMIT_WINDOW": "2h"},
+		"a limit of zero would refuse callers": {"RATE_LIMIT_ANONYMOUS": "0"},
+		"more trusted proxies than are sane":   {"TRUSTED_PROXY_HOPS": "9"},
+	}
+	for name, values := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := Load(lookupFrom(values)); err == nil {
+				t.Errorf("Load accepted %v", values)
+			}
+		})
+	}
+}
+
+// A Redis address may carry a password. Nothing that rejects one may quote
+// it back: the message reaches the start-up log (SPECIFICATIONS.md section
+// 31).
+func TestAnInvalidRedisURLIsRejectedWithoutQuotingIt(t *testing.T) {
+	const password = "sup3r-s3cret-passphrase"
+	cases := map[string]string{
+		"unparseable":  "redis://user:" + password + "@host\x7f:6379",
+		"wrong scheme": "http://user:" + password + "@host:6379",
+		"no host":      "redis://user:" + password + "@",
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := Load(lookupFrom(map[string]string{"REDIS_URL": raw}))
+			if err == nil {
+				t.Fatalf("Load accepted %q", name)
+			}
+			if strings.Contains(err.Error(), password) {
+				t.Errorf("the error repeated the password:\n%s", err)
+			}
+			if strings.Contains(err.Error(), "host") && strings.Contains(err.Error(), "@") {
+				t.Errorf("the error repeated the address:\n%s", err)
+			}
+		})
+	}
+}

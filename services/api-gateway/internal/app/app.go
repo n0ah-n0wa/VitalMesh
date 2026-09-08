@@ -7,25 +7,30 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/auth"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/authz"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/cache"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/health"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/idempotency"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/processorclient"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/redisclient"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/measurement"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/patient"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/processing"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/ratelimit"
 )
 
 // ServiceName identifies the gateway in logs and health responses.
@@ -36,7 +41,11 @@ type App struct {
 	cfg     config.Config
 	logger  *slog.Logger
 	pool    *pgxpool.Pool
+	redis   *redisclient.Client
 	handler http.Handler
+	// retention removes expired idempotency records for as long as the
+	// gateway is running.
+	retention *idempotency.Collector
 }
 
 // New wires the application. The database pool connects lazily, so New
@@ -52,6 +61,25 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		return nil, fmt.Errorf("database: %w", err)
 	}
 
+	// Redis is optional by design (SPECIFICATIONS.md sections 23 and 90).
+	// It connects lazily, so start-up succeeds while it is down and picks
+	// it up when it returns; only an unusable address stops the gateway,
+	// because that is a configuration mistake rather than an outage.
+	redis, err := redisclient.New(cfg.Redis, logger, redisclient.Options{})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("redis: %w", err)
+	}
+	if !cfg.Redis.Enabled() {
+		logger.Warn("REDIS_URL is not set: rate limiting uses a per-replica counter, " +
+			"caching is off and idempotency relies on the database alone")
+	}
+	patientCache := cache.NewRedis(redis, cfg.Cache.Enabled, logger)
+	limiter := ratelimit.New(cfg.RateLimit, redis, logger, ratelimit.Options{})
+
+	// Only PostgreSQL decides readiness. Redis being down degrades three
+	// features and stops none of them, so failing readiness for it would
+	// take a working gateway out of rotation (OPEN_QUESTIONS OQ-27).
 	readiness := health.NewReadiness(cfg.Readiness.Timeout, postgres.NewChecker(pool))
 	tokens := auth.NewTokens(cfg.Auth.JWT, nil)
 	authService, err := auth.NewService(
@@ -66,7 +94,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		return nil, fmt.Errorf("auth: %w", err)
 	}
 
-	patients := patient.NewService(postgres.NewPatientStore(pool), logger, patient.Options{Metrics: rec, Tracer: tr})
+	idempotencyStore := postgres.NewIdempotencyStore(pool)
+	patients := patient.NewService(postgres.NewPatientStore(pool), logger, patient.Options{
+		Metrics: rec, Tracer: tr, Cache: patientCache, CacheTTL: cfg.Cache.PatientTTL,
+	})
 	measurements := measurement.NewService(postgres.NewMeasurementStore(pool), cfg.Measurements, logger, measurement.Options{Metrics: rec, Tracer: tr})
 	processor := processorclient.New(cfg.Processor, logger, processorclient.Options{})
 	jobs := processing.NewService(postgres.NewJobStore(pool), processor, cfg.Processing, logger, processing.Options{Metrics: rec, Tracer: tr})
@@ -78,20 +109,24 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		Measurements: handler.NewMeasurements(measurements, logger),
 		Processing:   handler.NewProcessing(jobs, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
-		Idempotency:  middleware.Idempotency(postgres.NewIdempotencyStore(pool), cfg.Idempotency.TTL, logger),
+		Idempotency:  middleware.Idempotency(idempotencyStore, cfg.Idempotency.TTL, redis, logger),
+		RateLimit:    middleware.RateLimit(limiter, logger),
 		Policy:       authz.Default(),
 		Metrics:      rec,
 	}
 	root, err := httpapi.NewHandler(cfg.HTTP, logger, handlers)
 	if err != nil {
 		pool.Close()
+		_ = redis.Close()
 		return nil, fmt.Errorf("routes: %w", err)
 	}
 	return &App{
-		cfg:     cfg,
-		logger:  logger,
-		pool:    pool,
-		handler: root,
+		cfg:       cfg,
+		logger:    logger,
+		pool:      pool,
+		redis:     redis,
+		handler:   root,
+		retention: idempotency.NewCollector(idempotencyStore, cfg.Idempotency.RetentionInterval, logger, idempotency.CollectorOptions{}),
 	}, nil
 }
 
@@ -101,7 +136,28 @@ func (a *App) Handler() http.Handler { return a.handler }
 // Run serves HTTP until ctx is cancelled and the server has shut down, then
 // closes the database pool.
 func (a *App) Run(ctx context.Context) error {
+	// Closed in the order the specification's shutdown sequence gives
+	// (section 38): connections are released after the server has stopped
+	// serving, Redis before the database because nothing depends on it.
 	defer a.pool.Close()
+	defer func() {
+		if err := a.redis.Close(); err != nil {
+			a.logger.Warn("redis connections not closed cleanly", "error", err)
+		}
+	}()
+
+	// Retention runs alongside the server and stops with it. Its work is
+	// bounded per pass, so shutdown waits on at most one batch.
+	retention, stopRetention := context.WithCancel(ctx)
+	var sweeping sync.WaitGroup
+	sweeping.Add(1)
+	go func() {
+		defer sweeping.Done()
+		a.retention.Run(retention)
+	}()
+	// Deferred last-in-first-out: cancel, then wait for the sweep to stop.
+	defer sweeping.Wait()
+	defer stopRetention()
 
 	a.logger.Info("starting", "addr", a.cfg.HTTP.Addr)
 	if err := httpapi.Run(ctx, a.handler, a.cfg.HTTP); err != nil {

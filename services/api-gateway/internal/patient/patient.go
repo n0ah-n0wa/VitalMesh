@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/auth"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/cache"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
@@ -103,17 +104,25 @@ type Page struct {
 
 // Service implements the Patient API's use cases.
 type Service struct {
-	store   Store
-	logger  *slog.Logger
-	metrics metrics.Recorder
-	tracer  tracing.Tracer
-	now     func() time.Time
+	store    Store
+	cache    cache.Store
+	cacheTTL time.Duration
+	logger   *slog.Logger
+	metrics  metrics.Recorder
+	tracer   tracing.Tracer
+	now      func() time.Time
 }
 
 // Options tune a Service. Nil fields take safe defaults.
 type Options struct {
 	Metrics metrics.Recorder
 	Tracer  tracing.Tracer
+	// Cache serves patient reads. Nil means no caching, which is always
+	// correct and merely slower.
+	Cache cache.Store
+	// CacheTTL bounds how long a cached record may be served. Zero
+	// disables caching whatever Cache is set to.
+	CacheTTL time.Duration
 	// Now supplies the current time; nil means time.Now.
 	Now func() time.Time
 }
@@ -124,12 +133,18 @@ func NewService(store Store, logger *slog.Logger, opts Options) *Service {
 	if now == nil {
 		now = time.Now
 	}
+	cacheStore := opts.Cache
+	if cacheStore == nil || opts.CacheTTL <= 0 {
+		cacheStore = cache.Disabled{}
+	}
 	return &Service{
-		store:   store,
-		logger:  logger,
-		metrics: metrics.OrNoop(opts.Metrics),
-		tracer:  tracing.OrNoop(opts.Tracer),
-		now:     now,
+		store:    store,
+		cache:    cacheStore,
+		cacheTTL: opts.CacheTTL,
+		logger:   logger,
+		metrics:  metrics.OrNoop(opts.Metrics),
+		tracer:   tracing.OrNoop(opts.Tracer),
+		now:      now,
 	}
 }
 
@@ -165,18 +180,44 @@ func (s *Service) Create(ctx context.Context, actor auth.Principal, in CreateInp
 
 // Get returns a patient. A deleted patient is visible to ADMIN only; for
 // every other role it does not exist (OQ-09).
+//
+// The record may come from the short-lived cache (SPECIFICATIONS.md section
+// 84). What is cached is the record itself, never the answer to this
+// question: the visibility rule below is applied to whatever was read, so
+// two callers with different roles cannot be served each other's answer.
+// Writes invalidate the entry, and the time to live bounds an invalidation
+// that could not be delivered. No decision anywhere else in the gateway
+// reads a patient through this path; those go to the database.
 func (s *Service) Get(ctx context.Context, actor auth.Principal, id uuid.UUID) (patient domain.Patient, err error) {
 	ctx, finish := s.begin(ctx, "patient.get")
 	defer func() { finish(err) }()
+
+	key := s.cacheKey(id)
+	if s.cache.Get(ctx, key, &patient) && patient.ID == id {
+		s.metrics.Cache("patient.get", true)
+		return s.visible(actor, patient)
+	}
+	s.metrics.Cache("patient.get", false)
 
 	patient, err = s.store.GetByID(ctx, id)
 	if err != nil {
 		return domain.Patient{}, translate(err)
 	}
+	s.cache.Set(ctx, key, patient, s.cacheTTL)
+	return s.visible(actor, patient)
+}
+
+// visible applies the deleted-patient rule to a record from either source.
+func (s *Service) visible(actor auth.Principal, patient domain.Patient) (domain.Patient, error) {
 	if patient.Status == domain.PatientDeleted && actor.Role != domain.RoleAdmin {
 		return domain.Patient{}, ErrNotFound()
 	}
 	return patient, nil
+}
+
+// cacheKey is where one patient's cached record lives.
+func (s *Service) cacheKey(id uuid.UUID) string {
+	return s.cache.Key("patient", id.String())
 }
 
 // List returns one page of non-deleted patients in creation order. The
@@ -229,6 +270,9 @@ func (s *Service) Delete(ctx context.Context, actor auth.Principal, id uuid.UUID
 	if err != nil {
 		return translate(err)
 	}
+	// The record changed, so the cached copy is wrong now, not in thirty
+	// seconds. The time to live is the fallback, not the mechanism.
+	s.cache.Invalidate(ctx, s.cacheKey(id))
 	s.logger.InfoContext(ctx, "patient deleted", "patient_id", id, "user_id", actor.UserID)
 	return nil
 }

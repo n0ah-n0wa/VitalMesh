@@ -46,7 +46,7 @@ func TestIdempotencyReplaysCompletedResponses(t *testing.T) {
 	logger, _ := testLogger()
 	store := idempotencytest.NewMemoryStore()
 	h := &countingHandler{status: http.StatusCreated, body: `{"id":"1"}`}
-	mw := Chain(h, RequestID(), Idempotency(store, time.Hour, logger))
+	mw := Chain(h, RequestID(), Idempotency(store, time.Hour, nil, logger))
 	user := uuid.New()
 
 	first := httptest.NewRecorder()
@@ -69,7 +69,7 @@ func TestIdempotencyReplaysCompletedResponses(t *testing.T) {
 		b := make([]byte, 16)
 		n, _ := r.Body.Read(b)
 		_, _ = w.Write(b[:n])
-	}), Idempotency(idempotencytest.NewMemoryStore(), time.Hour, logger))
+	}), Idempotency(idempotencytest.NewMemoryStore(), time.Hour, nil, logger))
 	rec := httptest.NewRecorder()
 	echo.ServeHTTP(rec, idempotentRequest(`{"a":1}`, "k2", user))
 	if rec.Body.String() != `{"a":1}` {
@@ -81,7 +81,7 @@ func TestIdempotencyRefusesMismatchAndInProgress(t *testing.T) {
 	logger, _ := testLogger()
 	store := idempotencytest.NewMemoryStore()
 	h := &countingHandler{status: http.StatusCreated, body: `{}`}
-	mw := Chain(h, Idempotency(store, time.Hour, logger))
+	mw := Chain(h, Idempotency(store, time.Hour, nil, logger))
 	user := uuid.New()
 	mw.ServeHTTP(httptest.NewRecorder(), idempotentRequest(`{"a":1}`, "k", user))
 
@@ -110,7 +110,7 @@ func TestIdempotencyServerErrorsAndPanicsLeaveNoRecord(t *testing.T) {
 	logger, _ := testLogger()
 	store := idempotencytest.NewMemoryStore()
 	failing := &countingHandler{status: http.StatusInternalServerError, body: `{"error":{}}`}
-	mw := Chain(failing, Idempotency(store, time.Hour, logger))
+	mw := Chain(failing, Idempotency(store, time.Hour, nil, logger))
 	user := uuid.New()
 
 	rec := httptest.NewRecorder()
@@ -126,7 +126,7 @@ func TestIdempotencyServerErrorsAndPanicsLeaveNoRecord(t *testing.T) {
 	}
 
 	panicking := &countingHandler{panics: true}
-	mw = Chain(panicking, Recover(logger), Idempotency(store, time.Hour, logger))
+	mw = Chain(panicking, Recover(logger), Idempotency(store, time.Hour, nil, logger))
 	rec = httptest.NewRecorder()
 	mw.ServeHTTP(rec, idempotentRequest(`{}`, "p", user))
 	if rec.Code != http.StatusInternalServerError || store.Len() != 1 {
@@ -138,7 +138,7 @@ func TestIdempotencyExpiredRecordsAreReplaced(t *testing.T) {
 	logger, _ := testLogger()
 	store := idempotencytest.NewMemoryStore()
 	h := &countingHandler{status: http.StatusCreated, body: `{"n":1}`}
-	mw := Chain(h, Idempotency(store, -time.Second, logger)) // records expire immediately
+	mw := Chain(h, Idempotency(store, -time.Second, nil, logger)) // records expire immediately
 	user := uuid.New()
 	mw.ServeHTTP(httptest.NewRecorder(), idempotentRequest(`{}`, "k", user))
 	h.body = `{"n":2}`
@@ -153,7 +153,7 @@ func TestIdempotencyWithoutKeyOrPrincipal(t *testing.T) {
 	logger, _ := testLogger()
 	store := idempotencytest.NewMemoryStore()
 	h := &countingHandler{status: http.StatusCreated, body: `{}`}
-	mw := Chain(h, Idempotency(store, time.Hour, logger))
+	mw := Chain(h, Idempotency(store, time.Hour, nil, logger))
 
 	mw.ServeHTTP(httptest.NewRecorder(), idempotentRequest(`{}`, "", uuid.New()))
 	mw.ServeHTTP(httptest.NewRecorder(), idempotentRequest(`{}`, "", uuid.New()))
@@ -177,5 +177,106 @@ func TestIdempotencyWithoutKeyOrPrincipal(t *testing.T) {
 	}
 	if strings.Contains(rec.Body.String(), "db down") {
 		t.Error("store failure leaked to the client")
+	}
+}
+
+// ------------------------------------------- the client going away
+
+// cancellableRequest is an idempotent request whose context a handler can
+// end, which is what a client hanging up or the request timeout firing does
+// to a real request.
+func cancellableRequest(body, key string, user uuid.UUID) (*http.Request, context.CancelFunc) {
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/things", strings.NewReader(body))
+	req.Header.Set(idempotency.Header, key)
+	ctx, cancel := context.WithCancel(auth.NewContext(context.Background(),
+		auth.Principal{UserID: user, Role: domain.RoleOperator}))
+	return req.WithContext(ctx), cancel
+}
+
+// A request that failed must release its key even if the client has already
+// gone: otherwise the retry the failure invites is refused as in progress
+// for the whole time to live.
+func TestAFailedRequestReleasesItsKeyEvenWhenTheClientHasGoneAway(t *testing.T) {
+	logger, _ := testLogger()
+	store := idempotencytest.NewMemoryStore()
+	user := uuid.New()
+	req, cancel := cancellableRequest(`{"a":1}`, "abandoned", user)
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		cancel() // the client hangs up while the handler is running
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	Chain(handler, Idempotency(store, time.Hour, nil, logger)).ServeHTTP(httptest.NewRecorder(), req)
+
+	if store.Len() != 0 {
+		t.Fatalf("%d records left after a failure; the key stays claimed and every retry is refused as in progress", store.Len())
+	}
+}
+
+// The operation happened, so its response must be stored even if nobody is
+// left to read it: the retry that follows a lost connection is exactly the
+// case idempotency exists for.
+func TestASuccessfulResponseIsStoredEvenWhenTheClientHasGoneAway(t *testing.T) {
+	logger, _ := testLogger()
+	store := idempotencytest.NewMemoryStore()
+	user := uuid.New()
+	req, cancel := cancellableRequest(`{"a":1}`, "hung-up", user)
+
+	calls := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		cancel()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"1"}`))
+	})
+	mw := Chain(handler, Idempotency(store, time.Hour, nil, logger))
+	mw.ServeHTTP(httptest.NewRecorder(), req)
+
+	// The client retries on a fresh connection.
+	retry := httptest.NewRecorder()
+	mw.ServeHTTP(retry, idempotentRequest(`{"a":1}`, "hung-up", user))
+
+	if calls != 1 {
+		t.Errorf("the handler ran %d times, want 1: the operation was repeated", calls)
+	}
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("the retry got %d (%s), want the stored 201", retry.Code, retry.Body.String())
+	}
+	if retry.Body.String() != `{"id":"1"}` {
+		t.Errorf("the retry got body %q", retry.Body.String())
+	}
+	if retry.Header().Get(ReplayedHeader) != "true" {
+		t.Error("the retry was not marked as a replay")
+	}
+}
+
+// A replay must be the same response, not merely the same status and body:
+// a client that follows Location on the first response must be able to
+// follow it on the replay.
+func TestAReplayCarriesTheHeadersOfTheFirstResponse(t *testing.T) {
+	logger, _ := testLogger()
+	store := idempotencytest.NewMemoryStore()
+	user := uuid.New()
+	const location = "/api/v1/things/9f1c"
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Location", location)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"id":"9f1c"}`))
+	})
+	mw := Chain(handler, Idempotency(store, time.Hour, nil, logger))
+
+	first := httptest.NewRecorder()
+	mw.ServeHTTP(first, idempotentRequest(`{"a":1}`, "located", user))
+	if first.Header().Get("Location") != location {
+		t.Fatalf("the first response has Location %q; the test premise is wrong", first.Header().Get("Location"))
+	}
+
+	replayed := httptest.NewRecorder()
+	mw.ServeHTTP(replayed, idempotentRequest(`{"a":1}`, "located", user))
+	if got := replayed.Header().Get("Location"); got != location {
+		t.Errorf("the replay has Location %q, want %q: it is not the same response", got, location)
 	}
 }

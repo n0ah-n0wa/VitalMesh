@@ -20,6 +20,11 @@ type scope struct {
 
 // MemoryStore is an idempotency.Store held in memory. Set Err to make every
 // call fail. Now supplies created_at; nil means time.Now.
+//
+// Like a real database driver, it refuses a call whose context has already
+// ended. Callers that must finish their work after a client goes away have
+// to detach from the request's context, and this double is what proves they
+// do.
 type MemoryStore struct {
 	mu      sync.Mutex
 	records map[scope]domain.IdempotencyRecord
@@ -40,9 +45,12 @@ func (m *MemoryStore) now() time.Time {
 }
 
 // Begin implements idempotency.Store.
-func (m *MemoryStore) Begin(_ context.Context, req idempotency.Request) (domain.IdempotencyRecord, bool, error) {
+func (m *MemoryStore) Begin(ctx context.Context, req idempotency.Request) (domain.IdempotencyRecord, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return domain.IdempotencyRecord{}, false, err
+	}
 	if m.Err != nil {
 		return domain.IdempotencyRecord{}, false, m.Err
 	}
@@ -60,9 +68,12 @@ func (m *MemoryStore) Begin(_ context.Context, req idempotency.Request) (domain.
 }
 
 // Complete implements idempotency.Store.
-func (m *MemoryStore) Complete(_ context.Context, id uuid.UUID, status int, body json.RawMessage) error {
+func (m *MemoryStore) Complete(ctx context.Context, id uuid.UUID, status int, headers map[string]string, body json.RawMessage) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.Err != nil {
 		return m.Err
 	}
@@ -70,6 +81,7 @@ func (m *MemoryStore) Complete(_ context.Context, id uuid.UUID, status int, body
 		if rec.ID == id {
 			rec.Status = domain.IdempotencyCompleted
 			rec.ResponseStatus = &status
+			rec.ResponseHeaders = headers
 			rec.ResponseBody = body
 			m.records[s] = rec
 			return nil
@@ -79,9 +91,12 @@ func (m *MemoryStore) Complete(_ context.Context, id uuid.UUID, status int, body
 }
 
 // Delete implements idempotency.Store.
-func (m *MemoryStore) Delete(_ context.Context, id uuid.UUID) error {
+func (m *MemoryStore) Delete(ctx context.Context, id uuid.UUID) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if m.Err != nil {
 		return m.Err
 	}

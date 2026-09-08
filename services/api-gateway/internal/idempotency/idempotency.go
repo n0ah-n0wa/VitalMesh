@@ -65,13 +65,18 @@ func ValidKey(key string) bool {
 	return true
 }
 
-// Fingerprint identifies a request's intent: method, path and the exact
-// body bytes. Two requests with equal fingerprints are the same request.
-func Fingerprint(method, path string, body []byte) string {
+// Fingerprint identifies a request's intent: method, request target and
+// the exact body bytes. Two requests with equal fingerprints are the same
+// request.
+//
+// The target is the path with its query string, not the path alone: two
+// requests that differ only in a query parameter are different requests,
+// and treating them as the same would replay one's response for the other.
+func Fingerprint(method, target string, body []byte) string {
 	h := sha256.New()
 	h.Write([]byte(method))
 	h.Write([]byte{0})
-	h.Write([]byte(path))
+	h.Write([]byte(target))
 	h.Write([]byte{0})
 	h.Write(body)
 	return hex.EncodeToString(h.Sum(nil))
@@ -93,7 +98,8 @@ type Store interface {
 	// exists. It returns the record and whether it was created now.
 	Begin(ctx context.Context, req Request) (record domain.IdempotencyRecord, created bool, err error)
 	// Complete stores the response of a record that is in progress.
-	Complete(ctx context.Context, id uuid.UUID, status int, body json.RawMessage) error
+	// Headers are the allow-listed response headers to replay with it.
+	Complete(ctx context.Context, id uuid.UUID, status int, headers map[string]string, body json.RawMessage) error
 	// Delete removes a record so its key can be used again.
 	Delete(ctx context.Context, id uuid.UUID) error
 }

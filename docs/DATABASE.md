@@ -143,10 +143,13 @@ The trigger `audit_logs_append_only` rejects every `UPDATE` and `DELETE`, so the
 | `request_fingerprint` | text | not null; hash of the canonical request body |
 | `status` | text | `IN_PROGRESS`, `COMPLETED` |
 | `response_status` | integer | 100–599, present exactly when `COMPLETED` |
+| `response_headers` | jsonb | not null, default `{}`; allow-listed headers replayed with the response |
 | `response_body` | jsonb | stored response for replays |
 | `created_at`, `expires_at` | timestamptz | not null, `expires_at > created_at` |
 
-Unique `(user_id, method, path, key)` serialises concurrent replays even when Redis is unavailable. Index `(expires_at)` supports the expiry sweep.
+Unique `(user_id, method, path, key)` serialises concurrent replays even when Redis is unavailable. Index `(expires_at)` supports the expiry sweep, which the gateway runs on a timer for as long as it is up; without it the table would grow for ever, because a key is normally never presented twice.
+
+Only an allow-list of response headers is stored, so nothing per-request or sensitive is persisted: no credentials, no cookies, no request identifiers. Storing them is what lets a replay reproduce the original response rather than only its status and body.
 
 ## Migrations
 

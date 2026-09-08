@@ -34,6 +34,7 @@ type recorder struct {
 
 func (r *recorder) HTTPRequest(string, string, int, time.Duration) {}
 func (r *recorder) Batch(string, int)                              {}
+func (r *recorder) Cache(string, bool)                             {}
 
 func (r *recorder) Operation(name string, outcome metrics.Outcome, _ time.Duration) {
 	r.mu.Lock()

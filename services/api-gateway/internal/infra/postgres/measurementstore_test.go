@@ -139,12 +139,18 @@ func TestIdempotencyStoreRoundTrip(t *testing.T) {
 	if err != nil || created || again.ID != rec.ID {
 		t.Fatalf("Begin again = %+v, %v, %v", again, created, err)
 	}
-	if err := store.Complete(c, rec.ID, 201, json.RawMessage(`{"id":"x"}`)); err != nil {
+	headers := map[string]string{"Location": "/api/v1/measurements/x"}
+	if err := store.Complete(c, rec.ID, 201, headers, json.RawMessage(`{"id":"x"}`)); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	done, _, _ := store.Begin(c, req)
 	if done.Status != domain.IdempotencyCompleted || *done.ResponseStatus != 201 || string(done.ResponseBody) != `{"id": "x"}` && string(done.ResponseBody) != `{"id":"x"}` {
 		t.Errorf("completed = %+v", done)
+	}
+	// The headers come back with the record, so a replay can reproduce the
+	// response rather than only its status and body.
+	if done.ResponseHeaders["Location"] != headers["Location"] {
+		t.Errorf("response headers = %v, want %v", done.ResponseHeaders, headers)
 	}
 	if err := store.Delete(c, rec.ID); err != nil {
 		t.Fatalf("Delete: %v", err)

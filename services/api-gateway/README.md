@@ -86,6 +86,7 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `MEASUREMENT_MAX_METADATA_BYTES` | `2048` | reading metadata as compact JSON (1–4096; the schema caps the stored form at 4096) |
 | `MEASUREMENT_MAX_FUTURE_SKEW` | `5m` | how far ahead of the server clock `recorded_at` may be (at most `1h`) |
 | `IDEMPOTENCY_TTL` | `24h` | how long an `Idempotency-Key` stays replayable (`1m`–`168h`) |
+| `IDEMPOTENCY_RETENTION_INTERVAL` | `1h` | how often expired idempotency records are swept |
 | `PROCESSOR_URL` | `http://127.0.0.1:8081` | the processing service, scheme and host only |
 | `PROCESSOR_TOKEN` | none | shared secret presented to the processor as `Authorization: Bearer`; required in staging and production, never logged |
 | `PROCESSOR_TIMEOUT` | `5s` | bound on one call to the processor; must be shorter than `HTTP_REQUEST_TIMEOUT` |
@@ -95,6 +96,20 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `PROCESSING_MAX_JOB_MEASUREMENTS` | `100000` | readings one job may carry; must not exceed the processor's own bound |
 | `PROCESSING_ALGORITHM_VERSION` | `1.0.0` | the algorithm version jobs ask for; the processor refuses any other |
 | `PROCESSING_FAILURE_RECORD_TIMEOUT` | `5s` | bound on the write that records why a job failed |
+| `REDIS_URL` | none | `redis://` or `rediss://`; empty disables Redis and every feature that uses it degrades |
+| `REDIS_TIMEOUT` | `250ms` | bound on one Redis command; must be shorter than `HTTP_REQUEST_TIMEOUT` |
+| `REDIS_DIAL_TIMEOUT` | `2s` | bound on establishing a connection |
+| `REDIS_POOL_SIZE` | `10` | connections held |
+| `REDIS_NAMESPACE` | `vitalmesh` | prefix on every key, so environments can share a server |
+| `REDIS_RECOVERY_INTERVAL` | `5s` | how long calls fail locally after a failure before Redis is tried again |
+| `RATE_LIMIT_ENABLED` | `true` | rate limiting works without Redis, using a per-replica counter |
+| `RATE_LIMIT_WINDOW` | `1m` | the period each limit applies to (`1s`–`1h`) |
+| `RATE_LIMIT_ANONYMOUS` | `60` | requests per window for an unauthenticated caller |
+| `RATE_LIMIT_AUTHENTICATED` | `300` | requests per window for a signed-in caller |
+| `RATE_LIMIT_ADMIN` | `1000` | requests per window for an ADMIN |
+| `TRUSTED_PROXY_HOPS` | `0` | how far back through `X-Forwarded-For` the client address may be taken (at most 8) |
+| `CACHE_ENABLED` | `true` | short-lived caching; without Redis every read goes to the database |
+| `CACHE_PATIENT_TTL` | `30s` | how long a patient record may be served from the cache (at most 5m) |
 | `READINESS_TIMEOUT` | `2s` | bound for the whole `/ready` evaluation |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
@@ -180,6 +195,18 @@ A feature is an application package (`patient` is the template) with a `Service`
 - **Snapshot reads.** A job asks for several measurement types and each is a separate query, so the reads run in one read-only repeatable-read transaction. Without it a write landing between two queries would put the job's types at different instants. The snapshot takes no locks and holds no external call.
 - **Forward compatibility.** The client ignores response fields it does not know, because adding one is a compatible change under the contract's versioning rules. Drift is caught at build time by the contract tests, which decode the document strictly, rather than at runtime where it would break a release the processor was entitled to make.
 - **Tests.** Service tests with a recording store and a scripted processor; client tests over `httptest` covering every status the contract defines, both timeouts, the retry budget and every malformed answer; contract tests validating the dispatch the gateway builds against the OpenAPI document and decoding the document's own outcome; integration tests against PostgreSQL asserting the rows, the results, the audit record and the idempotency behaviour; and `tests/e2e`, which runs the real processor binary and the wired gateway together.
+
+## Redis
+
+`infra/redisclient` is the adapter; `ratelimit` and `cache` are the features built on it. Redis holds three things, and none of them is a record of truth (SPECIFICATIONS.md section 23): rate-limit counters, short-lived cache entries and idempotency locks. Everything the gateway needs to be correct is in PostgreSQL, so losing Redis costs precision and latency, never data.
+
+- **Lifecycle.** The client dials lazily, so the gateway starts while Redis is down and picks it up when it returns; only an address that cannot be parsed stops start-up, because that is a mistake rather than an outage. Connections are closed on shutdown, before the database, because nothing depends on them.
+- **Timeouts.** Every call is bounded by the client's own per-command timeout and by the caller's context, whichever is shorter, and configuration refuses a Redis timeout that is not shorter than the request timeout. A slow Redis therefore cannot be what makes a request slow.
+- **Degradation.** Every operation reports unavailability rather than failing a request. After a failure the client stops dialling for `REDIS_RECOVERY_INTERVAL` and answers locally, so an outage costs one timeout rather than one per request, and it logs the transition in each direction once rather than flooding. Redis is deliberately **not** a readiness check: its outage degrades three features and stops none, so failing readiness would take a working gateway out of rotation (section 90, OQ-27).
+- **Rate limiting** (section 29) is a fixed-window counter maintained by a Lua script, so replicas share one budget and concurrent requests cannot both read the same pre-increment value. Limits are per role and come from configuration. An authenticated request counts against its account, an anonymous one against its address, and `X-Forwarded-For` is trusted only as far as `TRUSTED_PROXY_HOPS`, so a client cannot choose its own budget. Every response carries `RateLimit-Limit`, `RateLimit-Remaining` and `RateLimit-Reset`; a refusal is `429` with `Retry-After`. Without Redis the limit still applies, from a per-replica counter: weaker, because N replicas then allow N budgets, but far better than failing open or turning a Redis outage into an API outage.
+- **Caching** (section 84) serves `GET /patients/{patient_id}`. What is cached is the record, never the answer: the deleted-patient visibility rule is applied to whatever was read, so two callers with different roles cannot be served each other's answer. Writes invalidate the entry explicitly, on a context detached from the request so that a client hanging up cannot leave a stale entry; the time to live is the second line of defence and is capped at five minutes. Nothing that makes a decision reads through the cache: the patient check behind a measurement write goes to the database, and a test asserts it.
+- **Idempotency locks** (section 24, OQ-10) are the ephemeral coordination of section 23. A `SET NX PX` lock lets a concurrent replay be refused without a database round trip; the unique constraint on `(account, method, path, key)` is what actually serialises replays. A lock that cannot be consulted is skipped, and an integration test runs the whole idempotency contract three times, with Redis, with Redis unreachable and with none configured, to show the outcomes are identical.
+- **Tests.** Everything above is tested against a real Redis (`make dev-redis`, `TEST_REDIS_URL`), with each test in its own key namespace, plus a failure path for each feature against an address nothing listens on.
 
 ## Observability hooks
 

@@ -47,6 +47,8 @@ func (r *recorder) Batch(_ string, size int) {
 	r.batches = append(r.batches, size)
 }
 
+func (r *recorder) Cache(string, bool) {}
+
 type fixture struct {
 	service  *measurement.Service
 	store    *measurementtest.MemoryStore

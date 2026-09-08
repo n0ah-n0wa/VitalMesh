@@ -20,7 +20,12 @@ RUST_TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),$(CURDIR)/$(RUST
 # Tests create and drop their own databases on this server.
 TEST_DATABASE_URL ?= postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
 
-.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-db-down migrate
+# Redis used by the tests that exercise rate limiting, caching and the
+# idempotency lock; `make dev-redis` starts one. Tests namespace their own
+# keys, so one server serves them all.
+TEST_REDIS_URL ?= redis://localhost:6379
+
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -54,17 +59,20 @@ contracts-check: ## Check the API contracts and that both services agree with th
 contracts-lock: ## Re-record a reviewed contract change in its lock file
 	cd $(GO_DIR) && UPDATE_CONTRACT_LOCK=1 go test ./internal/contract/... -run TestContractMatchesItsLock
 
-integration-test: ## Run database integration tests against TEST_DATABASE_URL (see make dev-db)
-	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -tags integration ./internal/infra/postgres/... ./internal/app/...
+integration-test: ## Run integration tests against PostgreSQL and Redis (see make dev-db, make dev-redis)
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_REDIS_URL="$(TEST_REDIS_URL)" go test -race -tags integration ./internal/infra/... ./internal/app/... ./internal/cache/... ./internal/ratelimit/...
 
 e2e-test: ## Run cross-service tests: the real gateway against the real processor binary
 	cd $(RUST_DIR) && cargo build --locked
-	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" PROCESSOR_BINARY="$(RUST_TARGET_DIR)/debug/processor$(EXE)" go test -race -tags e2e ./tests/...
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_REDIS_URL="$(TEST_REDIS_URL)" PROCESSOR_BINARY="$(RUST_TARGET_DIR)/debug/processor$(EXE)" go test -race -tags e2e ./tests/...
 
 dev-db: ## Start the local PostgreSQL used by development and integration tests
 	docker compose up -d --wait postgres
 
-dev-db-down: ## Stop and remove the local PostgreSQL
+dev-redis: ## Start the local Redis used by development and integration tests
+	docker compose up -d --wait redis
+
+dev-db-down: ## Stop and remove the local infrastructure
 	docker compose down
 
 migrate: ## Apply pending migrations to DATABASE_URL (defaults to the local database)

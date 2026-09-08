@@ -358,11 +358,11 @@ func TestIdempotencyBeginReplayCompleteExpire(t *testing.T) {
 		t.Fatalf("replay Begin = %+v, %v, %v", replay, created, err)
 	}
 
-	completed, err := idem.Complete(c, first.ID, 201, json.RawMessage(`{"id":"x"}`))
+	completed, err := idem.Complete(c, first.ID, 201, map[string]string{"Location": "/api/v1/patients/x"}, json.RawMessage(`{"id":"x"}`))
 	if err != nil || completed.Status != domain.IdempotencyCompleted || *completed.ResponseStatus != 201 {
 		t.Fatalf("Complete = %+v, %v", completed, err)
 	}
-	if _, err := idem.Complete(c, first.ID, 201, nil); !isKind(err, domain.KindNotFound) {
+	if _, err := idem.Complete(c, first.ID, 201, nil, nil); !isKind(err, domain.KindNotFound) {
 		t.Fatalf("completing twice: got %v, want not found", err)
 	}
 	got, err := idem.Get(c, user.ID, "POST", "/api/v1/patients", "k-1")

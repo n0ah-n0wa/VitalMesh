@@ -28,6 +28,10 @@ type Handlers struct {
 	// Idempotency applies Idempotency-Key handling to the write operations
 	// listed in idempotentOperations; nil disables it.
 	Idempotency middleware.Middleware
+	// RateLimit bounds how often one caller may use the API; nil disables
+	// it. It runs after authentication so that an authenticated request is
+	// counted against its account rather than its address.
+	RateLimit middleware.Middleware
 	// Policy decides what each role may do.
 	Policy *authz.Policy
 	// Metrics receives request measurements; nil means none.
@@ -87,7 +91,7 @@ func NewHandler(cfg config.HTTP, logger *slog.Logger, h Handlers) (http.Handler,
 	rt.HandleFunc(http.MethodGet, "/health", h.Health.Live)
 	rt.HandleFunc(http.MethodGet, "/ready", h.Health.Ready)
 
-	if err := Mount(rt.Group(APIv1), h.operations(), h.Authenticate, h.Policy, h.Idempotency, logger); err != nil {
+	if err := Mount(rt.Group(APIv1), h.operations(), h.Authenticate, h.Policy, h.Idempotency, h.RateLimit, logger); err != nil {
 		return nil, err
 	}
 	return Wrap(cfg, logger, h.Metrics, rt), nil
@@ -99,7 +103,7 @@ func NewHandler(cfg config.HTTP, logger *slog.Logger, h Handlers) (http.Handler,
 // and the idempotent write operations additionally behind idempotent when
 // it is given. It fails when ops contains an operation the table does not
 // list.
-func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middleware.Middleware, policy *authz.Policy, idempotent middleware.Middleware, logger *slog.Logger) error {
+func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middleware.Middleware, policy *authz.Policy, idempotent, rateLimit middleware.Middleware, logger *slog.Logger) error {
 	if policy == nil {
 		return fmt.Errorf("mount routes: no authorization policy")
 	}
@@ -114,13 +118,29 @@ func Mount(g *Group, ops map[authz.RouteKey]http.Handler, authenticate middlewar
 		}
 		delete(remaining, rule.Key())
 		if rule.Permission == authz.Public {
-			g.Handle(rule.Method, rule.Path, h)
+			// A public route is rate-limited by client address: it is the
+			// only identity there is, and an unauthenticated endpoint is
+			// the one most in need of a bound.
+			public := g
+			if rateLimit != nil {
+				public = g.With(rateLimit)
+			}
+			public.Handle(rule.Method, rule.Path, h)
 			continue
 		}
 		if authenticate == nil {
 			return fmt.Errorf("mount routes: %s %s needs authentication but none is configured", rule.Method, rule.Path)
 		}
-		guarded := g.With(authenticate, middleware.Require(policy, rule.Permission, logger))
+		// Rate limiting runs after authentication so that the caller's
+		// account, not their address, is what the budget belongs to, and
+		// before authorization so that a caller cannot spend the budget of
+		// an endpoint they may not use.
+		chain := []middleware.Middleware{authenticate}
+		if rateLimit != nil {
+			chain = append(chain, rateLimit)
+		}
+		chain = append(chain, middleware.Require(policy, rule.Permission, logger))
+		guarded := g.With(chain...)
 		if idempotent != nil && idempotentOperations[rule.Key()] {
 			guarded = guarded.With(idempotent)
 		}

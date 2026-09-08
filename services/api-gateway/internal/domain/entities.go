@@ -203,7 +203,11 @@ type IdempotencyRecord struct {
 	RequestFingerprint string            `db:"request_fingerprint"`
 	Status             IdempotencyStatus `db:"status"`
 	ResponseStatus     *int              `db:"response_status"`
-	ResponseBody       json.RawMessage   `db:"response_body"`
-	CreatedAt          time.Time         `db:"created_at"`
-	ExpiresAt          time.Time         `db:"expires_at"`
+	// ResponseHeaders are the allow-listed headers of the stored response,
+	// set again on a replay so that a replay is the same response and not
+	// merely the same status and body.
+	ResponseHeaders map[string]string `db:"response_headers"`
+	ResponseBody    json.RawMessage   `db:"response_body"`
+	CreatedAt       time.Time         `db:"created_at"`
+	ExpiresAt       time.Time         `db:"expires_at"`
 }

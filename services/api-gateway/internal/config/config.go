@@ -43,8 +43,72 @@ type Config struct {
 	Processing   Processing
 	Processor    Processor
 	Idempotency  Idempotency
+	Redis        Redis
+	RateLimit    RateLimit
+	Cache        Cache
 	Readiness    Readiness
 	Log          Log
+}
+
+// Redis configures the shared ephemeral store (SPECIFICATIONS.md section
+// 23). Redis is never a record of truth: it holds rate-limit counters,
+// short-lived cache entries and idempotency locks, all of which the gateway
+// can lose without losing correctness. Leaving REDIS_URL empty disables it
+// and every feature that uses it degrades to its local behaviour.
+type Redis struct {
+	// URL is a redis:// or rediss:// address. Empty means no Redis.
+	URL string
+	// DialTimeout bounds establishing a connection.
+	DialTimeout time.Duration
+	// Timeout bounds one command, read or write. Every Redis call the
+	// gateway makes is on a request's critical path, so this is short: a
+	// slow Redis must degrade, not slow the API down.
+	Timeout time.Duration
+	// PoolSize is the largest number of connections held.
+	PoolSize int
+	// Namespace prefixes every key, so several environments can share one
+	// server without colliding.
+	Namespace string
+	// RecoveryInterval is how long the client waits after a failure before
+	// trying Redis again. Between failure and recovery, calls fail fast
+	// locally rather than spending their timeout on a dead server.
+	RecoveryInterval time.Duration
+}
+
+// Enabled reports whether Redis is configured.
+func (r Redis) Enabled() bool { return r.URL != "" }
+
+// RateLimit configures distributed rate limiting (SPECIFICATIONS.md section
+// 29). Limits are per role and per window and are never hard-coded.
+type RateLimit struct {
+	// Enabled turns rate limiting on. It works without Redis, using a
+	// per-replica limiter, which is weaker but never absent.
+	Enabled bool
+	// Window is the period each limit applies to.
+	Window time.Duration
+	// Anonymous applies to requests with no authenticated principal.
+	Anonymous int
+	// Authenticated applies to any signed-in role that has no more
+	// specific limit.
+	Authenticated int
+	// Admin applies to the ADMIN role.
+	Admin int
+	// TrustedProxyHops is how many reverse proxies sit in front of the
+	// gateway. It decides which entry of X-Forwarded-For is the client;
+	// zero means the header is ignored and the socket address is used, so
+	// a client cannot choose its own rate-limit identity.
+	TrustedProxyHops int
+}
+
+// Cache configures short-lived caching (SPECIFICATIONS.md section 84).
+type Cache struct {
+	// Enabled turns caching on. Without Redis every read goes to the
+	// database, which is always correct and merely slower.
+	Enabled bool
+	// PatientTTL bounds how long a patient record may be served from the
+	// cache. Writes invalidate the entry explicitly; the TTL bounds the
+	// staleness left by an invalidation that could not be delivered.
+	PatientTTL time.Duration
 }
 
 // Processing bounds the Processing API (SPECIFICATIONS.md sections 13 and
@@ -107,6 +171,10 @@ type Measurements struct {
 type Idempotency struct {
 	// TTL is how long a recorded request stays replayable.
 	TTL time.Duration
+	// RetentionInterval is how often expired records are swept. Sweeping
+	// is what stops the table growing without bound, since a key is
+	// usually never presented twice.
+	RetentionInterval time.Duration
 }
 
 // Bounds enforced on measurement and idempotency settings.
@@ -119,6 +187,22 @@ const DefaultAlgorithmVersion = "1.0.0"
 // InternalContractVersion is the version of
 // contracts/internal-api/processor-v1.json this gateway is built against.
 const InternalContractVersion = "1.1.1"
+
+// Bounds enforced on Redis-backed settings.
+const (
+	MaxRedisNamespaceLength = 64
+	// MinRateLimitWindow keeps a window long enough that its counter is
+	// meaningful; MaxRateLimitWindow keeps the memory a window occupies
+	// bounded.
+	MinRateLimitWindow = time.Second
+	MaxRateLimitWindow = time.Hour
+	// MaxTrustedProxyHops bounds how far back through X-Forwarded-For the
+	// client address may be taken.
+	MaxTrustedProxyHops = 8
+	// MaxCacheTTL keeps cached data short-lived, so that a missed
+	// invalidation cannot outlive it by much (SPECIFICATIONS.md section 84).
+	MaxCacheTTL = 5 * time.Minute
+)
 
 // Bounds enforced on processing settings.
 const (
@@ -137,6 +221,10 @@ const (
 	MaxMeasurementFutureSkew   = time.Hour
 	MinIdempotencyTTL          = time.Minute
 	MaxIdempotencyTTL          = 7 * 24 * time.Hour
+	// Bounds on the retention sweep: often enough that expired records do
+	// not pile up, rarely enough that the sweep is not itself load.
+	MinRetentionInterval = time.Second
+	MaxRetentionInterval = 24 * time.Hour
 )
 
 // Database configures the PostgreSQL connection pool.
@@ -295,7 +383,28 @@ func Load(lookup Lookup) (Config, error) {
 			ContractVersion: InternalContractVersion,
 		},
 		Idempotency: Idempotency{
-			TTL: p.duration("IDEMPOTENCY_TTL", 24*time.Hour),
+			TTL:               p.duration("IDEMPOTENCY_TTL", 24*time.Hour),
+			RetentionInterval: p.duration("IDEMPOTENCY_RETENTION_INTERVAL", time.Hour),
+		},
+		Redis: Redis{
+			URL:              p.string("REDIS_URL", ""),
+			DialTimeout:      p.duration("REDIS_DIAL_TIMEOUT", 2*time.Second),
+			Timeout:          p.duration("REDIS_TIMEOUT", 250*time.Millisecond),
+			PoolSize:         int(p.uint32("REDIS_POOL_SIZE", 10)),
+			Namespace:        p.string("REDIS_NAMESPACE", "vitalmesh"),
+			RecoveryInterval: p.duration("REDIS_RECOVERY_INTERVAL", 5*time.Second),
+		},
+		RateLimit: RateLimit{
+			Enabled:          p.bool("RATE_LIMIT_ENABLED", true),
+			Window:           p.duration("RATE_LIMIT_WINDOW", time.Minute),
+			Anonymous:        int(p.uint32("RATE_LIMIT_ANONYMOUS", 60)),
+			Authenticated:    int(p.uint32("RATE_LIMIT_AUTHENTICATED", 300)),
+			Admin:            int(p.uint32("RATE_LIMIT_ADMIN", 1000)),
+			TrustedProxyHops: int(p.count("TRUSTED_PROXY_HOPS", 0)),
+		},
+		Cache: Cache{
+			Enabled:    p.bool("CACHE_ENABLED", true),
+			PatientTTL: p.duration("CACHE_PATIENT_TTL", 30*time.Second),
 		},
 		Readiness: Readiness{
 			Timeout: p.duration("READINESS_TIMEOUT", 2*time.Second),
@@ -332,8 +441,51 @@ func Load(lookup Lookup) (Config, error) {
 	if cfg.Idempotency.TTL < MinIdempotencyTTL || cfg.Idempotency.TTL > MaxIdempotencyTTL {
 		p.fail("IDEMPOTENCY_TTL: must be between %s and %s", MinIdempotencyTTL, MaxIdempotencyTTL)
 	}
+	if cfg.Idempotency.RetentionInterval < MinRetentionInterval || cfg.Idempotency.RetentionInterval > MaxRetentionInterval {
+		p.fail("IDEMPOTENCY_RETENTION_INTERVAL: must be between %s and %s", MinRetentionInterval, MaxRetentionInterval)
+	}
 	if cfg.Environment.Deployed() && cfg.Database.URL != "" && !databaseURLRequiresTLS(cfg.Database.URL) {
 		p.fail("DATABASE_URL: sslmode must be require, verify-ca or verify-full in %s (SPECIFICATIONS.md section 30)", cfg.Environment)
+	}
+	if cfg.Redis.URL != "" {
+		if err := validRedisURL(cfg.Redis.URL); err != nil {
+			p.fail("REDIS_URL: %v", err)
+		}
+		// A Redis call sits on a request's critical path, so it must not be
+		// able to outlast the request itself.
+		if cfg.Redis.Timeout >= cfg.HTTP.RequestTimeout {
+			p.fail("REDIS_TIMEOUT: must be shorter than HTTP_REQUEST_TIMEOUT (%s >= %s)",
+				cfg.Redis.Timeout, cfg.HTTP.RequestTimeout)
+		}
+		if cfg.Redis.PoolSize < 1 {
+			p.fail("REDIS_POOL_SIZE: must be at least 1")
+		}
+		if !validNamespace(cfg.Redis.Namespace) {
+			p.fail("REDIS_NAMESPACE: must be 1 to %d characters of [A-Za-z0-9._-]", MaxRedisNamespaceLength)
+		}
+	}
+	if cfg.Environment.Deployed() && cfg.Redis.URL != "" && !strings.HasPrefix(cfg.Redis.URL, "rediss://") {
+		p.fail("REDIS_URL: must use rediss:// in %s (SPECIFICATIONS.md section 30)", cfg.Environment)
+	}
+	if cfg.RateLimit.Enabled {
+		for name, limit := range map[string]int{
+			"RATE_LIMIT_ANONYMOUS":     cfg.RateLimit.Anonymous,
+			"RATE_LIMIT_AUTHENTICATED": cfg.RateLimit.Authenticated,
+			"RATE_LIMIT_ADMIN":         cfg.RateLimit.Admin,
+		} {
+			if limit < 1 {
+				p.fail("%s: must be at least 1 request per window", name)
+			}
+		}
+		if cfg.RateLimit.Window < MinRateLimitWindow || cfg.RateLimit.Window > MaxRateLimitWindow {
+			p.fail("RATE_LIMIT_WINDOW: must be between %s and %s", MinRateLimitWindow, MaxRateLimitWindow)
+		}
+		if cfg.RateLimit.TrustedProxyHops > MaxTrustedProxyHops {
+			p.fail("TRUSTED_PROXY_HOPS: must be at most %d", MaxTrustedProxyHops)
+		}
+	}
+	if cfg.Cache.Enabled && (cfg.Cache.PatientTTL < time.Second || cfg.Cache.PatientTTL > MaxCacheTTL) {
+		p.fail("CACHE_PATIENT_TTL: must be between 1s and %s", MaxCacheTTL)
 	}
 	if cfg.Processing.MaxJobMeasurements < 1 || cfg.Processing.MaxJobMeasurements > MaxProcessingJobMeasurements {
 		p.fail("PROCESSING_MAX_JOB_MEASUREMENTS: must be between 1 and %d", MaxProcessingJobMeasurements)
@@ -490,6 +642,42 @@ func (p *parser) passwordHash() PasswordHash {
 	return cfg
 }
 
+// validRedisURL checks a Redis address without connecting to it.
+//
+// It never returns the parse error, which quotes the address it rejected.
+// A Redis URL may carry a password and this message reaches the start-up
+// log, so the reason is described rather than shown (SPECIFICATIONS.md
+// section 31).
+func validRedisURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return errors.New("must be a valid URL")
+	}
+	if u.Scheme != "redis" && u.Scheme != "rediss" {
+		return errors.New("must be a redis:// or rediss:// URL")
+	}
+	if u.Host == "" {
+		return errors.New("must name a host")
+	}
+	return nil
+}
+
+// validNamespace accepts a short key prefix.
+func validNamespace(ns string) bool {
+	if ns == "" || len(ns) > MaxRedisNamespaceLength {
+		return false
+	}
+	for i := 0; i < len(ns); i++ {
+		c := ns[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // processorclientValidateBaseURL checks the processor address. The check
 // lives here rather than in the client package because config must not
 // depend on a package that depends on config.
@@ -593,6 +781,36 @@ func (p *parser) uint32(key string, def uint32) uint32 {
 	}
 	if n == 0 {
 		p.fail("%s: must be positive", key)
+		return def
+	}
+	return uint32(n)
+}
+
+// bool accepts the spellings Go's strconv accepts, so "1", "true" and
+// "TRUE" all turn a feature on.
+func (p *parser) bool(key string, def bool) bool {
+	v, ok := p.raw(key)
+	if !ok {
+		return def
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		p.fail("%s: must be true or false", key)
+		return def
+	}
+	return b
+}
+
+// count is uint32 for values where zero is meaningful, such as a number of
+// proxy hops.
+func (p *parser) count(key string, def uint32) uint32 {
+	v, ok := p.raw(key)
+	if !ok {
+		return def
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		p.fail("%s: must be a non-negative integer", key)
 		return def
 	}
 	return uint32(n)

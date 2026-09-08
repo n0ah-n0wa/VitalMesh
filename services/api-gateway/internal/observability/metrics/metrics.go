@@ -35,6 +35,10 @@ type Recorder interface {
 	Operation(name string, outcome Outcome, duration time.Duration)
 	// Batch records the size of one batch operation ("measurement.batch").
 	Batch(name string, size int)
+	// Cache records one cache lookup and whether it hit. The name is the
+	// read it serves ("patient.get"), never a key, so labels stay bounded
+	// and no identifier becomes one (SPECIFICATIONS.md section 41).
+	Cache(name string, hit bool)
 }
 
 // Noop records nothing.
@@ -43,6 +47,7 @@ type Noop struct{}
 func (Noop) HTTPRequest(string, string, int, time.Duration) {}
 func (Noop) Operation(string, Outcome, time.Duration)       {}
 func (Noop) Batch(string, int)                              {}
+func (Noop) Cache(string, bool)                             {}
 
 // OrNoop returns r, or Noop when r is nil, so callers never check.
 func OrNoop(r Recorder) Recorder {

@@ -42,6 +42,7 @@ func (m *httpMetrics) HTTPRequest(method, route string, status int, _ time.Durat
 }
 func (m *httpMetrics) Operation(string, metrics.Outcome, time.Duration) {}
 func (m *httpMetrics) Batch(string, int)                                {}
+func (m *httpMetrics) Cache(string, bool)                               {}
 
 type patientsAPI struct {
 	handler http.Handler
@@ -64,7 +65,7 @@ func newPatientsAPI(t *testing.T) *patientsAPI {
 		Health:       handler.NewHealth("test", "v", health.NewReadiness(time.Second), logger),
 		Patients:     handler.NewPatients(service, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
-		Idempotency:  middleware.Idempotency(idempotencytest.NewMemoryStore(), time.Hour, logger),
+		Idempotency:  middleware.Idempotency(idempotencytest.NewMemoryStore(), time.Hour, nil, logger),
 		Policy:       authz.Default(),
 		Metrics:      rec,
 	})
