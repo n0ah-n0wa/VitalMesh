@@ -69,6 +69,7 @@ func TestLoadOverrides(t *testing.T) {
 	cfg, err := Load(lookupFrom(map[string]string{
 		"ENVIRONMENT":           "staging",
 		"DATABASE_URL":          "postgres://user:pass@db:5432/vitalmesh?sslmode=require", // staging demands TLS
+		"PROCESSOR_TOKEN":       "staging-processor-token",                                // and a processor credential
 		"HTTP_ADDR":             "127.0.0.1:9000",
 		"HTTP_READ_TIMEOUT":     "3s",
 		"HTTP_SHUTDOWN_TIMEOUT": "1m",

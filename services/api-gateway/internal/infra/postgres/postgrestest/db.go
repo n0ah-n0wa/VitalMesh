@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || e2e
 
 // Package postgrestest gives integration tests a private, migrated schema on
 // the PostgreSQL database named by TEST_DATABASE_URL. Each call creates a

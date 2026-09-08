@@ -38,15 +38,28 @@ Run `make help` for the list. The gates that CI runs are exactly the ones `make 
 | `make format-check` | fails if any file is not formatted |
 | `make lint` | `go vet` and `cargo clippy --all-targets -D warnings` |
 | `make test` | unit tests: `go test -race ./...` and `cargo test` |
+| `make contracts-check` | checks the API contracts and that both services' types agree with them |
+| `make contracts-lock` | re-records a reviewed contract change in its lock file |
 | `make dev-db` / `make dev-db-down` | start / stop the local PostgreSQL (`docker compose`) |
 | `make integration-test` | database integration tests against `TEST_DATABASE_URL` (default: the local PostgreSQL) |
+| `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make build` | builds `bin/api-gateway` and `services/processor/target/debug/processor` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
-| `make verify` | `format-check lint test integration-test build line-endings`; needs the local PostgreSQL (`make dev-db`) |
+| `make verify` | `format-check lint test contracts-check integration-test e2e-test build line-endings`; needs the local PostgreSQL (`make dev-db`) |
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
+
+## Changing an API contract
+
+The contracts under [`contracts/`](../contracts) are checked by `make contracts-check`, which `make verify` includes. Editing prose in a contract needs nothing extra. Changing anything a client can observe fails the lock gate until the change is re-recorded:
+
+```bash
+make contracts-lock
+```
+
+Do that only after checking the change against the compatibility rules in [`contracts/internal-api/README.md`](../contracts/internal-api/README.md); a breaking change needs a new major version and a new path prefix, not a new fingerprint. The lock file is committed with the contract, so the diff shows both.
 
 ## Running the services
 

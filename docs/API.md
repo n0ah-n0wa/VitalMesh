@@ -219,6 +219,48 @@ Listing `GET /api/v1/patients/{patient_id}/measurements` accepts `type` (one of 
 
 Every stored or deleted reading writes an audit record (`MEASUREMENT_CREATED`, `MEASUREMENT_DELETED`) in the same transaction as the change, with the acting account, the request's `request_id`, and the patient and type in its metadata. Request logs never include reading values or metadata.
 
+## Processing
+
+`POST /api/v1/processing/jobs` creates a job, dispatches it to the processing service and answers when it has finished, so the response carries the job in its terminal state. `GET /api/v1/processing/jobs/{job_id}` reads a job back and `GET /api/v1/patients/{patient_id}/processing-results` lists a patient's results, paginated as above.
+
+The request selects what to process:
+
+```json
+{
+  "patient_id": "…",
+  "measurement_types": ["HEART_RATE"],
+  "windows": ["1m", "1h"],
+  "percentiles": [50, 95],
+  "from": "2026-09-06T00:00:00Z",
+  "to":   "2026-09-07T00:00:00Z"
+}
+```
+
+- `measurement_types` and `windows` are required and must be non-empty; `windows` come from `1m`, `5m`, `15m`, `1h`, `6h`, `24h`, `7d`. Repeated entries are rejected, and order does not matter: the lists are normalised, so two requests differing only in order are the same request.
+- `percentiles` are ranks between 1 and 99, at most 20 of them, and may be omitted.
+- `from` and `to` bound which readings are processed, half-open and both optional. A range holding no readings is `422 PROCESSING_NO_MEASUREMENTS`; a range holding more than the configured ceiling is `422 PROCESSING_JOB_TOO_LARGE`, which names the ceiling and asks you to narrow the range.
+
+**Job lifecycle.** A job is `PENDING` when created, `PROCESSING` while the processing service holds it, and then `COMPLETED`, `FAILED` or `CANCELLED` (SPECIFICATIONS.md section 92). The response to a successful create is `201` with a `COMPLETED` job and a `Location` header. A `COMPLETED` job always has its results: they are written in the same transaction as the transition, so a job never reports success with results missing.
+
+**Failure.** A job that could not be processed is kept, `FAILED`, with `error_code`, `error_message`, `attempt_count` and the timestamps, so a failure never disappears (section 94). What the client receives depends on why:
+
+| Outcome | Response | Job |
+|---|---|---|
+| processed | `201` | `COMPLETED` |
+| nothing to process, or too much | `422` | `FAILED` |
+| the processing service refused the data | `422` | `FAILED` |
+| the processing service is unavailable | `503` | `FAILED` |
+| the processing service was too slow | `504` | `FAILED` |
+| the processing service is still working on an earlier attempt | `503 PROCESSOR_BUSY` | `FAILED` |
+| not every measurement could be processed | `503 PROCESSING_INCOMPLETE` | `FAILED` |
+| the two services disagree | `503 PROCESSOR_PROTOCOL_ERROR` | `FAILED` |
+
+`PROCESSING_INCOMPLETE` means the processing service would not process every measurement in the range. Rather than report statistics that silently cover less data than was asked for, the job fails and stores nothing; narrowing `from` and `to` to a range the service accepts is the way through.
+
+A `5xx` here is transient and worth retrying. Because a `5xx` leaves no idempotency record, the same `Idempotency-Key` can be used for the retry; it creates a new job, and the failed one stays on record. The processing service's own error messages are never repeated to you: they are written for that service's operators and can name internal detail.
+
+**Timeouts and retries.** The call to the processing service is bounded per attempt and is retried a bounded number of times for failures worth repeating, all inside this request's own deadline. You never wait longer than the request timeout below.
+
 ## Status codes
 
 | Status | Meaning |
@@ -257,13 +299,15 @@ Collection endpoints are cursor-paginated:
 
 Clients may send `X-Request-ID` (1–128 characters of `[A-Za-z0-9._-]`). The server keeps a valid value and generates one otherwise. The effective identifier is returned in the `X-Request-ID` response header and inside every error envelope, and appears in server logs.
 
+Clients may also send `X-Correlation-ID`, in the same shape, to tie one client request to everything it causes across services (SPECIFICATIONS.md section 85). A request that sends none starts one, taking the request id. Both are echoed, both are logged, and both are propagated to the processing service and stored with any job the request creates, so a result can always be traced back to the call that asked for it. A malformed value is replaced rather than rejected: an unusable identifier must not turn valid work into a failure.
+
 ## Response headers
 
 Every response carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'` and `Cache-Control: no-store`. HSTS is applied by the TLS terminator in deployed environments.
 
 ## Idempotency
 
-Write operations that could create duplicate state accept an `Idempotency-Key` header (SPECIFICATIONS.md section 24): `POST /api/v1/patients`, `POST /api/v1/measurements` and `POST /api/v1/measurements/batch`. The header is optional; without it every request runs.
+Write operations that could create duplicate state accept an `Idempotency-Key` header (SPECIFICATIONS.md section 24): `POST /api/v1/patients`, `POST /api/v1/measurements`, `POST /api/v1/measurements/batch` and `POST /api/v1/processing/jobs`. The header is optional; without it every request runs.
 
 - The key is 1–255 characters of `[A-Za-z0-9._:-]`, chosen by the client (a UUID is a good choice), and is scoped to the calling account and the operation.
 - The first request under a key runs normally and its response (status and body) is stored for 24 hours by default.

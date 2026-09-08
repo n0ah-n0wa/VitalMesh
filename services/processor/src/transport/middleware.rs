@@ -4,11 +4,12 @@
 use std::time::{Duration, Instant};
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use tracing::Instrument;
 
+use crate::config::Secret;
 use crate::error::Error;
 use crate::requestid::{self, CORRELATION_ID_HEADER, REQUEST_ID_HEADER};
 use crate::transport::context::{self, RequestContext};
@@ -74,7 +75,50 @@ pub async fn envelope_rejections(request: Request, next: Next) -> Response {
         "{}.",
         status.canonical_reason().unwrap_or("The request failed")
     );
-    error::envelope(status, &code, &message)
+    error::envelope(status, &code, &message, error::retryable_status(status))
+}
+
+/// Rejects a request that does not present the internal bearer token.
+///
+/// The token authenticates the gateway to the processor inside the cluster
+/// (SPECIFICATIONS.md sections 30 and 31). It is not a user credential and
+/// carries no identity: the gateway has already authenticated and authorised
+/// the caller before it dispatches work, and this service performs no
+/// user-level authorisation of its own.
+///
+/// When no token is configured the layer is not installed at all, so this
+/// runs only where a credential is genuinely required. The comparison is
+/// constant time, the token is never logged, and a failure says only that
+/// authentication is required: which of "absent", "malformed" or "wrong" it
+/// was is not something a caller needs, and telling them helps only an
+/// attacker.
+pub async fn authenticate(
+    State(expected): State<Secret>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .map(str::trim);
+
+    if presented.is_some_and(|token| expected.matches(token)) {
+        return next.run(request).await;
+    }
+
+    tracing::warn!(
+        presented = presented.is_some(),
+        "internal request rejected: authentication failed"
+    );
+    let mut response = Error::unauthenticated().into_response();
+    // RFC 7235: a 401 states the scheme the client should use.
+    response
+        .headers_mut()
+        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    debug_assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    response
 }
 
 /// Fails the request with a timeout error if the handler exceeds `limit`.

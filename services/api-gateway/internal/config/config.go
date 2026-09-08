@@ -40,9 +40,54 @@ type Config struct {
 	Database     Database
 	Auth         Auth
 	Measurements Measurements
+	Processing   Processing
+	Processor    Processor
 	Idempotency  Idempotency
 	Readiness    Readiness
 	Log          Log
+}
+
+// Processing bounds the Processing API (SPECIFICATIONS.md sections 13 and
+// 89).
+type Processing struct {
+	// MaxJobMeasurements is the largest number of readings one job may
+	// carry. It must not exceed the processor's own bound, which the
+	// processor advertises on its health endpoint.
+	MaxJobMeasurements int
+	// AlgorithmVersion is the version of the processing algorithms this
+	// gateway asks for. The processor refuses any other version, so this is
+	// how a rolling upgrade is coordinated.
+	AlgorithmVersion string
+	// ServiceVersion is recorded on a job when it is dispatched, before the
+	// processor's own version is known.
+	ServiceVersion string
+	// FailureRecordTimeout bounds the write that records why a job failed.
+	// It is short and separate from the request's own deadline, because the
+	// record matters most exactly when that deadline has passed.
+	FailureRecordTimeout time.Duration
+}
+
+// Processor configures the client for the Rust processing service
+// (SPECIFICATIONS.md sections 8 and 37).
+type Processor struct {
+	// BaseURL is the processor's address, without a path.
+	BaseURL string
+	// Token is the shared secret presented as `Authorization: Bearer`.
+	Token Secret
+	// Timeout bounds one attempt. It must be shorter than the HTTP request
+	// timeout, or a client would give up before the gateway could answer.
+	Timeout time.Duration
+	// MaxAttempts is how many times one dispatch may be tried, including
+	// the first. Retries stop early when the caller's deadline leaves no
+	// room for another attempt.
+	MaxAttempts int
+	// Backoff is the delay before the second attempt; it doubles with each
+	// further attempt, up to MaxBackoff.
+	Backoff    time.Duration
+	MaxBackoff time.Duration
+	// ContractVersion is the internal contract this gateway is built
+	// against, reported in diagnostics.
+	ContractVersion string
 }
 
 // Measurements bounds measurement ingestion (SPECIFICATIONS.md sections 12,
@@ -65,6 +110,27 @@ type Idempotency struct {
 }
 
 // Bounds enforced on measurement and idempotency settings.
+// DefaultAlgorithmVersion is the processing algorithm version this build of
+// the gateway asks the processor for. It matches the processor's
+// anomaly::ALGORITHM_VERSION; a mismatch is refused by the processor rather
+// than producing results nobody can compare.
+const DefaultAlgorithmVersion = "1.0.0"
+
+// InternalContractVersion is the version of
+// contracts/internal-api/processor-v1.json this gateway is built against.
+const InternalContractVersion = "1.1.1"
+
+// Bounds enforced on processing settings.
+const (
+	// MaxProcessingJobMeasurements is the ceiling on the configured job
+	// size. It matches the processor's own default bound.
+	MaxProcessingJobMeasurements = 1000000
+	// MaxProcessorAttempts bounds the retry budget, so that a
+	// misconfiguration cannot turn one client request into a storm
+	// (SPECIFICATIONS.md section 93).
+	MaxProcessorAttempts = 5
+)
+
 const (
 	MaxMeasurementBatchSize    = 10000
 	MaxMeasurementMetadataSize = 4096
@@ -213,6 +279,21 @@ func Load(lookup Lookup) (Config, error) {
 			MaxMetadataBytes: int(p.uint32("MEASUREMENT_MAX_METADATA_BYTES", 2048)),
 			MaxFutureSkew:    p.duration("MEASUREMENT_MAX_FUTURE_SKEW", 5*time.Minute),
 		},
+		Processing: Processing{
+			MaxJobMeasurements:   int(p.uint32("PROCESSING_MAX_JOB_MEASUREMENTS", 100000)),
+			AlgorithmVersion:     p.string("PROCESSING_ALGORITHM_VERSION", DefaultAlgorithmVersion),
+			ServiceVersion:       p.string("PROCESSING_SERVICE_VERSION", "api-gateway"),
+			FailureRecordTimeout: p.duration("PROCESSING_FAILURE_RECORD_TIMEOUT", 5*time.Second),
+		},
+		Processor: Processor{
+			BaseURL:         p.string("PROCESSOR_URL", "http://127.0.0.1:8081"),
+			Token:           Secret(p.string("PROCESSOR_TOKEN", "")),
+			Timeout:         p.duration("PROCESSOR_TIMEOUT", 5*time.Second),
+			MaxAttempts:     int(p.uint32("PROCESSOR_MAX_ATTEMPTS", 3)),
+			Backoff:         p.duration("PROCESSOR_BACKOFF", 100*time.Millisecond),
+			MaxBackoff:      p.duration("PROCESSOR_MAX_BACKOFF", 2*time.Second),
+			ContractVersion: InternalContractVersion,
+		},
 		Idempotency: Idempotency{
 			TTL: p.duration("IDEMPOTENCY_TTL", 24*time.Hour),
 		},
@@ -253,6 +334,34 @@ func Load(lookup Lookup) (Config, error) {
 	}
 	if cfg.Environment.Deployed() && cfg.Database.URL != "" && !databaseURLRequiresTLS(cfg.Database.URL) {
 		p.fail("DATABASE_URL: sslmode must be require, verify-ca or verify-full in %s (SPECIFICATIONS.md section 30)", cfg.Environment)
+	}
+	if cfg.Processing.MaxJobMeasurements < 1 || cfg.Processing.MaxJobMeasurements > MaxProcessingJobMeasurements {
+		p.fail("PROCESSING_MAX_JOB_MEASUREMENTS: must be between 1 and %d", MaxProcessingJobMeasurements)
+	}
+	if cfg.Processing.AlgorithmVersion == "" {
+		p.fail("PROCESSING_ALGORITHM_VERSION: must not be empty")
+	}
+	if err := processorclientValidateBaseURL(cfg.Processor.BaseURL); err != nil {
+		p.fail("PROCESSOR_URL: %v", err)
+	}
+	// A client that gives up before the gateway can answer turns a clear
+	// failure into a mystery, so the processor's bound must fit inside the
+	// request's.
+	if cfg.Processor.Timeout >= cfg.HTTP.RequestTimeout {
+		p.fail("PROCESSOR_TIMEOUT: must be shorter than HTTP_REQUEST_TIMEOUT (%s >= %s)",
+			cfg.Processor.Timeout, cfg.HTTP.RequestTimeout)
+	}
+	if cfg.Processor.MaxAttempts < 1 || cfg.Processor.MaxAttempts > MaxProcessorAttempts {
+		p.fail("PROCESSOR_MAX_ATTEMPTS: must be between 1 and %d", MaxProcessorAttempts)
+	}
+	if cfg.Processor.MaxBackoff < cfg.Processor.Backoff {
+		p.fail("PROCESSOR_MAX_BACKOFF: must be at least PROCESSOR_BACKOFF (%s < %s)",
+			cfg.Processor.MaxBackoff, cfg.Processor.Backoff)
+	}
+	// The internal API must not be reachable without a credential where it
+	// carries real traffic (SPECIFICATIONS.md sections 30 and 31).
+	if cfg.Environment.Deployed() && len(cfg.Processor.Token) == 0 {
+		p.fail("PROCESSOR_TOKEN: required in %s, where the processor must not be called without a credential", cfg.Environment)
 	}
 
 	if err := p.err(); err != nil {
@@ -379,6 +488,26 @@ func (p *parser) passwordHash() PasswordHash {
 		p.fail("PASSWORD_HASH_TIME: must be at most %d", MaxPasswordHashTime)
 	}
 	return cfg
+}
+
+// processorclientValidateBaseURL checks the processor address. The check
+// lives here rather than in the client package because config must not
+// depend on a package that depends on config.
+func processorclientValidateBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return errors.New("must be an http or https URL")
+	}
+	if u.Host == "" {
+		return errors.New("must name a host")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return errors.New("must not carry a path")
+	}
+	return nil
 }
 
 func validKeyID(id string) bool {

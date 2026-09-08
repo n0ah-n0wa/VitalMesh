@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use tracing::Level;
 
+use crate::anomaly::RuleSet;
+
 /// Deployment environment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Environment {
@@ -29,6 +31,12 @@ impl Environment {
         }
     }
 
+    /// Whether this environment is a real deployment. Some settings are
+    /// optional for a developer and required in a deployment.
+    pub fn is_deployed(self) -> bool {
+        matches!(self, Self::Staging | Self::Production)
+    }
+
     /// The canonical name used in logs.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -37,6 +45,54 @@ impl Environment {
             Self::Staging => "staging",
             Self::Production => "production",
         }
+    }
+}
+
+/// A configured secret. It never appears in a log line, a debug rendering
+/// or an error message: the only way to read it is [`Secret::reveal`], and
+/// the only comparison offered runs in constant time so that a wrong token
+/// cannot be discovered one byte at a time.
+#[derive(Clone)]
+pub struct Secret(String);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    /// The secret itself. Every call site is a place a secret could leak, so
+    /// keep them few and obvious.
+    pub fn reveal(&self) -> &str {
+        &self.0
+    }
+
+    /// Whether `candidate` equals this secret, in time that does not depend
+    /// on how many leading bytes match. The length is not secret: a
+    /// mismatched length returns early, which is what every practical
+    /// constant-time comparison does.
+    pub fn matches(&self, candidate: &str) -> bool {
+        let expected = self.0.as_bytes();
+        let actual = candidate.as_bytes();
+        if expected.len() != actual.len() {
+            return false;
+        }
+        let mut difference = 0u8;
+        for (a, b) in expected.iter().zip(actual) {
+            difference |= a ^ b;
+        }
+        difference == 0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
+impl fmt::Display for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[redacted]")
     }
 }
 
@@ -77,6 +133,11 @@ pub struct Http {
     pub request_timeout: Duration,
     /// Largest accepted request body.
     pub max_body_bytes: usize,
+    /// The shared secret the gateway presents as `Authorization: Bearer`.
+    /// Required in staging and production; when it is unset in a local or
+    /// test environment the internal endpoints are served without
+    /// authentication, which start-up says out loud.
+    pub internal_token: Option<Secret>,
 }
 
 /// Logging settings.
@@ -99,6 +160,11 @@ pub struct Processing {
     /// Furthest `recorded_at` ahead of the job's request time accepted.
     pub max_future_skew: Duration,
     pub timeout: Duration,
+    /// How long a finished job stays observable through the jobs endpoint.
+    pub job_retention: Duration,
+    /// The anomaly rules every job is evaluated against. An empty set flags
+    /// nothing, which is the default: rules are a deployment decision.
+    pub rules: RuleSet,
 }
 
 /// The list of configuration problems found by [`Config::load`].
@@ -157,10 +223,11 @@ impl Config {
                 request_timeout: p.duration("HTTP_REQUEST_TIMEOUT", Duration::from_secs(30)),
                 max_body_bytes: p.value(
                     "HTTP_MAX_BODY_BYTES",
-                    1 << 20,
+                    DEFAULT_MAX_BODY_BYTES,
                     "a positive number of bytes",
                     positive_usize,
                 ),
+                internal_token: p.secret("INTERNAL_TOKEN", MIN_TOKEN_LEN),
             },
             log: Log {
                 level: p.value(
@@ -199,9 +266,35 @@ impl Config {
                     .duration("MAX_MEASUREMENT_AGE", Duration::from_secs(400 * 24 * 3600)),
                 max_future_skew: p.duration("MAX_FUTURE_SKEW", Duration::from_secs(300)),
                 timeout: p.duration("PROCESSING_TIMEOUT", Duration::from_secs(300)),
+                job_retention: p.duration("JOB_RETENTION", Duration::from_secs(900)),
+                rules: p.rules("ANOMALY_RULES"),
             },
             shutdown_timeout: p.duration("SHUTDOWN_TIMEOUT", Duration::from_secs(30)),
         };
+
+        // Checks that depend on more than one value.
+        // A body limit below what the job ceiling implies would refuse jobs
+        // the health endpoint says this processor accepts, and the client
+        // would see an opaque rejection rather than a clear limit.
+        let needed = config
+            .processing
+            .max_job_measurements
+            .get()
+            .saturating_mul(BYTES_PER_READING);
+        if config.http.max_body_bytes < needed {
+            p.problems.push(format!(
+                "HTTP_MAX_BODY_BYTES: {} is too small for MAX_JOB_MEASUREMENTS={}, which needs at \
+                 least {needed} bytes; raise it or lower the job ceiling",
+                config.http.max_body_bytes, config.processing.max_job_measurements
+            ));
+        }
+        if config.environment.is_deployed() && config.http.internal_token.is_none() {
+            p.problems.push(
+                "INTERNAL_TOKEN: required in staging and production, where the internal API \
+                 must not be reachable without a credential"
+                    .to_owned(),
+            );
+        }
 
         if p.problems.is_empty() {
             Ok(config)
@@ -216,6 +309,22 @@ impl Config {
 const DEFAULT_MAX_CONCURRENT_JOBS: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 const DEFAULT_MAX_BATCH_SIZE: NonZeroUsize = NonZeroUsize::new(1000).unwrap();
 const DEFAULT_MAX_JOB_MEASUREMENTS: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
+
+/// Shortest accepted internal token. Short enough to be typed in a local
+/// setup, long enough that a guessed one is not a realistic threat.
+const MIN_TOKEN_LEN: usize = 16;
+
+/// Bytes one reading occupies in a request body, rounded up: an identifier,
+/// a type, a value, a unit and an RFC 3339 instant, with their field names
+/// and punctuation.
+pub const BYTES_PER_READING: usize = 128;
+
+/// Largest accepted request body. The internal API carries a job's whole
+/// measurement set in one body, so this must hold `MAX_JOB_MEASUREMENTS`
+/// readings; a smaller limit would refuse jobs the processor advertises it
+/// can take. [`Config::load`] checks that the two stay consistent whatever
+/// they are configured to.
+const DEFAULT_MAX_BODY_BYTES: usize = 16 << 20;
 
 fn default_addr() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 8081))
@@ -279,6 +388,34 @@ impl<F: Fn(&str) -> Option<String>> Parser<F> {
             parse_duration,
         )
     }
+
+    /// A secret, absent when unset. The problem message names the key and
+    /// the rule it broke and never echoes the value, unlike [`Self::value`].
+    fn secret(&mut self, key: &str, min_len: usize) -> Option<Secret> {
+        let raw = self.raw(key)?;
+        let value = raw.trim();
+        if value.len() < min_len {
+            self.problems
+                .push(format!("{key}: expected at least {min_len} characters"));
+            return None;
+        }
+        Some(Secret::new(value))
+    }
+
+    /// A JSON rule set, empty when unset. The problem message carries the
+    /// rule's own complaint but not the configured JSON, which can be long.
+    fn rules(&mut self, key: &str) -> RuleSet {
+        let Some(raw) = self.raw(key) else {
+            return RuleSet::empty();
+        };
+        match RuleSet::from_json(raw.trim()) {
+            Ok(rules) => rules,
+            Err(error) => {
+                self.problems.push(format!("{key}: {error}"));
+                RuleSet::empty()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -300,7 +437,7 @@ mod tests {
         assert_eq!(cfg.environment, Environment::Local);
         assert_eq!(cfg.http.addr, "0.0.0.0:8081".parse().unwrap());
         assert_eq!(cfg.http.request_timeout, Duration::from_secs(30));
-        assert_eq!(cfg.http.max_body_bytes, 1 << 20);
+        assert_eq!(cfg.http.max_body_bytes, 16 << 20);
         assert_eq!(cfg.log.level, Level::INFO);
         assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.processing.max_concurrent_jobs.get(), 4);
@@ -322,12 +459,16 @@ mod tests {
             ("HTTP_ADDR", "127.0.0.1:9000"),
             ("HTTP_REQUEST_TIMEOUT", "2s"),
             ("HTTP_MAX_BODY_BYTES", "4096"),
+            // A small body limit only makes sense with a small job ceiling.
+            ("MAX_JOB_MEASUREMENTS", "32"),
             ("LOG_LEVEL", "debug"),
             ("LOG_FORMAT", "text"),
             ("MAX_CONCURRENT_JOBS", "16"),
             ("MAX_BATCH_SIZE", "250"),
             ("PROCESSING_TIMEOUT", "5m"),
             ("SHUTDOWN_TIMEOUT", "1500ms"),
+            ("JOB_RETENTION", "2m"),
+            ("INTERNAL_TOKEN", "example-token-not-a-secret"),
         ])
         .expect("valid overrides");
 
@@ -335,8 +476,14 @@ mod tests {
         assert_eq!(cfg.http.addr, "127.0.0.1:9000".parse().unwrap());
         assert_eq!(cfg.http.request_timeout, Duration::from_secs(2));
         assert_eq!(cfg.http.max_body_bytes, 4096);
+        assert_eq!(cfg.processing.max_job_measurements.get(), 32);
         assert_eq!(cfg.log.level, Level::DEBUG);
         assert_eq!(cfg.log.format, LogFormat::Text);
+        assert_eq!(cfg.processing.job_retention, Duration::from_secs(120));
+        assert_eq!(
+            cfg.http.internal_token.as_ref().map(Secret::reveal),
+            Some("example-token-not-a-secret")
+        );
         assert_eq!(cfg.processing.max_concurrent_jobs.get(), 16);
         assert_eq!(cfg.processing.max_batch_size.get(), 250);
         assert_eq!(cfg.processing.timeout, Duration::from_secs(300));
@@ -385,6 +532,129 @@ mod tests {
         assert!(rendered.contains(
             "ENVIRONMENT: expected one of local, test, staging, production, got \"prod\""
         ));
+    }
+
+    /// A deployment must not serve the internal API without a credential.
+    /// The two numbers the health endpoint advertises must not contradict
+    /// each other: a job at the ceiling has to fit in a body.
+    #[test]
+    fn the_body_limit_must_hold_a_job_at_the_ceiling() {
+        let cfg = load(&[]).expect("the defaults must agree");
+        assert!(
+            cfg.http.max_body_bytes
+                >= cfg.processing.max_job_measurements.get() * BYTES_PER_READING,
+            "the default body limit {} cannot hold {} readings",
+            cfg.http.max_body_bytes,
+            cfg.processing.max_job_measurements
+        );
+
+        let error = load(&[
+            ("MAX_JOB_MEASUREMENTS", "100000"),
+            ("HTTP_MAX_BODY_BYTES", "1048576"),
+        ])
+        .expect_err("a body limit too small for the job ceiling must not start");
+        let problem = error.problems().join("\n");
+        assert!(problem.contains("HTTP_MAX_BODY_BYTES"), "{problem}");
+        assert!(problem.contains("MAX_JOB_MEASUREMENTS"), "{problem}");
+
+        // Lowering the ceiling instead is a valid way to agree.
+        load(&[
+            ("MAX_JOB_MEASUREMENTS", "1000"),
+            ("HTTP_MAX_BODY_BYTES", "1048576"),
+        ])
+        .expect("a smaller ceiling fits the smaller body");
+    }
+
+    #[test]
+    fn a_deployment_requires_an_internal_token() {
+        for environment in ["staging", "production"] {
+            let error = load(&[("ENVIRONMENT", environment)])
+                .expect_err("a deployment without a token must not start");
+            assert!(
+                error
+                    .problems()
+                    .iter()
+                    .any(|p| p.starts_with("INTERNAL_TOKEN:")),
+                "{environment}: {:?}",
+                error.problems()
+            );
+        }
+        for environment in ["local", "test"] {
+            let cfg =
+                load(&[("ENVIRONMENT", environment)]).expect("a developer may run without a token");
+            assert!(cfg.http.internal_token.is_none());
+        }
+    }
+
+    #[test]
+    fn a_short_token_is_refused_and_never_echoed() {
+        let error = load(&[("INTERNAL_TOKEN", "too-short")]).expect_err("a short token is refused");
+        let problem = error.problems().join("\n");
+        assert!(problem.contains("INTERNAL_TOKEN"), "{problem}");
+        assert!(
+            !problem.contains("too-short"),
+            "the problem echoed the secret: {problem}"
+        );
+    }
+
+    /// A secret must not be readable from a log line, a panic message or a
+    /// debug rendering of the configuration.
+    #[test]
+    fn a_secret_never_renders_itself() {
+        let secret = Secret::new("example-token-not-a-secret");
+        assert_eq!(format!("{secret}"), "[redacted]");
+        assert_eq!(format!("{secret:?}"), "[redacted]");
+
+        let cfg = load(&[("INTERNAL_TOKEN", "example-token-not-a-secret")]).unwrap();
+        let rendered = format!("{cfg:?}");
+        assert!(
+            !rendered.contains("example-token-not-a-secret"),
+            "the configuration rendered its secret: {rendered}"
+        );
+        assert!(rendered.contains("[redacted]"));
+        assert_eq!(secret.reveal(), "example-token-not-a-secret");
+    }
+
+    #[test]
+    fn secret_comparison_accepts_only_the_exact_value() {
+        let secret = Secret::new("example-token-value");
+        assert!(secret.matches("example-token-value"));
+        for wrong in [
+            "example-token-valu",   // shorter
+            "example-token-values", // longer
+            "example-token-valuE",  // one byte different
+            "",
+            "Example-token-value", // differs in the first byte
+        ] {
+            assert!(!secret.matches(wrong), "{wrong:?} must not match");
+        }
+    }
+
+    #[test]
+    fn anomaly_rules_are_parsed_and_a_broken_set_is_reported_without_its_json() {
+        let cfg = load(&[]).unwrap();
+        assert!(
+            cfg.processing.rules.rules().is_empty(),
+            "the default flags nothing"
+        );
+
+        let cfg = load(&[(
+            "ANOMALY_RULES",
+            r#"{"rules": [{"name": "hr", "kind": "THRESHOLD",
+                 "tiers": {"warning": {"upper": 180}}}]}"#,
+        )])
+        .expect("a valid rule set loads");
+        assert_eq!(cfg.processing.rules.rules().len(), 1);
+        assert_eq!(cfg.processing.rules.rules()[0].name(), "hr");
+
+        let error = load(&[("ANOMALY_RULES", r#"{"rules": [{"name": "x"}]}"#)])
+            .expect_err("an invalid rule set must stop start-up");
+        let problem = error.problems().join("\n");
+        assert!(problem.starts_with("ANOMALY_RULES:"), "{problem}");
+        assert!(
+            !problem.contains(r#"{"rules""#),
+            "the problem echoed the configured JSON: {problem}"
+        );
     }
 
     #[test]

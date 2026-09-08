@@ -28,6 +28,7 @@ fn test_config() -> Config {
             addr: "127.0.0.1:0".parse().unwrap(),
             request_timeout: Duration::from_millis(100),
             max_body_bytes: BODY_LIMIT,
+            internal_token: None,
         },
         log: Log {
             level: tracing::Level::INFO,
@@ -40,6 +41,8 @@ fn test_config() -> Config {
             max_measurement_age: Duration::from_secs(3600),
             max_future_skew: Duration::from_secs(60),
             timeout: Duration::from_secs(1),
+            job_retention: Duration::from_secs(900),
+            rules: crate::anomaly::RuleSet::empty(),
         },
         shutdown_timeout: Duration::from_secs(1),
     }
@@ -51,7 +54,8 @@ fn state() -> SharedState {
 
 /// The production routes plus test-only routes exercising the middleware.
 fn app(state: SharedState) -> Router {
-    let router = routes()
+    let http = state.config.http.clone();
+    let router = routes(&http)
         .route(
             "/slow",
             get(async || -> Result<&'static str, Error> {

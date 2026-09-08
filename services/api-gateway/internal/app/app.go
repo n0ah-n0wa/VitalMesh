@@ -20,10 +20,12 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/handler"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/httpapi/middleware"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/processorclient"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/measurement"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/metrics"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/tracing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/patient"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/processing"
 )
 
 // ServiceName identifies the gateway in logs and health responses.
@@ -66,12 +68,15 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 
 	patients := patient.NewService(postgres.NewPatientStore(pool), logger, patient.Options{Metrics: rec, Tracer: tr})
 	measurements := measurement.NewService(postgres.NewMeasurementStore(pool), cfg.Measurements, logger, measurement.Options{Metrics: rec, Tracer: tr})
+	processor := processorclient.New(cfg.Processor, logger, processorclient.Options{})
+	jobs := processing.NewService(postgres.NewJobStore(pool), processor, cfg.Processing, logger, processing.Options{Metrics: rec, Tracer: tr})
 
 	handlers := httpapi.Handlers{
 		Health:       handler.NewHealth(ServiceName, version, readiness, logger),
 		Auth:         handler.NewAuth(authService, logger),
 		Patients:     handler.NewPatients(patients, logger),
 		Measurements: handler.NewMeasurements(measurements, logger),
+		Processing:   handler.NewProcessing(jobs, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
 		Idempotency:  middleware.Idempotency(postgres.NewIdempotencyStore(pool), cfg.Idempotency.TTL, logger),
 		Policy:       authz.Default(),

@@ -185,9 +185,17 @@ func TestDeployedEnvironmentsRequireDatabaseTLS(t *testing.T) {
 		"host=db user=u password=p dbname=vm sslmode=verify-full",
 		"host=db sslmode='require' user=u",
 	}
+	// A deployed environment also demands the processor credential; it is
+	// supplied here so this test is only about the database URL.
+	deployed := func(env, dsn string) map[string]string {
+		return map[string]string{
+			"ENVIRONMENT": env, "DATABASE_URL": dsn,
+			"PROCESSOR_TOKEN": "deployed-processor-token",
+		}
+	}
 	for _, env := range []string{"staging", "production"} {
 		for _, dsn := range plaintext {
-			_, err := Load(lookupFrom(map[string]string{"ENVIRONMENT": env, "DATABASE_URL": dsn}))
+			_, err := Load(lookupFrom(deployed(env, dsn)))
 			if err == nil || !strings.Contains(err.Error(), "DATABASE_URL: sslmode must be require, verify-ca or verify-full in "+env) {
 				t.Errorf("%s %q: err = %v, want a TLS requirement", env, dsn, err)
 			}
@@ -196,7 +204,7 @@ func TestDeployedEnvironmentsRequireDatabaseTLS(t *testing.T) {
 			}
 		}
 		for _, dsn := range encrypted {
-			if _, err := Load(lookupFrom(map[string]string{"ENVIRONMENT": env, "DATABASE_URL": dsn})); err != nil {
+			if _, err := Load(lookupFrom(deployed(env, dsn))); err != nil {
 				t.Errorf("%s %q: unexpected error %v", env, dsn, err)
 			}
 		}

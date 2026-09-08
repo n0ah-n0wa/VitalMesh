@@ -196,6 +196,8 @@ mod tests {
             max_measurement_age: Duration::from_secs(1),
             max_future_skew: Duration::from_secs(1),
             timeout,
+            job_retention: Duration::from_secs(900),
+            rules: crate::anomaly::RuleSet::empty(),
         };
         (Engine::new(&processing, shutdown.clone()), shutdown)
     }

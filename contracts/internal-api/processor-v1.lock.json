@@ -1,0 +1,6 @@
+{
+  "contract": "processor-v1",
+  "version": "1.1.1",
+  "fingerprint": "sha256:4486b927cba8a65f26a0495d4bbabbb43628ce1355acb1413db40a604482b638",
+  "note": "Regenerate with `make contracts-lock` after reviewing the change. A change that removes or narrows anything a client may rely on requires a new major version and a new path prefix; see contracts/internal-api/README.md."
+}

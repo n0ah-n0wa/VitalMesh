@@ -18,11 +18,14 @@ src/
   state.rs            application state shared with handlers; readiness flag
   stats/              statistical engine: time ordering, descriptive statistics, rolling mean and
                       moving standard deviation, epoch-aligned tumbling windows, aggregation
+  jobs.rs             bounded registry of the jobs this instance is running or ran
   telemetry.rs        structured JSON logging with the repository's field schema
   requestid.rs        request and correlation id validation and generation
   transport/          axum router, middleware, health handlers, error envelope
   lifecycle.rs        serve until shutdown, then drain and cancel
 tests/lifecycle.rs    real-socket start/serve/shutdown test
+tests/internal_api.rs integration tests of the internal API against the real service
+tests/contract.rs     conformance of this service with the internal API contract
 benches/stats.rs      criterion benchmarks of the statistical engine and its aggregation steps
 benches/pipeline.rs   criterion benchmarks of the pipeline end to end and of its stages
 ```
@@ -122,7 +125,8 @@ Values come from the environment; empty values count as unset. Start-up exits 2 
 | `ENVIRONMENT` | `local` | `local`, `test`, `staging`, `production` |
 | `HTTP_ADDR` | `0.0.0.0:8081` | listen address |
 | `HTTP_REQUEST_TIMEOUT` | `30s` | bound on handling one request; exceeding it returns 504 |
-| `HTTP_MAX_BODY_BYTES` | `1048576` | largest accepted request body |
+| `HTTP_MAX_BODY_BYTES` | `16777216` | largest accepted request body; must hold `MAX_JOB_MEASUREMENTS` readings, which start-up checks |
+| `INTERNAL_TOKEN` | none | shared secret the gateway presents as `Authorization: Bearer`; at least 16 characters, required in staging and production, never logged |
 | `LOG_LEVEL` | `info` | `trace`, `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
 | `MAX_CONCURRENT_JOBS` | `4` | jobs admitted at once; further jobs are rejected with 503 and `Retry-After` |
@@ -131,25 +135,44 @@ Values come from the environment; empty values count as unset. Start-up exits 2 
 | `MAX_MEASUREMENT_AGE` | `9600h` (400 days) | oldest `recorded_at` accepted, relative to the job's request time |
 | `MAX_FUTURE_SKEW` | `5m` | furthest `recorded_at` ahead of the job's request time |
 | `PROCESSING_TIMEOUT` | `5m` | bound on one job |
+| `JOB_RETENTION` | `15m` | how long a finished job stays observable through the jobs endpoint |
+| `ANOMALY_RULES` | empty | the JSON rule set every job is evaluated against; an empty set flags nothing |
 | `SHUTDOWN_TIMEOUT` | `30s` | how long running jobs may finish after shutdown starts before being cancelled |
 
 Durations are an integer with a unit: `250ms`, `30s`, `5m`, `1h`.
 
 ## Endpoints
 
+The three `/internal/v1` routes are the internal API contract
+([`contracts/internal-api/processor-v1.json`](../../contracts/internal-api/processor-v1.json), SPECIFICATIONS.md section 8), which is the authority on their request and response shapes. `/health` and `/ready` are the unversioned platform probes and are deliberately outside the contract: they serve Kubernetes, not the gateway.
+
 | Route | Purpose |
 |---|---|
 | `GET /health` | liveness; never consults dependencies |
 | `GET /ready` | `200 ready` once the listener is up, `503 not_ready` before that and from the moment shutdown begins |
-| `GET /internal/v1/health` | the versioned health check the gateway calls; same body as `/health` |
+| `GET /internal/v1/health` | versions and the limits in force, so the gateway can check compatibility and size its requests and timeouts; no credential needed |
+| `POST /internal/v1/process` | runs one job's measurements through the pipeline and returns its results |
+| `GET /internal/v1/jobs/{job_id}` | this instance's view of a job |
 
-Unknown routes and wrong methods return the error envelope:
+- **Authentication.** The two working endpoints require `Authorization: Bearer <INTERNAL_TOKEN>`, compared in constant time. The token authenticates the gateway to the processor inside the cluster; it is not a user credential and carries no identity, because the gateway has already authenticated and authorised the caller. It is required in staging and production, where start-up fails without it, and optional for a developer, where its absence is logged and the layer is not installed. A rejection says only that authentication is required: distinguishing absent from wrong helps nobody but an attacker.
+- **Strict parsing.** The body must be `application/json` and must match the request type exactly; unknown fields, wrong types and every domain rule are rejected. Anything the request could not be understood as is `400 INVALID_REQUEST`; only a well-formed request that breaks a rule is `422`. Serde's message quotes the offending input, so it stays in the log and never reaches the client.
+- **Partial failures.** A reading the pipeline rejects is reported in `rejected` by its input index with a stable code, and the rest of the job is processed. Only a job in which nothing survives fails as a whole.
+- **Timeouts.** `X-Request-Timeout-Ms` lets a client declare what is left of its own deadline; the job is bounded by the smaller of that and `PROCESSING_TIMEOUT`, so work nobody is waiting for stops at the next checkpoint. A client's socket deadline must exceed the value it sends, or it will abandon the call before the `504` arrives. An unusable value is rejected rather than ignored.
+- **Concurrency.** At most `MAX_CONCURRENT_JOBS` run at once and nothing queues: a request arriving at capacity is refused immediately with `503 PROCESSOR_OVERLOADED` and `Retry-After`. A second request for a job id already running is refused with `409`, which never disturbs the attempt in flight.
+- **Jobs are observed, not owned.** `GET /internal/v1/jobs/{job_id}` answers from a bounded in-memory registry: running jobs, plus jobs that finished within `JOB_RETENTION` and at most the newest 1024 of them. A `404 JOB_NOT_FOUND` means this instance is not running the job and no longer remembers it, never that the job does not exist; the gateway's row is the system of record. Of the five statuses in the job state machine only `PROCESSING`, `COMPLETED`, `FAILED` and `CANCELLED` appear here, because `PENDING` exists before dispatch.
+
+Every failure uses one envelope, on every route:
 
 ```json
-{"error":{"code":"NOT_FOUND","message":"The requested resource does not exist.","request_id":"..."}}
+{"error":{"code":"NOT_FOUND","message":"The requested resource does not exist.",
+          "request_id":"...","correlation_id":"...","retryable":false}}
 ```
 
-Error kinds map to statuses: invalid 400, validation 422, not found 404, conflict 409, overloaded/cancelled/unavailable 503 (overloaded adds `Retry-After: 1`), timeout 504, internal 500.
+`code` is stable and is what a client branches on; `retryable` states whether repeating the identical request could succeed (SPECIFICATIONS.md section 93), and a failure that has something specific to add carries it in `details`, such as the limit and the count for `JOB_TOO_LARGE`. Error kinds map to statuses: invalid 400, unauthenticated 401, not found 404, method not allowed 405, conflict 409, unsupported media 415, validation 422, overloaded/cancelled/unavailable 503 (overloaded adds `Retry-After: 1`), timeout 504, internal 500. A cancellation is a 503 that is *not* retryable: the work stopped because someone asked it to.
+
+## Observability
+
+Every request logs one structured record with the request id, correlation id, method, path, status and duration. A job adds a `process` span carrying its id, algorithm version and reading count, and one record on completion with the status, duration, and the counts of accepted, skipped and rejected readings, results and anomalies. Nothing from a payload is logged: not a value, not an identifier of a measurement, and never the internal token. Prometheus metrics and OpenTelemetry export arrive with the observability phase; the log fields above are the ones those exporters will read.
 
 ## Request identification
 

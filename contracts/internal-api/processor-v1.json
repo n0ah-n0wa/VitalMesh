@@ -1,0 +1,1214 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "VitalMesh internal processing API",
+    "version": "1.1.1",
+    "summary": "Contract between the Go API gateway (client) and the Rust processor (server).",
+    "description": "The internal HTTP/JSON API served by the Rust processor under `/internal/v1` and consumed by the Go API gateway (SPECIFICATIONS.md section 8). It is versioned independently of the public `/api/v1` API. The path prefix carries the major version; `info.version` carries the full contract version and changes with every reviewed change to this document. See `contracts/internal-api/README.md` for the ownership, timeout, retry and compatibility rules that this document references but cannot express.\n\nThe gateway owns PostgreSQL and is the system of record for jobs, measurements and results. The processor holds no database connection: every measurement it processes arrives in the request body, and every job view it serves is its own bounded, in-memory view of work it was asked to do.",
+    "contact": {
+      "name": "VitalMesh",
+      "url": "https://github.com/n0ah-n0wa/VitalMesh"
+    }
+  },
+  "servers": [
+    {
+      "url": "{scheme}://{host}:{port}",
+      "description": "The processor, addressed by the gateway through configuration.",
+      "variables": {
+        "scheme": {
+          "default": "http",
+          "enum": ["http", "https"]
+        },
+        "host": {
+          "default": "processor"
+        },
+        "port": {
+          "default": "8081"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "internalToken": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "processing",
+      "description": "Submitting work and observing it."
+    },
+    {
+      "name": "health",
+      "description": "Liveness and contract compatibility."
+    }
+  ],
+  "paths": {
+    "/internal/v1/process": {
+      "post": {
+        "operationId": "process",
+        "tags": ["processing"],
+        "summary": "Process one job's measurements and return its results.",
+        "description": "Runs the complete pipeline (validation, normalization, time ordering, window aggregation, statistical analysis, anomaly detection, result generation) over the readings in the request and returns the outcome in the response. The call is synchronous: it either completes within the effective time bound or fails.\n\n**Admission.** The processor admits at most `MAX_CONCURRENT_JOBS` jobs at once and never queues: a request that arrives at capacity is refused immediately with `503 PROCESSOR_OVERLOADED` and `Retry-After` (SPECIFICATIONS.md sections 18 and 91). A second request for a job id already running is refused with `409 JOB_ALREADY_RUNNING`.\n\n**Time bound.** The effective bound is the smaller of the processor's `PROCESSING_TIMEOUT` and the client's `X-Request-Timeout-Ms`, if sent. Exceeding it returns `504 PROCESSING_TIMEOUT` and the work stops; no partial results are returned.\n\n**Partial failures.** Readings rejected by validation or normalization are reported individually in `rejected` by input index with a stable code, and the rest are processed (SPECIFICATIONS.md section 17). A job in which no reading survives fails as a whole with `422 NO_VALID_MEASUREMENTS`.\n\n**Determinism.** The same request, algorithm version and rule configuration always produce the same outcome, byte for byte.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/CorrelationId" },
+          { "$ref": "#/components/parameters/Traceparent" },
+          { "$ref": "#/components/parameters/Tracestate" },
+          { "$ref": "#/components/parameters/RequestTimeoutMs" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ProcessRequest" },
+              "example": {
+                "job": {
+                  "id": "job-7f3c1d",
+                  "patient_id": "patient-0042",
+                  "parameters": {
+                    "measurement_types": ["HEART_RATE"],
+                    "windows": ["1m", "1h"],
+                    "percentiles": [50, 95]
+                  },
+                  "algorithm_version": "1.0.0",
+                  "status": "PENDING",
+                  "requested_at": "2026-09-06T12:00:00Z"
+                },
+                "readings": [
+                  {
+                    "id": "m-0001",
+                    "type": "HEART_RATE",
+                    "value": 72,
+                    "unit": "bpm",
+                    "recorded_at": "2026-09-06T11:58:00Z"
+                  },
+                  {
+                    "id": "m-0002",
+                    "type": "HEART_RATE",
+                    "value": 191.5,
+                    "unit": "bpm",
+                    "recorded_at": "2026-09-06T11:58:30Z"
+                  },
+                  {
+                    "id": "m-0003",
+                    "type": "HEART_RATE",
+                    "value": 74,
+                    "unit": "bpm",
+                    "recorded_at": "2026-09-06T11:59:00Z"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The job completed. The body holds every result the parameters asked for, plus the accounting of readings that were accepted, skipped or rejected.",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ProcessOutcome" },
+                "example": {
+                  "job_id": "job-7f3c1d",
+                  "algorithm_version": "1.0.0",
+                  "service_version": "1a2b3c4",
+                  "accepted": 3,
+                  "skipped": 0,
+                  "rejected": [],
+                  "results": [
+                    {
+                      "job_id": "job-7f3c1d",
+                      "measurement_type": "HEART_RATE",
+                      "window": "1m",
+                      "window_start": "2026-09-06T11:58:00Z",
+                      "statistics": {
+                        "count": 2,
+                        "min": 72.0,
+                        "max": 191.5,
+                        "mean": 131.75,
+                        "median": 131.75,
+                        "variance": 7140.125,
+                        "std_dev": 84.49926035179243,
+                        "percentiles": {
+                          "50": 72.0,
+                          "95": 191.5
+                        }
+                      },
+                      "anomalies": [
+                        {
+                          "measurement_type": "HEART_RATE",
+                          "window": "1m",
+                          "metric": "THRESHOLD",
+                          "value": 191.5,
+                          "threshold": 180.0,
+                          "severity": "WARNING",
+                          "detected_at": "2026-09-06T11:58:30Z",
+                          "algorithm_version": "1.0.0"
+                        }
+                      ],
+                      "algorithm_version": "1.0.0",
+                      "service_version": "1a2b3c4"
+                    },
+                    {
+                      "job_id": "job-7f3c1d",
+                      "measurement_type": "HEART_RATE",
+                      "window": "1m",
+                      "window_start": "2026-09-06T11:59:00Z",
+                      "statistics": {
+                        "count": 1,
+                        "min": 74.0,
+                        "max": 74.0,
+                        "mean": 74.0,
+                        "median": 74.0,
+                        "variance": 0.0,
+                        "std_dev": 0.0,
+                        "percentiles": {
+                          "50": 74.0,
+                          "95": 74.0
+                        }
+                      },
+                      "anomalies": [],
+                      "algorithm_version": "1.0.0",
+                      "service_version": "1a2b3c4"
+                    },
+                    {
+                      "job_id": "job-7f3c1d",
+                      "measurement_type": "HEART_RATE",
+                      "window": "1h",
+                      "window_start": "2026-09-06T11:00:00Z",
+                      "statistics": {
+                        "count": 3,
+                        "min": 72.0,
+                        "max": 191.5,
+                        "mean": 112.5,
+                        "median": 74.0,
+                        "variance": 4681.75,
+                        "std_dev": 68.42331473993349,
+                        "percentiles": {
+                          "50": 74.0,
+                          "95": 191.5
+                        }
+                      },
+                      "anomalies": [
+                        {
+                          "measurement_type": "HEART_RATE",
+                          "window": "1h",
+                          "metric": "THRESHOLD",
+                          "value": 191.5,
+                          "threshold": 180.0,
+                          "severity": "WARNING",
+                          "detected_at": "2026-09-06T11:58:30Z",
+                          "algorithm_version": "1.0.0"
+                        }
+                      ],
+                      "algorithm_version": "1.0.0",
+                      "service_version": "1a2b3c4"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "409": {
+            "description": "A job with this id is already running on this processor.",
+            "x-error-codes": ["JOB_ALREADY_RUNNING"],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "JOB_ALREADY_RUNNING",
+                    "message": "A job with this id is already running.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "correlation_id": "c-9910",
+                    "retryable": false
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The request body exceeds `HTTP_MAX_BODY_BYTES`. The body is rejected before it is parsed (SPECIFICATIONS.md section 89).",
+            "x-error-codes": ["REQUEST_BODY_TOO_LARGE"],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "REQUEST_BODY_TOO_LARGE",
+                    "message": "Payload Too Large.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "retryable": false
+                  }
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The request is not `application/json`.",
+            "x-error-codes": ["UNSUPPORTED_MEDIA_TYPE"],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "UNSUPPORTED_MEDIA_TYPE",
+                    "message": "Unsupported Media Type.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "retryable": false
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The request is well formed but cannot be processed: the job asks for an algorithm version this processor does not implement, carries more readings than `MAX_JOB_MEASUREMENTS`, or contains no reading that survives validation. None of these become valid on retry (SPECIFICATIONS.md section 93).\n\n`JOB_TOO_LARGE` carries `details` with the limit in force and the number of readings received, so a client can resize the job without parsing the message.",
+            "x-error-codes": [
+              "UNSUPPORTED_ALGORITHM_VERSION",
+              "JOB_TOO_LARGE",
+              "NO_VALID_MEASUREMENTS"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "UNSUPPORTED_ALGORITHM_VERSION",
+                    "message": "The job requests algorithm version 2.0.0 but this processor implements 1.0.0.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "correlation_id": "c-9910",
+                    "retryable": false
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "description": "The processor cannot take the work now: it is at capacity, shutting down, or the run was cancelled. `Retry-After` is present when the condition is transient (SPECIFICATIONS.md sections 91 and 93).\n\nThe codes here do not share one retry classification. `PROCESSOR_OVERLOADED` and `PROCESSOR_SHUTTING_DOWN` are transient and the same dispatch may be repeated after the delay. `PROCESSING_CANCELLED` means the work was cancelled on request and carries `retryable: false`; redispatching it would undo the cancellation. `x-retryable` classifies the response as a whole, so where a response can carry codes that differ, the body's `retryable` field is what a client must branch on.",
+            "x-error-codes": [
+              "PROCESSOR_OVERLOADED",
+              "PROCESSOR_SHUTTING_DOWN",
+              "PROCESSING_CANCELLED"
+            ],
+            "x-retryable": true,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" },
+              "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "PROCESSOR_OVERLOADED",
+                    "message": "The processor has no free capacity; retry later.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "correlation_id": "c-9910",
+                    "retryable": true
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "description": "The job exceeded its effective time bound and was stopped. No results are returned. The gateway may retry the same job id once the processor has released it; a duplicate arriving while the original still runs is refused with 409.",
+            "x-error-codes": ["PROCESSING_TIMEOUT"],
+            "x-retryable": true,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "PROCESSING_TIMEOUT",
+                    "message": "The work exceeded its time limit.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "correlation_id": "c-9910",
+                    "retryable": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/internal/v1/jobs/{job_id}": {
+      "parameters": [
+        {
+          "name": "job_id",
+          "in": "path",
+          "required": true,
+          "description": "The job id the gateway used when it dispatched the work.",
+          "schema": { "$ref": "#/components/schemas/Identifier" }
+        }
+      ],
+      "get": {
+        "operationId": "getJob",
+        "tags": ["processing"],
+        "summary": "Report the processor's view of one job.",
+        "description": "Returns what this processor knows about `job_id`. This is an observation endpoint, not the system of record: the gateway's PostgreSQL row is authoritative for a job's lifecycle (SPECIFICATIONS.md sections 6.1 and 92). The processor answers from a bounded in-memory registry that holds running jobs and jobs that finished within the last `JOB_RETENTION` window, so a job it never received, or one whose record has been evicted, is reported as `404 JOB_NOT_FOUND` rather than as a state.\n\nOf the five statuses in the job state machine, this endpoint returns only `PROCESSING`, `COMPLETED`, `FAILED` and `CANCELLED`. `PENDING` is a gateway-side state that exists before dispatch and is never observable here.",
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/CorrelationId" },
+          { "$ref": "#/components/parameters/Traceparent" },
+          { "$ref": "#/components/parameters/Tracestate" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The processor's current view of the job.",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/JobStatusResponse" },
+                "example": {
+                  "job_id": "job-7f3c1d",
+                  "status": "PROCESSING",
+                  "algorithm_version": "1.0.0",
+                  "service_version": "1a2b3c4",
+                  "requested_at": "2026-09-06T12:00:00Z",
+                  "started_at": "2026-09-06T12:00:00.184Z",
+                  "finished_at": null,
+                  "running_for_ms": 1420,
+                  "error": null
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "404": {
+            "description": "This processor is not running the job and holds no retained record of it. It says nothing about whether the job exists in the gateway's database.",
+            "x-error-codes": ["JOB_NOT_FOUND"],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/Error" },
+                "example": {
+                  "error": {
+                    "code": "JOB_NOT_FOUND",
+                    "message": "No such job.",
+                    "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                    "retryable": false
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/internal/v1/health": {
+      "get": {
+        "operationId": "health",
+        "tags": ["health"],
+        "summary": "Report liveness, versions and the limits the client must respect.",
+        "description": "Answers `200` whenever the process is serving. It is the contract-versioned health endpoint used by the gateway to check that the processor it is talking to implements a compatible contract and algorithm version, and to learn the limits currently in force so oversized work can be refused before it is sent (SPECIFICATIONS.md sections 89 and 95).\n\nThis is not the Kubernetes probe. The processor also serves unversioned `GET /health` (liveness) and `GET /ready` (readiness, `503` before the listener is up and from the moment shutdown begins); those are outside this contract and may change without a contract version bump.\n\nThe endpoint consults no dependency and requires no authentication.",
+        "security": [],
+        "parameters": [
+          { "$ref": "#/components/parameters/RequestId" },
+          { "$ref": "#/components/parameters/CorrelationId" }
+        ],
+        "responses": {
+          "200": {
+            "description": "The processor is serving.",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" },
+                "example": {
+                  "status": "ok",
+                  "service": "processor",
+                  "version": "1a2b3c4",
+                  "algorithm_version": "1.0.0",
+                  "contract_version": "1.1.1",
+                  "limits": {
+                    "max_job_measurements": 100000,
+                    "max_request_bytes": 16777216,
+                    "processing_timeout_ms": 300000,
+                    "max_concurrent_jobs": 4,
+                    "job_retention_seconds": 900
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "internalToken": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A shared secret carried as `Authorization: Bearer <token>`, supplied to both services through configuration and never logged (SPECIFICATIONS.md sections 30 and 31). It authenticates the gateway to the processor inside the cluster; it is not a user credential and carries no user identity. The processor performs no user-level authorization: the gateway has already authenticated and authorized the caller before it dispatches work."
+      }
+    },
+    "parameters": {
+      "RequestId": {
+        "name": "X-Request-ID",
+        "in": "header",
+        "required": false,
+        "description": "Identifies this one hop. The gateway sends the id of the request it is handling. A missing or malformed value is replaced by a generated one rather than rejected; the value in force is echoed on the response and appears in `error.request_id` (SPECIFICATIONS.md section 85).",
+        "schema": { "$ref": "#/components/schemas/Identifier" }
+      },
+      "CorrelationId": {
+        "name": "X-Correlation-ID",
+        "in": "header",
+        "required": false,
+        "description": "Follows one client request across every service it touches. A missing or malformed value defaults to the request id in force. Echoed on the response.",
+        "schema": { "$ref": "#/components/schemas/Identifier" }
+      },
+      "Traceparent": {
+        "name": "traceparent",
+        "in": "header",
+        "required": false,
+        "description": "W3C trace context, propagated so that the gateway span and the processing span belong to one trace (SPECIFICATIONS.md sections 40 and 85). A malformed value is ignored and a new trace is started.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        }
+      },
+      "Tracestate": {
+        "name": "tracestate",
+        "in": "header",
+        "required": false,
+        "description": "W3C trace state accompanying `traceparent`, propagated unchanged.",
+        "schema": { "type": "string", "maxLength": 512 }
+      },
+      "RequestTimeoutMs": {
+        "name": "X-Request-Timeout-Ms",
+        "in": "header",
+        "required": false,
+        "description": "The client's remaining budget for this call, in milliseconds. The processor bounds the job by the smaller of this value and its own `PROCESSING_TIMEOUT`, so a client that has nearly exhausted its deadline does not leave work running that nobody is waiting for. The client's own socket deadline must be strictly greater than the value it sends, otherwise it will abandon the call before it can observe the `504`.",
+        "schema": {
+          "type": "integer",
+          "format": "int64",
+          "minimum": 1,
+          "maximum": 3600000
+        }
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "The request id in force for this response, generated if the client sent none.",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Identifier" }
+      },
+      "CorrelationId": {
+        "description": "The correlation id in force for this response, defaulted to the request id if the client sent none.",
+        "required": true,
+        "schema": { "$ref": "#/components/schemas/Identifier" }
+      },
+      "RetryAfter": {
+        "description": "Seconds to wait before retrying. Present when the refusal is transient.",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 0 }
+      },
+      "WwwAuthenticate": {
+        "description": "The authentication scheme the client should use, as RFC 7235 requires of every 401.",
+        "required": true,
+        "schema": { "type": "string", "enum": ["Bearer"] }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request could not be parsed: malformed JSON, an unknown field, a value of the wrong type, or a malformed path parameter. Request schemas reject unknown fields, so a client sending a field this contract does not define receives this rather than having it ignored.",
+        "x-error-codes": ["INVALID_REQUEST"],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "code": "INVALID_REQUEST",
+                "message": "Bad Request.",
+                "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                "retryable": false
+              }
+            }
+          }
+        }
+      },
+      "Unauthenticated": {
+        "description": "The internal token is missing or wrong. The response says only that authentication is required: which of absent, malformed or incorrect it was is of no use to a legitimate client and of some use to an attacker. Never retried with the same credential.",
+        "x-error-codes": ["UNAUTHENTICATED"],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" },
+          "WWW-Authenticate": { "$ref": "#/components/headers/WwwAuthenticate" }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "code": "UNAUTHENTICATED",
+                "message": "Authentication is required.",
+                "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                "retryable": false
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "An unexpected failure. The cause stays server-side: the message is generic and no stack trace, query, payload or internal identifier ever appears in it (SPECIFICATIONS.md section 25).",
+        "x-error-codes": ["INTERNAL_ERROR"],
+        "x-retryable": true,
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Error" },
+            "example": {
+              "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "An internal error occurred.",
+                "request_id": "8f14e45fceea167a5a36dedd4bea2543",
+                "retryable": true
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "The envelope returned for every failed request, on every endpoint of this contract.",
+        "additionalProperties": false,
+        "required": ["error"],
+        "properties": {
+          "error": { "$ref": "#/components/schemas/ErrorBody" }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "One failure. `code` is stable and is what the client branches on; `message` is a safe sentence for logs and operators and may change without a contract version bump.",
+        "additionalProperties": false,
+        "required": ["code", "message", "request_id"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable, machine-readable failure code. The codes an operation can return are listed in that response's `x-error-codes`.",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "message": {
+            "type": "string",
+            "description": "A human-readable sentence safe to log and to show to an operator. Never contains internal detail.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "request_id": { "$ref": "#/components/schemas/Identifier" },
+          "correlation_id": { "$ref": "#/components/schemas/Identifier" },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether retrying the identical request could succeed. It is authoritative for this particular failure; the response-level `x-retryable` classifies the response as a whole and can be broader, because one status code may carry codes that differ (SPECIFICATIONS.md section 93)."
+          },
+          "details": {
+            "type": "object",
+            "description": "Optional structured, non-sensitive context for the failure, such as the offending limit. Absent unless the failure has something specific to add.",
+            "additionalProperties": true
+          }
+        }
+      },
+      "Identifier": {
+        "type": "string",
+        "description": "An opaque identifier: 1 to 128 characters from `[A-Za-z0-9._-]`. Used for job ids, patient ids, measurement ids, request ids and correlation ids.",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._-]+$"
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "An RFC 3339 instant. Input may carry any offset and is normalized to UTC; output is always UTC with a `Z` suffix and no offset. Precision is one nanosecond, and years are limited to 0000-9999 so every value can be formatted (SPECIFICATIONS.md section 86).",
+        "minLength": 20,
+        "maxLength": 64
+      },
+      "AlgorithmVersion": {
+        "type": "string",
+        "description": "A `major.minor.patch` version of the processing algorithms, without leading zeros. The major number changes whenever a change could alter which results or anomalies are produced, so results are never compared across versions (SPECIFICATIONS.md sections 95 and 96).",
+        "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"
+      },
+      "MeasurementType": {
+        "type": "string",
+        "description": "The kind of measurement. Each type has one canonical unit and one technical value range.",
+        "enum": [
+          "HEART_RATE",
+          "BLOOD_PRESSURE_SYSTOLIC",
+          "BLOOD_PRESSURE_DIASTOLIC",
+          "SPO2",
+          "BODY_TEMPERATURE",
+          "BLOOD_GLUCOSE",
+          "RESPIRATORY_RATE"
+        ]
+      },
+      "Unit": {
+        "type": "string",
+        "description": "The unit symbol. It must be the canonical unit of the reading's measurement type: `bpm` for HEART_RATE, `mmHg` for both blood pressures, `%` for SPO2, `C` for BODY_TEMPERATURE, `mg/dL` for BLOOD_GLUCOSE and `breaths/min` for RESPIRATORY_RATE. No conversion is performed; a mismatch rejects the reading.",
+        "enum": ["bpm", "mmHg", "%", "C", "mg/dL", "breaths/min"]
+      },
+      "Window": {
+        "type": "string",
+        "description": "An aggregation window. Windows are tumbling and aligned to the Unix epoch in UTC, so a 24h window starts at midnight UTC and a 7d window on a Thursday counted from 1970-01-01 (SPECIFICATIONS.md section 15).",
+        "enum": ["1m", "5m", "15m", "1h", "6h", "24h", "7d"]
+      },
+      "Percentile": {
+        "type": "integer",
+        "description": "A percentile rank between 1 and 99 inclusive. Percentiles use the nearest-rank method, so every reported percentile is an observed value.",
+        "minimum": 1,
+        "maximum": 99
+      },
+      "ProcessingStatus": {
+        "type": "string",
+        "description": "A job's lifecycle state (SPECIFICATIONS.md sections 13 and 92). Valid transitions are PENDING to PROCESSING or CANCELLED, and PROCESSING to COMPLETED, FAILED or CANCELLED. The gateway persists these; the processor observes only PROCESSING, COMPLETED, FAILED and CANCELLED.",
+        "enum": ["PENDING", "PROCESSING", "COMPLETED", "FAILED", "CANCELLED"]
+      },
+      "RejectionCode": {
+        "type": "string",
+        "description": "Why one reading was rejected. Stable and part of this contract: the gateway may store and report these directly.",
+        "enum": [
+          "INVALID_ID",
+          "UNKNOWN_TYPE",
+          "UNKNOWN_UNIT",
+          "UNIT_MISMATCH",
+          "NON_FINITE_VALUE",
+          "VALUE_OUT_OF_RANGE",
+          "INVALID_TIMESTAMP",
+          "TIMESTAMP_OUT_OF_BOUNDS",
+          "DUPLICATE_ID"
+        ]
+      },
+      "AnomalyMetric": {
+        "type": "string",
+        "description": "The kind of rule that flagged a value.",
+        "enum": ["THRESHOLD", "Z_SCORE", "ROLLING_DEVIATION"]
+      },
+      "Severity": {
+        "type": "string",
+        "description": "Technical severity of an anomaly. It classifies how far a value departs from a rule's expectation and carries no medical meaning (SPECIFICATIONS.md section 16).",
+        "enum": ["INFO", "WARNING", "CRITICAL"]
+      },
+      "ProcessingParameters": {
+        "type": "object",
+        "description": "What a job computes. Each list is de-duplicated and sorted by the processor, so requests that differ only in order or repetition are treated as identical.",
+        "additionalProperties": false,
+        "required": ["measurement_types", "windows"],
+        "properties": {
+          "measurement_types": {
+            "type": "array",
+            "description": "The types to compute over. Readings of other types are counted as skipped rather than rejected.",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/MeasurementType" }
+          },
+          "windows": {
+            "type": "array",
+            "description": "The windows to aggregate over. One result is produced per type, window and window start that holds data.",
+            "minItems": 1,
+            "maxItems": 7,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/Window" }
+          },
+          "percentiles": {
+            "type": "array",
+            "description": "The percentile ranks to compute. May be empty or omitted.",
+            "maxItems": 99,
+            "uniqueItems": true,
+            "items": { "$ref": "#/components/schemas/Percentile" }
+          }
+        }
+      },
+      "ProcessingJob": {
+        "type": "object",
+        "description": "The job being dispatched. The processor treats `requested_at` as the reference clock for timestamp validation, so an outcome does not depend on when the job actually runs.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "patient_id",
+          "parameters",
+          "algorithm_version",
+          "status",
+          "requested_at"
+        ],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Identifier" },
+          "patient_id": { "$ref": "#/components/schemas/Identifier" },
+          "parameters": { "$ref": "#/components/schemas/ProcessingParameters" },
+          "algorithm_version": { "$ref": "#/components/schemas/AlgorithmVersion" },
+          "status": { "$ref": "#/components/schemas/ProcessingStatus" },
+          "requested_at": { "$ref": "#/components/schemas/Timestamp" },
+          "started_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "nullable": true,
+            "description": "Set once the job left PENDING. Never earlier than `requested_at`."
+          },
+          "finished_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "nullable": true,
+            "description": "Set once the job reached a terminal state. Never earlier than `started_at`."
+          }
+        }
+      },
+      "RawReading": {
+        "type": "object",
+        "description": "One measurement as supplied by the gateway, before the processor validates it. Every field is a plain string or number so that one malformed reading is reported on its own instead of failing the whole request at parse time.",
+        "additionalProperties": false,
+        "required": ["id", "type", "value", "unit", "recorded_at"],
+        "properties": {
+          "id": { "$ref": "#/components/schemas/Identifier" },
+          "type": { "$ref": "#/components/schemas/MeasurementType" },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The measured value in the type's canonical unit. Must be finite and inside the type's technical range; JSON has no NaN or Infinity, so those arrive only as strings and are rejected as malformed."
+          },
+          "unit": { "$ref": "#/components/schemas/Unit" },
+          "recorded_at": { "$ref": "#/components/schemas/Timestamp" }
+        }
+      },
+      "ProcessRequest": {
+        "type": "object",
+        "description": "One dispatch: the job and every reading it is to process. The processor holds no database connection, so this body is the complete input (SPECIFICATIONS.md sections 6.1 and 7).",
+        "additionalProperties": false,
+        "required": ["job", "readings"],
+        "properties": {
+          "job": { "$ref": "#/components/schemas/ProcessingJob" },
+          "readings": {
+            "type": "array",
+            "description": "The measurements to process, in any order; the processor orders them. The ceiling is the processor's `MAX_JOB_MEASUREMENTS`, whose value in force is reported by the health endpoint; the value here is the default. A larger job is refused with 422 JOB_TOO_LARGE before any parsing.",
+            "minItems": 1,
+            "maxItems": 100000,
+            "items": { "$ref": "#/components/schemas/RawReading" }
+          }
+        }
+      },
+      "Rejection": {
+        "type": "object",
+        "description": "One reading the processor would not accept, identified by its position in the request so the gateway can attribute it exactly.",
+        "additionalProperties": false,
+        "required": ["index", "code", "reason"],
+        "properties": {
+          "index": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Zero-based position of the reading in the request's `readings` array.",
+            "minimum": 0
+          },
+          "id": {
+            "allOf": [{ "$ref": "#/components/schemas/Identifier" }],
+            "description": "The reading's identifier, present only when it was well formed enough to echo."
+          },
+          "code": { "$ref": "#/components/schemas/RejectionCode" },
+          "reason": {
+            "type": "string",
+            "description": "A safe sentence explaining the rejection. Descriptive only: branch on `code`.",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      },
+      "Statistics": {
+        "type": "object",
+        "description": "Descriptive statistics of the values in one window. The relations `count >= 1`, `min <= mean, median and every percentile <= max` and non-negative spread always hold. Sums use compensated summation, variance is the sample variance with Bessel's correction, and a single value has zero variance (SPECIFICATIONS.md section 15).",
+        "additionalProperties": false,
+        "required": [
+          "count",
+          "min",
+          "max",
+          "mean",
+          "median",
+          "variance",
+          "std_dev"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "How many values fell in the window. A window with no values produces no result at all rather than a result with a count of zero."
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The smallest observed value."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest observed value."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "The arithmetic mean, clamped to the observed range so that rounding can never place it outside `[min, max]`."
+          },
+          "median": {
+            "type": "number",
+            "format": "double",
+            "description": "The middle value for an odd count, and the midpoint of the two middle values for an even count."
+          },
+          "variance": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "description": "The sample variance with Bessel's correction (`n - 1`). Zero for a single value."
+          },
+          "std_dev": {
+            "type": "number",
+            "format": "double",
+            "minimum": 0,
+            "description": "The square root of the variance."
+          },
+          "percentiles": {
+            "type": "object",
+            "description": "The requested percentiles, keyed by the rank as a decimal string (`\"95\"`). Absent ranks were not requested. Omitted entirely when the job requested none.",
+            "additionalProperties": { "type": "number", "format": "double" }
+          }
+        }
+      },
+      "Anomaly": {
+        "type": "object",
+        "description": "One flagged value. Carries everything SPECIFICATIONS.md section 16 requires a result to contain, so an anomaly is interpretable on its own.",
+        "additionalProperties": false,
+        "required": [
+          "measurement_type",
+          "window",
+          "metric",
+          "value",
+          "threshold",
+          "severity",
+          "detected_at",
+          "algorithm_version"
+        ],
+        "properties": {
+          "measurement_type": { "$ref": "#/components/schemas/MeasurementType" },
+          "window": { "$ref": "#/components/schemas/Window" },
+          "metric": { "$ref": "#/components/schemas/AnomalyMetric" },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The measured value that was flagged."
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double",
+            "description": "The bound the value crossed, in the measurement's own unit: the tier's bound for a threshold rule, and `mean +/- t * std_dev` for a z-score or rolling-deviation rule."
+          },
+          "severity": { "$ref": "#/components/schemas/Severity" },
+          "detected_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "description": "The flagged measurement's own `recorded_at`, never the wall clock, so detection is reproducible. Always inside the result's window."
+          },
+          "algorithm_version": { "$ref": "#/components/schemas/AlgorithmVersion" }
+        }
+      },
+      "ProcessingResult": {
+        "type": "object",
+        "description": "The result for one job, measurement type and window instance. Every anomaly it carries refers to the same type, window and algorithm version and was detected inside the window.",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "measurement_type",
+          "window",
+          "window_start",
+          "statistics",
+          "anomalies",
+          "algorithm_version",
+          "service_version"
+        ],
+        "properties": {
+          "job_id": { "$ref": "#/components/schemas/Identifier" },
+          "measurement_type": { "$ref": "#/components/schemas/MeasurementType" },
+          "window": { "$ref": "#/components/schemas/Window" },
+          "window_start": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "description": "Inclusive start of the window instance. The exclusive end is `window_start` plus the window's duration."
+          },
+          "statistics": { "$ref": "#/components/schemas/Statistics" },
+          "anomalies": {
+            "type": "array",
+            "description": "Anomalies inside this window, ordered by `detected_at` and then by rule declaration order. Empty when nothing was flagged.",
+            "items": { "$ref": "#/components/schemas/Anomaly" }
+          },
+          "algorithm_version": { "$ref": "#/components/schemas/AlgorithmVersion" },
+          "service_version": {
+            "type": "string",
+            "description": "The processor build that produced the result. Recorded alongside the algorithm version for reproducibility (SPECIFICATIONS.md section 95).",
+            "minLength": 1,
+            "maxLength": 128
+          }
+        }
+      },
+      "ProcessOutcome": {
+        "type": "object",
+        "description": "What one job produced. `accepted + skipped + rejected.length` equals the number of readings in the request.",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "algorithm_version",
+          "service_version",
+          "accepted",
+          "skipped",
+          "rejected",
+          "results"
+        ],
+        "properties": {
+          "job_id": { "$ref": "#/components/schemas/Identifier" },
+          "algorithm_version": { "$ref": "#/components/schemas/AlgorithmVersion" },
+          "service_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The processor build that ran the job."
+          },
+          "accepted": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Readings that passed validation and normalization and were processed."
+          },
+          "skipped": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "Valid readings whose measurement type the job did not request. Not an error."
+          },
+          "rejected": {
+            "type": "array",
+            "description": "Readings that could not be processed, ordered by input index (SPECIFICATIONS.md section 17).",
+            "items": { "$ref": "#/components/schemas/Rejection" }
+          },
+          "results": {
+            "type": "array",
+            "description": "One entry per requested measurement type, window and window start that holds data, ordered by type, then window, then window start. A window with no data produces no entry.",
+            "items": { "$ref": "#/components/schemas/ProcessingResult" }
+          }
+        }
+      },
+      "JobError": {
+        "type": "object",
+        "description": "Why a job reached FAILED, retained with the job record so a failure never disappears (SPECIFICATIONS.md section 94). The gateway supplies the attempt count and its own timestamps; the processor supplies the rest.",
+        "additionalProperties": false,
+        "required": ["code", "message", "retryable"],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+            "description": "The stable code the job failed with, drawn from the same catalogue as `ErrorBody.code`."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "description": "A safe sentence. Internal causes stay server-side."
+          },
+          "retryable": {
+            "type": "boolean",
+            "description": "Whether dispatching the same job again could succeed."
+          }
+        }
+      },
+      "JobStatusResponse": {
+        "type": "object",
+        "description": "The processor's view of one job. Advisory: the gateway's persisted row is authoritative.",
+        "additionalProperties": false,
+        "required": [
+          "job_id",
+          "status",
+          "algorithm_version",
+          "service_version",
+          "requested_at"
+        ],
+        "properties": {
+          "job_id": { "$ref": "#/components/schemas/Identifier" },
+          "status": { "$ref": "#/components/schemas/ProcessingStatus" },
+          "algorithm_version": { "$ref": "#/components/schemas/AlgorithmVersion" },
+          "service_version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The build of the processor that is running or ran the job."
+          },
+          "requested_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "description": "The `requested_at` the gateway sent with the job."
+          },
+          "started_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "nullable": true,
+            "description": "When this processor admitted the job."
+          },
+          "finished_at": {
+            "allOf": [{ "$ref": "#/components/schemas/Timestamp" }],
+            "nullable": true,
+            "description": "When the job reached a terminal state on this processor. Null while PROCESSING."
+          },
+          "running_for_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How long the job has been running, present only while PROCESSING."
+          },
+          "error": {
+            "allOf": [{ "$ref": "#/components/schemas/JobError" }],
+            "nullable": true,
+            "description": "Present and non-null only when `status` is FAILED."
+          }
+        }
+      },
+      "Limits": {
+        "type": "object",
+        "description": "The bounds in force on this processor. The gateway reads them so it can refuse oversized work before sending it (SPECIFICATIONS.md section 89) and size its own timeouts above the processor's.",
+        "additionalProperties": false,
+        "required": [
+          "max_job_measurements",
+          "max_request_bytes",
+          "processing_timeout_ms",
+          "max_concurrent_jobs",
+          "job_retention_seconds"
+        ],
+        "properties": {
+          "max_job_measurements": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Largest number of readings one job may carry (`MAX_JOB_MEASUREMENTS`)."
+          },
+          "max_request_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Largest accepted request body (`HTTP_MAX_BODY_BYTES`). It always holds `max_job_measurements` readings: the processor refuses to start if the two contradict each other, so a job within the ceiling is never refused for its size."
+          },
+          "processing_timeout_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "The processor's own per-job bound (`PROCESSING_TIMEOUT`). A client's socket deadline must exceed it."
+          },
+          "max_concurrent_jobs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 1,
+            "description": "Jobs admitted at once (`MAX_CONCURRENT_JOBS`). Further jobs are refused, never queued."
+          },
+          "job_retention_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0,
+            "description": "How long a finished job stays observable through the jobs endpoint (`JOB_RETENTION`)."
+          }
+        }
+      },
+      "HealthResponse": {
+        "type": "object",
+        "description": "Liveness plus the versions and limits the client needs to talk to this processor safely.",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "service",
+          "version",
+          "algorithm_version",
+          "contract_version",
+          "limits"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `ok` on a 200; the endpoint answers 200 whenever the process is serving.",
+            "enum": ["ok"]
+          },
+          "service": {
+            "type": "string",
+            "description": "The service name, always `processor`.",
+            "enum": ["processor"]
+          },
+          "version": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "description": "The processor build identifier."
+          },
+          "algorithm_version": {
+            "allOf": [{ "$ref": "#/components/schemas/AlgorithmVersion" }],
+            "description": "The algorithm version this processor implements. A job requesting any other version is refused with 422."
+          },
+          "contract_version": {
+            "allOf": [{ "$ref": "#/components/schemas/AlgorithmVersion" }],
+            "description": "The version of this contract the processor implements, matching `info.version`. The client compares major numbers to detect an incompatible peer."
+          },
+          "limits": { "$ref": "#/components/schemas/Limits" }
+        }
+      }
+    }
+  }
+}

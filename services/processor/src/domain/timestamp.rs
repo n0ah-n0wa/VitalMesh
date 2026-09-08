@@ -33,6 +33,17 @@ impl Timestamp {
         })
     }
 
+    /// The current instant in UTC, or `None` if the system clock reports a
+    /// time outside the supported years.
+    ///
+    /// Processing never calls this. Every statistic and every anomaly is
+    /// derived from a measurement's own `recorded_at` so that a result is
+    /// reproducible; the wall clock is only for recording when this service
+    /// did something, such as when it started a job.
+    pub fn now() -> Option<Self> {
+        Self::from_offset(OffsetDateTime::now_utc())
+    }
+
     /// Builds a timestamp from whole seconds since the Unix epoch.
     pub fn from_unix_seconds(seconds: i64) -> Result<Self, DomainError> {
         OffsetDateTime::from_unix_timestamp(seconds)
@@ -156,6 +167,14 @@ mod tests {
 
     fn ts(raw: &str) -> Timestamp {
         Timestamp::parse(raw).unwrap_or_else(|e| panic!("{raw}: {e}"))
+    }
+
+    #[test]
+    fn now_is_a_usable_instant() {
+        let now = Timestamp::now().expect("the system clock is within 0000-9999");
+        // A round trip through the wire format must not lose the value.
+        assert_eq!(Timestamp::parse(&now.to_rfc3339()).unwrap(), now);
+        assert!(now > ts("2020-01-01T00:00:00Z"));
     }
 
     #[test]

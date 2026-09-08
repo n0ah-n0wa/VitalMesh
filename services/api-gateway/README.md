@@ -86,6 +86,15 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `MEASUREMENT_MAX_METADATA_BYTES` | `2048` | reading metadata as compact JSON (1–4096; the schema caps the stored form at 4096) |
 | `MEASUREMENT_MAX_FUTURE_SKEW` | `5m` | how far ahead of the server clock `recorded_at` may be (at most `1h`) |
 | `IDEMPOTENCY_TTL` | `24h` | how long an `Idempotency-Key` stays replayable (`1m`–`168h`) |
+| `PROCESSOR_URL` | `http://127.0.0.1:8081` | the processing service, scheme and host only |
+| `PROCESSOR_TOKEN` | none | shared secret presented to the processor as `Authorization: Bearer`; required in staging and production, never logged |
+| `PROCESSOR_TIMEOUT` | `5s` | bound on one call to the processor; must be shorter than `HTTP_REQUEST_TIMEOUT` |
+| `PROCESSOR_MAX_ATTEMPTS` | `3` | attempts per dispatch, including the first (1–5) |
+| `PROCESSOR_BACKOFF` | `100ms` | delay before the second attempt, doubling thereafter |
+| `PROCESSOR_MAX_BACKOFF` | `2s` | cap on that delay |
+| `PROCESSING_MAX_JOB_MEASUREMENTS` | `100000` | readings one job may carry; must not exceed the processor's own bound |
+| `PROCESSING_ALGORITHM_VERSION` | `1.0.0` | the algorithm version jobs ask for; the processor refuses any other |
+| `PROCESSING_FAILURE_RECORD_TIMEOUT` | `5s` | bound on the write that records why a job failed |
 | `READINESS_TIMEOUT` | `2s` | bound for the whole `/ready` evaluation |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
@@ -101,7 +110,9 @@ All values are read from the environment. Empty values count as unset. Start-up 
 | `POST /api/v1/patients`, `GET /api/v1/patients`, `GET /api/v1/patients/{patient_id}`, `DELETE /api/v1/patients/{patient_id}` | the Patient API (see [docs/API.md](../../docs/API.md#patients)); soft delete, audit record in the same transaction |
 | `POST /api/v1/measurements`, `POST /api/v1/measurements/batch`, `GET /api/v1/measurements/{measurement_id}`, `GET /api/v1/patients/{patient_id}/measurements`, `DELETE /api/v1/measurements/{measurement_id}` | the Measurement API (see [docs/API.md](../../docs/API.md#measurements)); strict validation against the type catalogue, all-or-nothing batches, one audit record per reading |
 
-Write operations that could duplicate state (`POST /patients`, `POST /measurements`, `POST /measurements/batch`) accept an `Idempotency-Key`; see [docs/API.md](../../docs/API.md#idempotency).
+| `POST /api/v1/processing/jobs`, `GET /api/v1/processing/jobs/{job_id}`, `GET /api/v1/patients/{patient_id}/processing-results` | the Processing API (see [docs/API.md](../../docs/API.md#processing)); the job is created, dispatched to the Rust processor and answered in one request |
+
+Write operations that could duplicate state (`POST /patients`, `POST /measurements`, `POST /measurements/batch`, `POST /processing/jobs`) accept an `Idempotency-Key`; see [docs/API.md](../../docs/API.md#idempotency).
 
 The binary also carries the schema, `api-gateway migrate up|down|version|force` (see [docs/DATABASE.md](../../docs/DATABASE.md)), and creates accounts: `api-gateway users create <email> <ADMIN|OPERATOR|USER>` reads the password (at least 12 characters) from standard input, hashes it with the configured parameters, inserts the user and a `USER_CREATED` audit entry in one transaction. It needs `DATABASE_URL` and honours `PASSWORD_HASH_*`. This is how the first administrator is bootstrapped; there is never a default account.
 
@@ -154,6 +165,21 @@ A feature is an application package (`patient` is the template) with a `Service`
 - **Type catalogue** (`measurement.Catalog`) mirrors the `measurement_types` table: canonical unit and technical range per type. The service validates against the catalogue so that every failing field is reported at once with the `MEASUREMENT_VALIDATION_FAILED` code of section 25; the database trigger enforces the same rules independently, and an integration test keeps the two identical.
 - **Batches** are validated item by item (`items[i].field`), checked for duplicates within the batch and for patient existence per distinct patient, then stored in one transaction with one `MEASUREMENT_CREATED` record per reading. A reading the database still rejects (a duplicate of a stored one, say) is reported by index through `postgres.BatchItemError` and nothing from the batch is kept. Batch sizes are reported to the metrics port.
 - **Idempotency** (`middleware.Idempotency`) implements section 24 over the `idempotency_keys` table (OQ-10): the key is scoped to `(account, method, path)`, the request fingerprint is a SHA-256 of method, path and body bytes, the first response is stored (jsonb) and replayed, mismatched bodies and in-flight duplicates are refused, `5xx` outcomes release the key, and expired records are replaced lazily. Which operations take part is declared once in `httpapi.idempotentOperations`; the middleware runs inside authentication and authorization so that a key can never act for another account. The retention job that purges expired rows belongs to the retention phase; `Idempotency.DeleteExpired` is ready for it.
+
+## Processing and the Rust processor
+
+`processing` is the feature service; `infra/processorclient` is the client for the internal contract (`contracts/internal-api/processor-v1.json`), and `infra/postgres.JobStore` is its persistence.
+
+- **Transaction boundaries.** Three short transactions bracket one long external call, and none is open while that call is in flight: the job is created `PENDING` with its audit record; it is moved to `PROCESSING`, counting the attempt; then the readings are fetched and the processor is called with no transaction held; then the results and the transition to `COMPLETED` are written together, or the failure is recorded. A unit test drives the service with a store that fails the test if it is touched while the processor call is running, so the rule is enforced rather than merely intended.
+- **Lifecycle.** Every transition is a compare-and-set on the current status and a database trigger rejects anything outside the state machine of section 92, so two writers cannot both move one job. A `COMPLETED` job always has its results, because they are inserted in the same transaction as the transition.
+- **Timeout and retries.** The client bounds each attempt by `PROCESSOR_TIMEOUT`, retries up to `PROCESSOR_MAX_ATTEMPTS` with exponential backoff capped at `PROCESSOR_MAX_BACKOFF`, honours a `Retry-After` the processor sends, and stops early when the caller's deadline leaves no room for another attempt. It also tells the processor what is left of the attempt (`X-Request-Timeout-Ms`) so work nobody is waiting for stops there too.
+- **Retry classification** (section 93). Unavailable, overloaded, shutting down, timed out and internal failures are retried; a refusal of the data, a cancellation, a credential the processor will not take, and anything this gateway cannot parse are not. The classification is on the error and is reported to clients as `retryable` semantics through the status code.
+- **Safe failure.** A processor that is down, slow or incoherent produces a `5xx` with a stable code and a job row that survives, `FAILED`, with its diagnosis and attempt count. The processor's own messages are never repeated to a client. Because a `5xx` leaves no idempotency record, the same key can be reused to retry. The rest of the API is unaffected: the processor is not part of readiness, so one service being down does not take the gateway out of rotation.
+- **Bounds.** The readings for a job are read with a limit one above `PROCESSING_MAX_JOB_MEASUREMENTS`, so an oversized range is refused before anything is sent rather than by the processor. The gateway's ceiling must not exceed the processor's, which the processor advertises on its health endpoint and an end-to-end test compares. The client bounds the response it will read.
+- **Whole answers only.** The processor reports how many readings it accepted, skipped and rejected. Every reading the gateway sends came from its own database, was validated against the same catalogue and is of a requested type, so all of them should be accepted; if the counts do not add up, the statistics cover less data than the job asked for. The job then fails with `PROCESSING_INCOMPLETE` and stores nothing, rather than presenting a partial answer as a whole one.
+- **Snapshot reads.** A job asks for several measurement types and each is a separate query, so the reads run in one read-only repeatable-read transaction. Without it a write landing between two queries would put the job's types at different instants. The snapshot takes no locks and holds no external call.
+- **Forward compatibility.** The client ignores response fields it does not know, because adding one is a compatible change under the contract's versioning rules. Drift is caught at build time by the contract tests, which decode the document strictly, rather than at runtime where it would break a release the processor was entitled to make.
+- **Tests.** Service tests with a recording store and a scripted processor; client tests over `httptest` covering every status the contract defines, both timeouts, the retry budget and every malformed answer; contract tests validating the dispatch the gateway builds against the OpenAPI document and decoding the document's own outcome; integration tests against PostgreSQL asserting the rows, the results, the audit record and the idempotency behaviour; and `tests/e2e`, which runs the real processor binary and the wired gateway together.
 
 ## Observability hooks
 

@@ -44,16 +44,16 @@ pub async fn run(config: Config, listener: TcpListener, shutdown: CancellationTo
     drain_watch.abort();
     serve_result.map_err(Error::internal)?;
 
-    if tokio::time::timeout(shutdown_timeout, state.engine.drained())
+    if tokio::time::timeout(shutdown_timeout, state.engine().drained())
         .await
         .is_err()
     {
         tracing::warn!(
-            active_jobs = state.engine.active_jobs(),
+            active_jobs = state.engine().active_jobs(),
             "shutdown timeout elapsed; cancelling running jobs"
         );
         jobs_cancel.cancel();
-        state.engine.drained().await;
+        state.engine().drained().await;
     }
 
     tracing::info!("stopped");

@@ -8,12 +8,19 @@ BIN_DIR   := bin
 GO_MODULE := github.com/n0ah-n0wa/VitalMesh/services/api-gateway
 VERSION   ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 GO_LDFLAGS := -X $(GO_MODULE)/internal/buildinfo.Version=$(VERSION)
+# Executable suffix, so the end-to-end target finds the processor on Windows
+# as well as on Linux.
+EXE       ?=
+
+# CARGO_TARGET_DIR moves the Rust build output; the end-to-end target needs
+# to find the binary wherever it landed.
+RUST_TARGET_DIR ?= $(if $(CARGO_TARGET_DIR),$(CARGO_TARGET_DIR),$(CURDIR)/$(RUST_DIR)/target)
 
 # PostgreSQL used by the database integration tests; `make dev-db` starts one.
 # Tests create and drop their own databases on this server.
 TEST_DATABASE_URL ?= postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable
 
-.PHONY: help setup format format-check lint test integration-test build line-endings verify clean dev-db dev-db-down migrate
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-db-down migrate
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -40,8 +47,19 @@ test: ## Run unit tests
 	cd $(GO_DIR) && go test -race ./...
 	cd $(RUST_DIR) && cargo test --locked
 
+contracts-check: ## Check the API contracts and that both services agree with them
+	cd $(GO_DIR) && go test ./internal/contract/...
+	cd $(RUST_DIR) && cargo test --locked --test contract
+
+contracts-lock: ## Re-record a reviewed contract change in its lock file
+	cd $(GO_DIR) && UPDATE_CONTRACT_LOCK=1 go test ./internal/contract/... -run TestContractMatchesItsLock
+
 integration-test: ## Run database integration tests against TEST_DATABASE_URL (see make dev-db)
 	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" go test -race -tags integration ./internal/infra/postgres/... ./internal/app/...
+
+e2e-test: ## Run cross-service tests: the real gateway against the real processor binary
+	cd $(RUST_DIR) && cargo build --locked
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" PROCESSOR_BINARY="$(RUST_TARGET_DIR)/debug/processor$(EXE)" go test -race -tags e2e ./tests/...
 
 dev-db: ## Start the local PostgreSQL used by development and integration tests
 	docker compose up -d --wait postgres
@@ -60,7 +78,7 @@ build: ## Build both services (Go binary in bin/, Rust binary in services/proces
 line-endings: ## Fail if any tracked file is stored with CRLF line endings
 	sh scripts/check-line-endings.sh
 
-verify: format-check lint test integration-test build line-endings ## Run every quality gate (needs PostgreSQL: make dev-db)
+verify: format-check lint test contracts-check integration-test e2e-test build line-endings ## Run every quality gate (needs PostgreSQL: make dev-db)
 	@echo "verify: all gates passed"
 
 clean: ## Remove build outputs

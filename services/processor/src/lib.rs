@@ -6,6 +6,7 @@
 //! - `domain`: job identifiers and the job state machine.
 //! - `concurrency`: the bounded admission limiter.
 //! - `engine`: bounded, cancellable, time-limited job execution.
+//! - `jobs`: the bounded registry of jobs this instance is running or ran.
 //! - `stats`: the statistical processing engine (descriptive statistics, rolling
 //!   statistics, tumbling windows).
 //! - `anomaly`: configurable, versioned anomaly detection over window results.
@@ -22,6 +23,7 @@ pub mod config;
 pub mod domain;
 pub mod engine;
 pub mod error;
+pub mod jobs;
 pub mod lifecycle;
 pub mod pipeline;
 pub mod requestid;
@@ -32,6 +34,12 @@ pub mod transport;
 
 /// Service name reported in logs and health responses.
 pub const SERVICE_NAME: &str = "processor";
+
+/// The version of `contracts/internal-api/processor-v1.json` this service
+/// implements. It is reported by the internal health endpoint so the gateway
+/// can detect an incompatible peer, and `tests/contract.rs` fails if it ever
+/// disagrees with the document.
+pub const CONTRACT_VERSION: &str = "1.1.1";
 
 /// Build identifier, injected by the Makefile through `VITALMESH_VERSION`.
 pub const VERSION: &str = match option_env!("VITALMESH_VERSION") {

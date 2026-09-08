@@ -104,6 +104,8 @@ fn engine(max_jobs: usize, timeout: Duration) -> (Arc<Engine>, CancellationToken
         max_measurement_age: Duration::from_secs(3600),
         max_future_skew: Duration::from_secs(60),
         timeout,
+        job_retention: Duration::from_secs(900),
+        rules: RuleSet::empty(),
     };
     (
         Arc::new(Engine::new(&processing, shutdown.clone())),
@@ -461,14 +463,15 @@ async fn processor_cancels_a_running_job_promptly() {
 async fn processor_enforces_the_time_bound() {
     let (engine, _shutdown) = engine(2, Duration::from_millis(20));
     let processor = Processor::new(pipeline(1_000_000), engine);
+    // Built before the clock starts: constructing the series is not what
+    // this test measures, and in a debug build it takes longer than the
+    // bound being asserted.
+    let request = Request {
+        job: job("job-13", &Window::ALL, ALGORITHM_VERSION),
+        readings: heart_rate_series(300_000),
+    };
     let started = Instant::now();
-    let err = processor
-        .process(Request {
-            job: job("job-13", &Window::ALL, ALGORITHM_VERSION),
-            readings: heart_rate_series(300_000),
-        })
-        .await
-        .unwrap_err();
+    let err = processor.process(request).await.unwrap_err();
     assert_eq!(err.kind(), Kind::Timeout);
     assert!(
         started.elapsed() < Duration::from_secs(5),

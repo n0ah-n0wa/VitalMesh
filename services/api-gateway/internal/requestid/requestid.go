@@ -11,9 +11,18 @@ import (
 // Header is the HTTP header carrying the request ID in both directions.
 const Header = "X-Request-ID"
 
+// CorrelationHeader carries the identifier that follows one client request
+// across every service it touches (SPECIFICATIONS.md section 85). The
+// request ID identifies a single hop; the correlation ID identifies the
+// whole journey, so a failure in the processor can be tied to the call that
+// caused it.
+const CorrelationHeader = "X-Correlation-ID"
+
 const maxLen = 128
 
 type ctxKey struct{}
+
+type correlationKey struct{}
 
 // NewContext returns a copy of ctx carrying id.
 func NewContext(ctx context.Context, id string) context.Context {
@@ -23,6 +32,18 @@ func NewContext(ctx context.Context, id string) context.Context {
 // FromContext returns the request ID carried by ctx, or "" if there is none.
 func FromContext(ctx context.Context) string {
 	id, _ := ctx.Value(ctxKey{}).(string)
+	return id
+}
+
+// NewCorrelationContext returns a copy of ctx carrying the correlation ID.
+func NewCorrelationContext(ctx context.Context, id string) context.Context {
+	return context.WithValue(ctx, correlationKey{}, id)
+}
+
+// CorrelationFromContext returns the correlation ID carried by ctx, or ""
+// if there is none.
+func CorrelationFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(correlationKey{}).(string)
 	return id
 }
 

@@ -38,7 +38,7 @@ mod stages;
 
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -173,14 +173,18 @@ impl Pipeline {
         }
         let total = request.readings.len();
         if total > self.limits.max_job_measurements.get() {
+            let maximum = self.limits.max_job_measurements.get();
             return Err(Error::new(
                 Kind::Validation,
                 "JOB_TOO_LARGE",
-                format!(
-                    "the job carries {} readings; the maximum is {}",
-                    total, self.limits.max_job_measurements
-                ),
-            ));
+                format!("the job carries {total} readings; the maximum is {maximum}"),
+            )
+            // The limit is configuration, not a secret, and a client that
+            // knows it can split the job without parsing the message.
+            .with_details([
+                ("max_job_measurements", maximum as i64),
+                ("received", total as i64),
+            ]));
         }
         control.check()?;
 
@@ -296,9 +300,28 @@ impl Processor {
     /// the core through its [`Control`], so a stopped job releases its
     /// thread at the next checkpoint.
     pub async fn process(&self, request: Request) -> Result<Outcome> {
+        self.process_within(request, None).await
+    }
+
+    /// [`Self::process`] bounded by the smaller of `budget` and the engine's
+    /// own `PROCESSING_TIMEOUT`.
+    ///
+    /// A client declares `budget` when it has less time left than the
+    /// processor would take; honouring it means the core stops at its next
+    /// checkpoint instead of finishing work nobody is waiting for. It can
+    /// only shorten the bound: a client cannot buy itself more time than the
+    /// processor allows.
+    pub async fn process_within(
+        &self,
+        request: Request,
+        budget: Option<Duration>,
+    ) -> Result<Outcome> {
         let id = request.job.id().clone();
         let cancel = CancellationToken::new();
-        let deadline = Instant::now() + self.engine.timeout();
+        let bound = budget
+            .unwrap_or(self.engine.timeout())
+            .min(self.engine.timeout());
+        let deadline = Instant::now() + bound;
         let control = Control::new(cancel.clone(), Some(deadline));
         let pipeline = Arc::clone(&self.pipeline);
 

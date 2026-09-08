@@ -22,6 +22,7 @@ type Handlers struct {
 	Auth         *handler.Auth
 	Patients     *handler.Patients
 	Measurements *handler.Measurements
+	Processing   *handler.Processing
 	// Authenticate establishes the principal on routes that need one.
 	Authenticate middleware.Middleware
 	// Idempotency applies Idempotency-Key handling to the write operations
@@ -58,6 +59,11 @@ func (h Handlers) operations() map[authz.RouteKey]http.Handler {
 		bind(http.MethodDelete, "/measurements/{measurement_id}", h.Measurements.Delete)
 		bind(http.MethodGet, "/patients/{patient_id}/measurements", h.Measurements.ListByPatient)
 	}
+	if h.Processing != nil {
+		bind(http.MethodPost, "/processing/jobs", h.Processing.CreateJob)
+		bind(http.MethodGet, "/processing/jobs/{job_id}", h.Processing.GetJob)
+		bind(http.MethodGet, "/patients/{patient_id}/processing-results", h.Processing.ListResults)
+	}
 	return ops
 }
 
@@ -68,6 +74,7 @@ var idempotentOperations = map[authz.RouteKey]bool{
 	{Method: http.MethodPost, Path: "/patients"}:           true,
 	{Method: http.MethodPost, Path: "/measurements"}:       true,
 	{Method: http.MethodPost, Path: "/measurements/batch"}: true,
+	{Method: http.MethodPost, Path: "/processing/jobs"}:    true,
 }
 
 // NewHandler assembles the route table and wraps it in the middleware chain.

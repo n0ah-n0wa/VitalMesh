@@ -145,6 +145,57 @@ type CreateMeasurementBatchRequest struct {
 
 // Measurement is the client view of one reading (SPECIFICATIONS.md
 // section 12).
+// CreateProcessingJobRequest is the body of POST /processing/jobs.
+type CreateProcessingJobRequest struct {
+	PatientID        string   `json:"patient_id"`
+	MeasurementTypes []string `json:"measurement_types"`
+	Windows          []string `json:"windows"`
+	Percentiles      []int    `json:"percentiles"`
+	// From and To bound which readings are processed, half-open and
+	// optional.
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// ProcessingJob is a processing job as the API returns it
+// (SPECIFICATIONS.md section 13).
+type ProcessingJob struct {
+	ID               uuid.UUID       `json:"id"`
+	PatientID        uuid.UUID       `json:"patient_id"`
+	Status           string          `json:"status"`
+	Parameters       json.RawMessage `json:"parameters"`
+	AlgorithmVersion string          `json:"algorithm_version"`
+	ServiceVersion   *string         `json:"service_version"`
+	RequestedAt      time.Time       `json:"requested_at"`
+	StartedAt        *time.Time      `json:"started_at"`
+	CompletedAt      *time.Time      `json:"completed_at"`
+	FailedAt         *time.Time      `json:"failed_at"`
+	CancelledAt      *time.Time      `json:"cancelled_at"`
+	// ErrorCode and ErrorMessage are set only on a FAILED job. They are
+	// stable and safe to show (SPECIFICATIONS.md section 94).
+	ErrorCode    *string   `json:"error_code"`
+	ErrorMessage *string   `json:"error_message"`
+	AttemptCount int       `json:"attempt_count"`
+	CreatedBy    uuid.UUID `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// ProcessingResult is one result of a job, for one measurement type and
+// window instance.
+type ProcessingResult struct {
+	ID               uuid.UUID       `json:"id"`
+	JobID            uuid.UUID       `json:"job_id"`
+	PatientID        uuid.UUID       `json:"patient_id"`
+	MeasurementType  string          `json:"measurement_type"`
+	Window           string          `json:"window"`
+	WindowStart      time.Time       `json:"window_start"`
+	Statistics       json.RawMessage `json:"statistics"`
+	Anomalies        json.RawMessage `json:"anomalies"`
+	AlgorithmVersion string          `json:"algorithm_version"`
+	ServiceVersion   string          `json:"service_version"`
+	CreatedAt        time.Time       `json:"created_at"`
+}
+
 type Measurement struct {
 	ID         uuid.UUID       `json:"id"`
 	PatientID  uuid.UUID       `json:"patient_id"`
