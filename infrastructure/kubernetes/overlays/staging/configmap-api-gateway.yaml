@@ -1,0 +1,24 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+data:
+  ENVIRONMENT: "staging"
+
+  # Debug here and not in production. Staging carries synthetic data only
+  # (section 103), so the cost of verbose logging is storage rather than
+  # exposure, and the benefit is that a failure being investigated has
+  # already been logged in detail.
+  LOG_LEVEL: "debug"
+
+  # Half of production's concurrency, which is what lets the memory limit
+  # be a third of it: 2 x 64 MiB of Argon2id plus ~26 MiB of gateway fits
+  # inside 384Mi with room to spare. Logins are slower under load here
+  # than in production, and that is the trade being made.
+  PASSWORD_HASH_MAX_CONCURRENT: "2"
+
+  # Every trace is recorded. The volume is small and staging is where
+  # traces are looked at.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_TRACES_SAMPLER_ARG: "1.0"

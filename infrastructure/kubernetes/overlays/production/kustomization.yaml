@@ -1,0 +1,45 @@
+# Production. Section 104: managed database and Redis, HTTPS, restricted
+# network access, separate secrets.
+#
+# The same base and the same shared component as staging. What is written
+# here is only what differs: the domain, the sizes, the replica floor and
+# ceiling, the sampling rate, and where the secrets come from.
+#
+# The egress narrowing section 104 asks for is in the shared component, not
+# here, so that staging exercises it too. A restriction whose first real
+# test is production is not a validated restriction.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vitalmesh-production
+
+resources:
+  - ../../base
+  # A namespace-wide ceiling; the file shows the arithmetic.
+  - resourcequota.yaml
+
+components:
+  - ../../components/deployed
+
+labels:
+  - pairs:
+      vitalmesh.io/environment: production
+      app.kubernetes.io/instance: vitalmesh-production
+    includeSelectors: false
+
+# Set by the deployment pipeline from the commit being released. Section 32
+# requires an immutable identifier and forbids a mutable tag here, so the
+# committed value is one that cannot be pulled.
+images:
+  - name: vitalmesh/api-gateway
+    newTag: set-by-ci
+  - name: vitalmesh/processor
+    newTag: set-by-ci
+
+patches:
+  - path: configmap-api-gateway.yaml
+  - path: configmap-processor.yaml
+  - path: deployment-resources.yaml
+  - path: hpa.yaml
+  - path: ingress.yaml
+  - path: secret-references.yaml

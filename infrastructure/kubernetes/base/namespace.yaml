@@ -1,0 +1,40 @@
+# The namespace both services run in, and the security boundary the rest of
+# these manifests assume: NetworkPolicies, RBAC and the PodDisruptionBudgets
+# are all namespace-scoped.
+#
+# The Pod Security admission labels are the load-bearing part. Every pod
+# below sets a security context that satisfies the `restricted` standard,
+# but a security context in a manifest is a promise, not a control: it
+# protects nothing against a pod added later by a different hand. Enforcing
+# the standard at the namespace makes the API server refuse such a pod
+# outright, which is the difference between describing a rule and having
+# one.
+#
+# `restricted` requires what section 34 asks for and a little more:
+# runAsNonRoot, no privilege escalation, all capabilities dropped, the
+# RuntimeDefault seccomp profile, no host namespaces, and a restricted set
+# of volume types.
+#
+# enforce-version is pinned rather than left at `latest` so that upgrading
+# the cluster cannot silently tighten the policy under a workload that was
+# passing. Raising it is a deliberate edit, made when there is someone to
+# watch the result. v1.30 is the floor these manifests need anyway: the
+# preStop sleep handler is GA there, and no cluster below it should be
+# running this.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vitalmesh
+  labels:
+    app.kubernetes.io/name: vitalmesh
+    app.kubernetes.io/part-of: vitalmesh
+
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    # Audit and warn are kept at the same level so that a change which would
+    # be rejected is also visible in the audit log and at `kubectl apply`
+    # time, rather than only as a refusal.
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.30
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.30

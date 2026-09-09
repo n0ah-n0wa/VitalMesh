@@ -1,0 +1,33 @@
+# Suppressions for the Kubernetes manifest scan. Each one is a finding that
+# is wrong about this repository, not one that is inconvenient. A finding
+# that is right gets fixed; nothing is silenced to make a gate green.
+#
+# Paths are the rendered files under infrastructure/kubernetes/.rendered,
+# which is what scripts/k8s-validate.sh scans — the manifests as they would
+# be applied, rather than the overlay fragments that produce them.
+
+misconfigurations:
+  # KSV-0109 "stores secrets in configMaps" matches on the key name. The two
+  # keys it names are Argon2id cost parameters:
+  #
+  #   PASSWORD_HASH_MEMORY_KIB: "65536"     memory per hash, in KiB
+  #   PASSWORD_HASH_MAX_CONCURRENT: "1".."8"  hashes allowed at once
+  #
+  # They are integers, they are the reason each environment's gateway
+  # memory limit is what it is, and they are useless to an attacker. The
+  # actual password material never leaves the request and the hashes never
+  # leave PostgreSQL. The rule cannot tell a tuning parameter from a
+  # credential because it only sees the word "PASSWORD" in the key.
+  #
+  # Listed per rendered file rather than as a blanket rule, so the check
+  # still fires on anything this list does not name. A real secret put into
+  # a ConfigMap in a new overlay would be reported.
+  - id: AVD-KSV-0109
+    paths:
+      - "base.yaml"
+      - "overlays-local.yaml"
+      - "overlays-staging.yaml"
+      - "overlays-production.yaml"
+    statement: >-
+      Argon2id cost parameters (memory in KiB, concurrency limit), not
+      credentials. Matched on the key name containing PASSWORD.

@@ -1,0 +1,34 @@
+# A ceiling on what this namespace can take from the cluster.
+#
+# The LimitRange in the base stops a single container being unbounded; this
+# stops the namespace as a whole being unbounded. They answer different
+# questions, and staging and production share a cluster with other things.
+#
+# The numbers are not chosen, they are derived, and they have to be kept in
+# step with the two inputs they come from — the HPA ceilings and the
+# container limits in this overlay:
+#
+#   gateway    (3 max + 1 surge) x 500m / 384Mi  =  2 CPU / 1.5 GiB
+#   processor  (3 max + 1 surge) x 1    / 512Mi  =  4 CPU / 2   GiB
+#   migrate                        500m / 128Mi  =  0.5 CPU / 0.125 GiB
+#                                                  ---------------------
+#                                                  6.5 CPU / 3.6 GiB
+#
+# Rounded up to 8 and 4Gi. Sized to permit full autoscaling and no more: a
+# quota set below the HPA's ceiling does not throttle gracefully, it makes
+# pod creation fail during exactly the traffic spike that asked for them.
+# Raise the HPA maximum or a container limit and this must move first.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vitalmesh
+  namespace: vitalmesh
+spec:
+  hard:
+    limits.cpu: "8"
+    limits.memory: 4Gi
+    requests.cpu: "4"
+    requests.memory: 2Gi
+    # Above the pod count full scaling needs, so this bites on a runaway
+    # controller rather than on ordinary autoscaling.
+    pods: "24"

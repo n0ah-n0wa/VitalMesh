@@ -1,0 +1,48 @@
+# Always, in deployed environments only.
+#
+# The base uses IfNotPresent, which is what the local overlay needs: its
+# images are side-loaded into the kind node and exist in no registry, so
+# Always would make the kubelet try to pull one and fail.
+#
+# Deployed environments pull from a real registry, and there Always is
+# worth the round trip. The tag CI sets is a commit sha and CI never moves
+# it, so IfNotPresent would usually be safe — but "usually" turns on an
+# assumption that nothing is ever rebuilt under an existing tag, and
+# rebuilding a release on a patched base image is an ordinary thing to do.
+# A node holding the old layer would keep serving it, silently, for as long
+# as that pod lived.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: api-gateway
+          imagePullPolicy: Always
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: processor
+          imagePullPolicy: Always
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vitalmesh-migrate
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: migrate
+          imagePullPolicy: Always

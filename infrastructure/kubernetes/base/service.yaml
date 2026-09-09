@@ -1,0 +1,53 @@
+# Both Services are ClusterIP. Nothing here is exposed outside the cluster:
+# the gateway is reached through an Ingress or load balancer, which is
+# environment-specific and belongs to the AWS work, and the processor is an
+# internal API that must never be reachable from outside (section 8).
+#
+# The port is named `http` in both, which is what the probes and the
+# NetworkPolicies refer to. A named port keeps a number in one place: change
+# the container port and everything pointing at it follows.
+#
+# /metrics is served on the same port as the API rather than on a separate
+# admin port. That is what the services do today, so it is what the
+# NetworkPolicy has to allow; splitting the two would be a change to the
+# services, not to these manifests.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: http
+      port: 8081
+      targetPort: http
+      protocol: TCP

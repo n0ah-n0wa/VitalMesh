@@ -1,0 +1,287 @@
+# PostgreSQL and Redis for the local cluster, and nowhere else.
+#
+# These are stand-ins for managed services. They keep their data in an
+# emptyDir, which is gone when the pod is, because a local cluster that
+# survives a restart is not what is being validated here — the manifests
+# are. Staging and production reach for RDS and ElastiCache and never see
+# this file.
+#
+# Both satisfy the namespace's `restricted` Pod Security level, which is
+# not a formality: if a fixture needed the policy relaxed, the temptation
+# would be to relax it for the namespace, and the application's own
+# guarantees would go with it. They run as non-root with all capabilities
+# dropped, like everything else here.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: fixture
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: postgres
+    app.kubernetes.io/component: fixture
+    app.kubernetes.io/part-of: vitalmesh
+  annotations:
+    # Recreate is deliberate and explained below: two PostgreSQL pods must
+    # never hold the same data directory.
+    ignore-check.kube-linter.io/no-rolling-update-strategy: "two PostgreSQL pods must not share one data directory"
+spec:
+  replicas: 1
+  strategy:
+    # Recreate, not RollingUpdate: two PostgreSQL pods must never hold the
+    # same data directory, and with an emptyDir a rolling update would
+    # briefly start a second one.
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgres
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres
+        app.kubernetes.io/component: fixture
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # A high uid, deliberately not the image's own postgres user (70).
+        # A low uid inside a container maps to a low uid on the host, and
+        # low uids are the ones that already mean something there; if a
+        # container ever escapes its namespace, being nobody in particular
+        # is better than being someone. PostgreSQL does not care which uid
+        # it runs as, only that it is not root and can write its data.
+        runAsUser: 10001
+        runAsGroup: 10001
+        # Makes the mounted volumes group-writable, which is what lets
+        # initdb run as a uid that owns nothing in the image.
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16-alpine
+          env:
+            - name: POSTGRES_USER
+              value: vitalmesh
+            - name: POSTGRES_PASSWORD
+              # Local fixture. It protects an empty database in a throwaway
+              # cluster and matches the URL the overlay generates.
+              value: vitalmesh
+            - name: POSTGRES_DB
+              value: vitalmesh
+            # The default is a subdirectory of the mount point; naming it
+            # explicitly keeps initdb off the mount root, which lost+found
+            # and permissions can otherwise complicate.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              # -h 127.0.0.1 for the same reason as in docker-compose.yml:
+              # without a host, pg_isready asks over the unix socket, which
+              # the temporary server initdb runs is already listening on,
+              # so the check can pass before anything is on TCP. Every
+              # client here connects over TCP.
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", "vitalmesh", "-d", "vitalmesh"]
+            initialDelaySeconds: 5
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 20
+          livenessProbe:
+            exec:
+              command: ["pg_isready", "-h", "127.0.0.1", "-U", "vitalmesh", "-d", "vitalmesh"]
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            # Read-only, like everything else here. PostgreSQL does write
+            # outside its data directory — a socket in /var/run/postgresql
+            # and scratch files in /tmp — but those are two named paths,
+            # and giving it two small writable mounts is a better answer
+            # than making its whole filesystem writable and adding a
+            # scanner exception to explain why.
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          emptyDir: {}
+        # The two paths a read-only root filesystem would otherwise deny.
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: fixture
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: redis
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: fixture
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  replicas: 1
+  # Stated rather than left to the default, which is this. Redis holds
+  # nothing that a rolling replacement would lose.
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: fixture
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # As above: a high uid rather than the image's redis user (999).
+        # Redis holds nothing on disk here, so it needs no ownership of
+        # anything.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          # Persistence off, as in docker-compose.yml: nothing Redis holds
+          # is a record of truth, so there is nothing to write and the root
+          # filesystem can stay read-only.
+          args: ["redis-server", "--save", "", "--appendonly", "no"]
+          ports:
+            - name: redis
+              containerPort: 6379
+          readinessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            periodSeconds: 3
+            timeoutSeconds: 3
+            failureThreshold: 10
+          livenessProbe:
+            exec:
+              command: ["redis-cli", "ping"]
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop:
+                - ALL
+---
+# Without this the fixtures are unreachable on any cluster that enforces
+# NetworkPolicies. The base's default-deny selects every pod in the
+# namespace, including these, and the gateway's egress rule permits it to
+# send to port 5432 — but permission to send is not permission to arrive.
+# Both ends have to allow the connection.
+#
+# kind's default CNI does not enforce policies, so this would have been
+# invisible there and would have surfaced first in whichever environment
+# does enforce them. It is here because the policy is what the manifests
+# claim, not because the local cluster needed it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: fixtures
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/component: fixture
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: fixture
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379

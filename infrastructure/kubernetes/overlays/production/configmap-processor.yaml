@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+
+  # Eight jobs at a time: 8 x (~12.8 MB of readings plus a body of up to
+  # 16 MiB) is roughly 230 MB, inside the 2Gi limit with room for the cost
+  # of turning JSON into structures.
+  MAX_CONCURRENT_JOBS: "8"
+
+  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+
+  # ANOMALY_RULES is deliberately not set here, and this is the one
+  # difference from staging that is a decision rather than a size.
+  #
+  # Staging carries development bounds so the anomaly path is exercised
+  # against synthetic data. Copying them into production would put
+  # thresholds nobody chose in front of real measurements, which is worse
+  # than flagging nothing: it would look like a working detector. The rule
+  # set has to be supplied deliberately, by whoever owns what counts as an
+  # anomaly, before this environment is of any use for detection.
+  #
+  # Until then the engine evaluates no rule and flags nothing, and nothing
+  # in the metrics says so: the processor exposes eight metric families and
+  # none of them counts anomalies, so an empty rule set and a quiet
+  # population look identical from monitoring. Anomalies are visible only
+  # in job results. That gap is the reason this is written here at length
+  # rather than left as an unset variable — there is no alert that would
+  # catch the omission for us.

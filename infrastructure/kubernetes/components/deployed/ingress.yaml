@@ -1,0 +1,38 @@
+# The public entry point. Only the gateway is exposed; the processor is an
+# internal service and has no Ingress in any environment (section 8).
+#
+# Host, TLS secret and ingress class are all placeholders that every
+# overlay must replace. The host is under `.invalid`, which RFC 2606
+# reserves to never resolve, so an overlay that forgets to patch it
+# produces an Ingress that visibly matches nothing rather than one that
+# quietly claims a real name.
+#
+# There are no controller-specific annotations here. Which controller
+# terminates TLS, and how, is infrastructure that is not decided yet
+# (OQ-18); an overlay adds what its controller needs.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  ingressClassName: must-be-set-by-overlay
+  tls:
+    - hosts:
+        - must-be-set-by-overlay.invalid
+      secretName: must-be-set-by-overlay
+  rules:
+    - host: must-be-set-by-overlay.invalid
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vitalmesh-api-gateway
+                port:
+                  name: http

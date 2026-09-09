@@ -1,0 +1,23 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+data:
+  ENVIRONMENT: "production"
+
+  # info, not debug. Debug logging here would multiply volume against real
+  # traffic and widens what ends up in a log aggregator holding production
+  # data.
+  LOG_LEVEL: "info"
+
+  # Eight concurrent Argon2id hashes at 64 MiB each is 512 MiB, which is
+  # why the memory limit is 1Gi. Raising this without raising that limit
+  # turns a burst of logins into an OOMKill.
+  PASSWORD_HASH_MAX_CONCURRENT: "8"
+
+  # One trace in ten. Full sampling is affordable in staging and is not
+  # here; a decision made upstream is still honoured, so a request already
+  # being traced stays traced end to end.
+  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_TRACES_SAMPLER_ARG: "0.1"

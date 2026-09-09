@@ -1,0 +1,211 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  # replicas is deliberately absent. The HorizontalPodAutoscaler owns this
+  # field, and a manifest that also names it fights the autoscaler: every
+  # `kubectl apply` would reset a scaled-up Deployment to the number written
+  # here. Absent, the Deployment starts at one and the HPA raises it to
+  # minReplicas within a few seconds.
+  #
+  # The cost is that deleting the HPA silently leaves one replica. That is
+  # the trade the Kubernetes documentation recommends taking, and the
+  # PodDisruptionBudget covers the window.
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # Never fewer ready pods than desired during a rollout: add the new
+      # pod, wait for it to pass its readiness probe, then take an old one
+      # away. maxUnavailable: 1 would be cheaper and would drop capacity on
+      # a two-replica deployment at exactly the moment traffic is being
+      # re-balanced onto it.
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: api-gateway
+        app.kubernetes.io/component: gateway
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      serviceAccountName: vitalmesh-api-gateway
+      # Kubernetes injects an environment variable for every Service in the
+      # namespace into every container, a compatibility feature from before
+      # DNS. It tells a process more about its neighbours than it needs and
+      # grows with the namespace; both services find each other by DNS.
+      enableServiceLinks: false
+      # Restated from the ServiceAccount because this is the field that
+      # decides. The gateway is not a Kubernetes client; a token in the pod
+      # could only ever be stolen.
+      automountServiceAccountToken: false
+
+      # Section 38 in order: SIGTERM stops new work, in-flight requests
+      # finish, connections close, telemetry flushes. The process allows
+      # itself HTTP_SHUTDOWN_TIMEOUT (10s) for that, and the preStop sleep
+      # adds 5s in front of it, so 30s leaves margin without letting a
+      # wedged pod hold up a rollout for long.
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        # The uid the image already runs as. Stated here so the pod is
+        # correct even if the image's own USER were changed, and so
+        # runAsNonRoot has a uid to check rather than a name it cannot
+        # resolve.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      # A PodDisruptionBudget protects nothing if every replica sits on one
+      # node that then reboots. ScheduleAnyway rather than DoNotSchedule
+      # keeps this a preference: on a single-node cluster the pods still
+      # schedule, they just stop being spread.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: api-gateway
+              app.kubernetes.io/part-of: vitalmesh
+
+      containers:
+        - name: api-gateway
+          # Set by an overlay, which is why the tag is not a real one.
+          # Section 32 forbids a mutable tag in a deployment, and `dev` —
+          # what `make docker-build` produces locally — is mutable. A tag
+          # that cannot be pulled makes forgetting to set it an
+          # ImagePullBackOff rather than a mystery about which build is
+          # running.
+          image: vitalmesh/api-gateway:unset
+          imagePullPolicy: IfNotPresent
+          # The image's ENTRYPOINT is the binary and its CMD is `serve`;
+          # neither is restated here, so the image stays the one place that
+          # decides how it starts.
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: vitalmesh-api-gateway
+
+          # Named one at a time rather than with envFrom: secretRef, so
+          # that this list is the answer to "which secrets does the gateway
+          # hold?" A bulk reference would silently pick up any key added to
+          # the Secret later.
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-api-gateway
+                  key: DATABASE_URL
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-api-gateway
+                  key: JWT_SECRET
+            - name: PROCESSOR_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-api-gateway
+                  key: PROCESSOR_TOKEN
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-api-gateway
+                  key: REDIS_URL
+
+          resources:
+            # Measured, not guessed. The container idles at 26 MiB and was
+            # observed at 90 MiB while hashing one password: Argon2id holds
+            # PASSWORD_HASH_MEMORY_KIB (64 MiB) for the length of a hash.
+            # The ceiling is therefore ~26 MiB plus
+            # PASSWORD_HASH_MAX_CONCURRENT x 64 MiB = ~282 MiB, which is
+            # what the limit has to clear; both inputs are in the ConfigMap
+            # so the arithmetic can be redone when they change.
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              # A CPU limit throttles rather than kills, and Argon2id is
+              # deliberately CPU-heavy, so this is set well above the
+              # request: four concurrent hashes want four cores, and
+              # throttling them turns a slow login into a timed-out one.
+              cpu: "1"
+              memory: 512Mi
+
+          # Three probes doing three different jobs.
+          #
+          # startupProbe covers the interval before the server is listening
+          # and holds the other two off, so a slow start cannot be read as
+          # a liveness failure and restarted into a loop.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          # livenessProbe asks only whether the process is answering.
+          # /health consults no dependency by design, which is what section
+          # 35 requires: a PostgreSQL outage must not restart every pod,
+          # because restarting them fixes nothing and loses in-flight work.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # readinessProbe asks whether dependencies are usable. When
+          # PostgreSQL is unavailable this fails, the pod leaves the
+          # Service, and it returns without a restart once the database
+          # does. timeoutSeconds is above READINESS_TIMEOUT (2s) so the
+          # service's own bound is what decides the answer.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          lifecycle:
+            preStop:
+              # Endpoint removal and container termination race: both are
+              # triggered by the pod going Terminating, and nothing orders
+              # them. Without this pause the process can stop accepting
+              # while a proxy somewhere is still sending it connections.
+              # The native sleep handler is used because the image has no
+              # shell to run `sleep` with (Kubernetes 1.30 or later).
+              sleep:
+                seconds: 5
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            # The container writes nothing to disk: it logs to stdout and
+            # keeps state in PostgreSQL and Redis. Verified against the
+            # same image under `docker run --read-only`.
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL

@@ -1,0 +1,78 @@
+# Least privilege, which here means none.
+#
+# Neither service is a Kubernetes client. The gateway talks to PostgreSQL,
+# Redis and the processor; the processor talks to nobody. Nothing either of
+# them does requires reading a ConfigMap through the API, watching a Pod, or
+# discovering an Endpoint: configuration arrives as environment variables
+# and service discovery is DNS. So the correct rule set is the empty one.
+#
+# These objects exist rather than being left out for two reasons. Section 33
+# requires a Role and a RoleBinding, and more usefully, an empty Role that
+# is bound is a fact under review: it states that the workload has no API
+# permissions, and it gives any future permission one obvious place to be
+# added and argued about. A permission granted in an unreviewed ad-hoc
+# binding is the failure this prevents.
+#
+# The real control is not this file. It is `automountServiceAccountToken:
+# false`, which means the pods have no token to authenticate with at all.
+# Widening this Role alone would still not give a pod API access.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+# No rules: the gateway needs no access to the Kubernetes API.
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vitalmesh-api-gateway
+subjects:
+  - kind: ServiceAccount
+    name: vitalmesh-api-gateway
+    namespace: vitalmesh
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+# No rules: the processor needs no access to the Kubernetes API.
+rules: []
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: vitalmesh-processor
+subjects:
+  - kind: ServiceAccount
+    name: vitalmesh-processor
+    namespace: vitalmesh

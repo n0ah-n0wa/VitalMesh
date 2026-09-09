@@ -1,0 +1,28 @@
+# The staging domain.
+#
+# `.example` is reserved by RFC 2606 for documentation and will never
+# resolve, which is the honest placeholder until a domain exists (OQ-18).
+# Replacing these three values is the whole of pointing staging at a real
+# name.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.staging.vitalmesh.example
+      secretName: vitalmesh-staging-tls
+  rules:
+    - host: api.staging.vitalmesh.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vitalmesh-api-gateway
+                port:
+                  name: http

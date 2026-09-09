@@ -13,3 +13,6 @@
 *.swp
 .DS_Store
 Thumbs.db
+
+# Rendered Kubernetes manifests, rebuilt by `make k8s-validate` on every run.
+/infrastructure/kubernetes/.rendered/

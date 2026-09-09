@@ -1,0 +1,43 @@
+# Smaller than production, and small enough that a single modest node runs
+# the whole environment. The memory ceilings are not arbitrary: each is the
+# service's own worst case under this overlay's configuration, plus room.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: api-gateway
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              # PASSWORD_HASH_MAX_CONCURRENT is 2 here, so Argon2id can
+              # hold 2 x 64 MiB = 128 MiB, and the gateway itself sits
+              # around 26 MiB. 384Mi covers that with margin.
+              cpu: 500m
+              memory: 384Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: processor
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              # MAX_CONCURRENT_JOBS is 2: two jobs of ~12.8 MB of readings,
+              # each arriving in a body of up to 16 MiB.
+              cpu: "1"
+              memory: 512Mi

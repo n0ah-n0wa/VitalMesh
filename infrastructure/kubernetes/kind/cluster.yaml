@@ -1,0 +1,29 @@
+# The local cluster the manifests are validated against (section 102).
+#
+# One node. The point is to exercise a real API server — its admission
+# chain, its Pod Security enforcement, its scheduler — not to reproduce a
+# production topology. The local overlay asks for one replica of each
+# service for the same reason.
+#
+# The node image is pinned by digest. kind's default moves with the kind
+# version, and a validation run whose Kubernetes version changes underneath
+# it proves something different each time.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: vitalmesh
+networking:
+  # kind's own CNI does not implement NetworkPolicy. It applies the objects
+  # and ignores them, so a cluster running it can only ever show that the
+  # policies parse — which is the least interesting thing about them. The
+  # test script installs Calico instead, and the default-deny in the base
+  # then actually denies.
+  #
+  # This is not a detail: the missing egress policy for the migration Job
+  # was invisible on the default CNI and fails immediately on this one.
+  disableDefaultCNI: true
+  # Calico's default IPv4 pool. Matching it here avoids having to patch the
+  # pool afterwards.
+  podSubnet: "192.168.0.0/16"
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865

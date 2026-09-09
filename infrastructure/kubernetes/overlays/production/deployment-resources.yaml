@@ -1,0 +1,50 @@
+# Sized for real traffic. Each memory limit is the service's own worst case
+# under this overlay's configuration, with room for allocator overhead.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: api-gateway
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              # PASSWORD_HASH_MAX_CONCURRENT is 8, so Argon2id can hold
+              # 8 x 64 MiB = 512 MiB at once, on top of the gateway's own
+              # working set.
+              #
+              # The CPU limit is four times the request because Argon2id is
+              # deliberately CPU-heavy and throttling it turns a slow login
+              # into a timed-out one. The request is what the scheduler
+              # packs against; the limit is what a burst may reach.
+              cpu: "2"
+              memory: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: processor
+          resources:
+            requests:
+              # A whole core requested: this is the compute half of the
+              # system and the signal its HPA scales on. Requesting less
+              # than it uses would make utilisation look high on a pod that
+              # is merely under-requested, and scale out for the wrong
+              # reason.
+              cpu: "1"
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 2Gi

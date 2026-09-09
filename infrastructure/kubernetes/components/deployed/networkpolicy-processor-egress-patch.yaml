@@ -1,0 +1,27 @@
+# The processor's egress, narrowed for the same reason as the gateway's.
+#
+# It reaches exactly one thing: the OpenTelemetry collector, over OTLP/HTTP.
+# The base leaves the address open because it cannot know where the
+# collector is; a deployed environment knows it is inside the VPC. Leaving
+# this at 0.0.0.0/0 while narrowing the gateway would be a strange kind of
+# half-measure — the processor handles the same measurements the gateway
+# does.
+#
+# It still has no route to PostgreSQL or Redis, and gains none here.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: processor
+  namespace: vitalmesh
+spec:
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 4318

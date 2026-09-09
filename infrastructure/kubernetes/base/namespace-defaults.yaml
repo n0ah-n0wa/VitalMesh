@@ -1,0 +1,56 @@
+# Two namespace-level defaults, both of which exist to constrain a workload
+# that has not been written yet.
+#
+# Everything else in this directory secures the two services that are here.
+# These secure the next thing someone adds — a debug pod, a job run by
+# hand, a sidecar — because that is what a namespace default is for.
+---
+# Every namespace gets a ServiceAccount called `default`, created by the API
+# server with token automounting on. A pod that does not name a service
+# account uses it, and so arrives with a mounted API token it did not ask
+# for and probably cannot use safely.
+#
+# Both services name their own account and have automounting off, so this
+# changes nothing about them. It changes what happens when someone runs
+# `kubectl run` in this namespace to debug something: that pod gets no
+# token either.
+#
+# Declaring the object here means kubectl apply patches the one the API
+# server already made, rather than creating a second.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: default
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+automountServiceAccountToken: false
+---
+# Pod Security's `restricted` level says nothing about resource limits: a
+# container with no limits at all satisfies it completely. Section 34
+# requires explicit limits, and every container here has them, but nothing
+# was enforcing that for a container added later — it would simply run
+# unbounded and compete with the services for the node.
+#
+# A LimitRange gives a container that omits them a bounded default instead.
+# The numbers are deliberately small: enough for a shell or a one-off task,
+# not enough to matter beside the services, and low enough that anything
+# real will notice and declare what it actually needs.
+#
+# Containers that declare their own limits — all of ours — are untouched.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: defaults
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  limits:
+    - type: Container
+      default:
+        cpu: 500m
+        memory: 256Mi
+      defaultRequest:
+        cpu: 50m
+        memory: 64Mi

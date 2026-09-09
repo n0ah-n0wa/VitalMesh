@@ -1,0 +1,49 @@
+# The processor is an internal service. Section 8 puts it behind the
+# gateway, and nothing else in the system has a reason to reach it.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: processor
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # From the gateway pods and nothing else. The shared bearer token
+    # (INTERNAL_TOKEN) authenticates the caller; this makes an unauthorised
+    # caller unable to reach the port in the first place, so a leaked token
+    # is not on its own enough.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api-gateway
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 8081
+
+  egress:
+    # Traces only. The processor holds no database or Redis connection —
+    # measurements arrive in the request and results go back in the
+    # response — so it needs no egress to either, and it is not given any.
+    # If a future change has the processor read PostgreSQL directly, this
+    # policy is what must change first, and that is deliberate.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 4318

@@ -1,0 +1,29 @@
+# Two replicas at rest, as section 36 requires, and headroom to twenty.
+#
+# Two is the floor that makes the rest of the base mean something: the
+# maxUnavailable: 0 rollout, the PodDisruptionBudget and the topology
+# spread all assume there is a second pod to carry traffic while the first
+# is replaced.
+#
+# The ceilings differ by service because the work does. The gateway is I/O
+# bound and scales in cheap, fast steps; the processor holds jobs that may
+# run for minutes, so it scales up in the same steps but gives capacity
+# back one pod at a time and only after a long quiet period, which the
+# base already sets.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  minReplicas: 2
+  maxReplicas: 20
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  minReplicas: 2
+  maxReplicas: 12

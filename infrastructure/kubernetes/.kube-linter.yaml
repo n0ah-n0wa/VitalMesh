@@ -1,0 +1,47 @@
+# Every built-in check is on, and each exclusion below is argued rather than
+# discovered by trimming until the run went green.
+#
+# addAllBuiltIn rather than a hand-picked include list, so a check added by
+# a future kube-linter version applies here without anyone remembering to
+# opt in. A new check that fails is then a decision to make, which is the
+# right way round for a security tool.
+checks:
+  addAllBuiltIn: true
+
+  exclude:
+    # Wants secrets mounted as files rather than passed as environment
+    # variables. The point is real: an environment variable is readable
+    # through /proc/<pid>/environ, is inherited by children, and tends to
+    # end up in crash dumps and debug endpoints, and a mounted file can be
+    # rotated without restarting the pod.
+    #
+    # It is excluded because acting on it is an application change, not a
+    # manifest one. Both services read configuration from the environment
+    # and neither understands a FILE-valued variable, so mounting a secret
+    # would mean nothing read it. Worth revisiting when either service
+    # grows file-based configuration; it is not a defect in these manifests.
+    - "read-secret-from-env-var"
+
+    # Wants three replicas. Section 36 states two as the target minimum,
+    # and the HPA raises the count from there under load. Three would be a
+    # cost decision nobody has made.
+    - "minimum-three-replicas"
+    - "hpa-minimum-three-replicas"
+
+    # Wants an owner label and an email annotation. This repository has no
+    # such convention, and inventing one here would put an address in every
+    # manifest that no process reads.
+    - "required-label-owner"
+    - "required-annotation-email"
+
+    # Wants node affinity. Nothing here should be pinned to particular
+    # nodes: both services are stateless and portable, and the availability
+    # concern — replicas sharing one node — is handled by the
+    # topologySpreadConstraints in the Deployments.
+    - "no-node-affinity"
+
+    # Wants an explicit dnsConfig, chiefly to lower ndots so in-cluster
+    # lookups skip the search domains. It is a sensible tuning knob and not
+    # a correctness or security property; it belongs to a change made with
+    # a measurement, not to this base.
+    - "dnsconfig-options"

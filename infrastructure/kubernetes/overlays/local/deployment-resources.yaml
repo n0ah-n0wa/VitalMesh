@@ -1,0 +1,40 @@
+# Small enough that everything fits on one kind node beside the control
+# plane. There is no HPA pressure here to speak of, so requests are set to
+# what the services actually idle at rather than to what they might peak
+# at under load.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: api-gateway
+          resources:
+            requests:
+              cpu: 50m
+              memory: 96Mi
+            limits:
+              # One Argon2id hash at 64 MiB plus ~26 MiB of gateway.
+              cpu: 500m
+              memory: 256Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  template:
+    spec:
+      containers:
+        - name: processor
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi

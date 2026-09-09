@@ -44,7 +44,7 @@ TRIVY_FS        := docker run --rm -v vitalmesh-trivy:/root/.cache/trivy
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan up down demo
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan k8s-validate k8s-local-test k8s-failure-test up down demo
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -120,6 +120,35 @@ docker-scan: ## Scan the images and the dependency lock files for known vulnerab
 	$(TRIVY_FS) -v "$(CURDIR)/$(RUST_DIR):/scan" $(TRIVY_IMAGE) config $(TRIVY_SEVERITY) /scan
 	@echo "== source: the dependency lock files, which cover the Rust crates =="
 	$(TRIVY_FS) -v "$(CURDIR):/repo" $(TRIVY_IMAGE) fs --scanners vuln,secret $(TRIVY_SEVERITY) /repo
+
+# Five tools in one script, none of which needs a cluster; the script says
+# what each one is for. No Kubernetes toolchain is installed locally, so
+# every tool runs in a pinned container.
+k8s-validate: ## Validate the manifests (kustomize, kubeconform, kube-linter, trivy, checkov)
+	sh scripts/k8s-validate.sh
+
+# The other half of validation, and the half that needs a cluster: applies
+# the local overlay to kind and exercises it. Needs kind and kubectl on
+# PATH, which is the one place this repository asks for a tool outside
+# Docker — kind builds its node as a container on the host's Docker and so
+# cannot run inside one.
+k8s-local-test: k8s-validate ## Deploy the local overlay to a kind cluster and test it
+	sh scripts/k8s-local-test.sh
+
+# Controlled failure scenarios. Section 52 asks for these and section 90
+# says what each dependency should do; docs/FAILURE_MODES.md records what
+# they actually do.
+#
+# This needs a cluster that is still up, which `make k8s-local-test` does
+# not leave behind — that target tears its cluster down so it can be run on
+# its own. Deploy with the script directly first:
+#
+#   sh scripts/k8s-local-test.sh --keep
+#   make k8s-failure-test
+#
+# The script says so too, and refuses to run against nothing.
+k8s-failure-test: ## Break each dependency in turn and check the behaviour
+	sh scripts/k8s-failure-test.sh
 
 up: ## Start the whole local environment (the same as: docker compose up -d --wait)
 	docker compose up -d --wait

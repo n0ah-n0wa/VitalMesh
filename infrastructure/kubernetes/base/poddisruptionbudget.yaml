@@ -1,0 +1,59 @@
+# Budgets for voluntary disruption — node drains, cluster upgrades, the
+# descheduler. Involuntary loss (a node failing) is not covered by these and
+# is what running more than one replica is for.
+#
+# maxUnavailable: 1 rather than minAvailable: 1, which would be equivalent
+# at two replicas but not at one. These Deployments are scaled by an HPA, so
+# the replica count is not fixed, and `minAvailable: 1` against a single
+# replica permits no eviction at all: a node drain would hang until someone
+# noticed and deleted the budget. Expressed as maxUnavailable the budget
+# scales with the Deployment and always allows a drain to make progress,
+# one pod at a time.
+#
+# unhealthyPodEvictionPolicy: AlwaysAllow, rather than the default of
+# IfHealthyBudget, which only lets a not-ready pod be evicted while the
+# budget is already satisfied.
+#
+# That default is the wrong way round for this system. The gateway reports
+# not ready when PostgreSQL is unreachable, so a database outage makes every
+# gateway pod not ready at once — and IfHealthyBudget would then refuse to
+# evict any of them, blocking a node drain on pods that are serving no
+# traffic. AlwaysAllow keeps a pod that cannot serve from also being
+# undrainable. It costs nothing when the pods are healthy, because a healthy
+# pod is evicted under the budget either way.
+#
+# Requires Kubernetes 1.27 or later, where the field is enabled by default.
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+      app.kubernetes.io/part-of: vitalmesh
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  maxUnavailable: 1
+  unhealthyPodEvictionPolicy: AlwaysAllow
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: processor
+      app.kubernetes.io/part-of: vitalmesh

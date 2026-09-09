@@ -1,0 +1,28 @@
+# As in staging, derived rather than chosen, from this overlay's HPA
+# ceilings and container limits:
+#
+#   gateway    (20 max + 1 surge) x 2 CPU / 1Gi  =  42 CPU / 21 GiB
+#   processor  (12 max + 1 surge) x 4 CPU / 2Gi  =  52 CPU / 26 GiB
+#   migrate                        500m   / 128Mi = 0.5 CPU / 0.125 GiB
+#                                                  ----------------------
+#                                                  94.5 CPU / 47.1 GiB
+#
+# Rounded up to 96 and 48Gi. This is a ceiling, not a reservation: it costs
+# nothing until something tries to exceed it.
+#
+# It must stay above what the HPAs can ask for. A quota below that ceiling
+# turns a traffic spike into failed pod creation — the autoscaler asks for
+# capacity and the API server refuses — which is a worse failure than not
+# having a quota at all.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: vitalmesh
+  namespace: vitalmesh
+spec:
+  hard:
+    limits.cpu: "96"
+    limits.memory: 48Gi
+    requests.cpu: "40"
+    requests.memory: 24Gi
+    pods: "80"

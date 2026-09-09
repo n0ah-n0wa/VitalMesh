@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+data:
+  ENVIRONMENT: "local"
+  LOG_LEVEL: "debug"
+  MAX_CONCURRENT_JOBS: "2"
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""
+
+  # Development bounds, the same ones docker-compose.yml uses, so the
+  # anomaly path is exercised by the smoke test rather than silently
+  # doing nothing.
+  ANOMALY_RULES: '{"rules":[{"name":"heart-rate-bounds","kind":"THRESHOLD","measurement_types":["HEART_RATE"],"tiers":{"warning":{"lower":50,"upper":100},"critical":{"lower":40,"upper":150}}}]}'

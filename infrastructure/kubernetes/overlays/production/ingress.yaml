@@ -1,0 +1,26 @@
+# The production domain. `.example` is reserved by RFC 2606 and will never
+# resolve; it stands in until a domain exists (OQ-18). Section 104 requires
+# HTTPS, which the TLS block provides — the certificate itself is issued by
+# the environment's own machinery and referenced here by Secret name.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.vitalmesh.example
+      secretName: vitalmesh-production-tls
+  rules:
+    - host: api.vitalmesh.example
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vitalmesh-api-gateway
+                port:
+                  name: http

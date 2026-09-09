@@ -1,0 +1,118 @@
+# Schema migrations, run as their own Job rather than by the gateway at
+# start-up. Section 64 requires migration execution to be part of the
+# deployment; doing it in the gateway would have every replica race the
+# others through the schema on a rolling update.
+#
+# The Job uses the gateway image — the migrations are compiled into that
+# binary — so an overlay's `images:` transformer retags this and the
+# Deployment together and they cannot drift onto different schemas.
+#
+# It takes one input, DATABASE_URL. `migrate up` reads that and nothing
+# else, so the Job is not given the gateway's ConfigMap or its other
+# secrets: a job that can only reach the database is a smaller thing to get
+# wrong.
+#
+# One sharp edge worth knowing: a Job's spec is immutable, so re-applying a
+# changed one is rejected. A deployment pipeline must delete it first —
+#
+#   kubectl -n <ns> delete job vitalmesh-migrate --ignore-not-found
+#   kubectl -n <ns> apply -k <overlay>
+#   kubectl -n <ns> wait --for=condition=complete job/vitalmesh-migrate
+#
+# which is what scripts/k8s-local-test.sh does. ttlSecondsAfterFinished
+# clears the finished Job on its own so the next deploy usually finds
+# nothing there.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: vitalmesh-migrate
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: migrate
+    app.kubernetes.io/component: migration
+    app.kubernetes.io/part-of: vitalmesh
+  annotations:
+    # Probes answer "should this keep receiving traffic" and "should this be
+    # restarted". Neither question applies to a pod that runs to completion
+    # and exits: a migration has no traffic, and restarting one halfway is
+    # the opposite of what should happen. The checks are written for
+    # long-running workloads and are silenced here rather than switched off
+    # everywhere, so a Deployment that loses its probes still fails.
+    ignore-check.kube-linter.io/no-liveness-probe: "a Job runs to completion; there is nothing to restart"
+    ignore-check.kube-linter.io/no-readiness-probe: "a Job serves no traffic"
+spec:
+  # Retry, because the usual reason a migration fails is that the database
+  # is not accepting connections yet, and that fixes itself.
+  #
+  # Six, not three. Kubernetes backs a failed Job pod off exponentially —
+  # roughly 10s, 20s, 40s, 80s, 160s, 320s — so three retries give up after
+  # about seventy seconds. That is less than a cold database takes to
+  # start, and this Job was observed on a kind cluster exhausting its limit
+  # while PostgreSQL was still pulling its image. The failure is a bad one:
+  # the Job stops for good, the apply reported success, and the schema is
+  # never migrated. Six retries span about ten minutes, which covers a
+  # database still starting without waiting forever on one that is broken.
+  backoffLimit: 6
+  # Bounds the whole thing, retries included, and is set above the retry
+  # budget so the deadline does not cut short a retry that would have
+  # worked. A migration holding a lock forever is worse than one that fails
+  # and says so.
+  activeDeadlineSeconds: 900
+  # Clean up ten minutes after finishing, so the next deploy is not blocked
+  # by the previous Job still existing.
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: migrate
+        app.kubernetes.io/component: migration
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: vitalmesh-api-gateway
+      # Kubernetes injects an environment variable for every Service in the
+      # namespace into every container, a compatibility feature from before
+      # DNS. It tells a process more about its neighbours than it needs and
+      # grows with the namespace; both services find each other by DNS.
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: vitalmesh/api-gateway:unset
+          imagePullPolicy: IfNotPresent
+          # args, not command: the image's ENTRYPOINT is the binary and its
+          # CMD is `serve`. Replacing the arguments leaves the entrypoint
+          # alone, so this cannot accidentally bypass how the image starts.
+          args: ["migrate", "up"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-api-gateway
+                  key: DATABASE_URL
+          resources:
+            # Small and short-lived: it opens one connection, applies files
+            # and exits. The limits exist because the namespace requires
+            # them, not because this is expected to approach them.
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL

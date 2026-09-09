@@ -1,0 +1,93 @@
+# The baseline every other policy is written against.
+#
+# NetworkPolicies are additive and there is no deny rule: a pod is
+# unrestricted until some policy selects it, and from then on only what a
+# policy permits is allowed. So the first object here selects every pod in
+# the namespace and permits nothing, and everything after it is an
+# exception someone had to justify.
+#
+# These policies need a CNI that enforces them. Calico, Cilium and the EKS
+# VPC CNI (with policy enforcement enabled) do; kind's default CNI does not,
+# and neither does Docker Desktop's. On a cluster that ignores them these
+# objects apply cleanly and protect nothing, which is worth knowing before
+# treating a green `kubectl apply` as evidence.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  # An empty selector is every pod in the namespace, including any added
+  # later. That is the point: a new workload arrives with no connectivity
+  # and has to be given some, rather than arriving open.
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  # No ingress or egress rules: nothing is permitted by this policy.
+---
+# DNS is the one exception that everything needs. Without it a pod cannot
+# resolve `vitalmesh-processor` or the database hostname, and every
+# connection fails in a way that looks like the database being down.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              # Set automatically by the API server on every namespace, so
+              # this does not depend on anyone having labelled kube-system.
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        # TCP as well: a response larger than the UDP limit makes the
+        # resolver retry over TCP, and a policy that allows only UDP turns
+        # that into an intermittent resolution failure.
+        - protocol: TCP
+          port: 53
+---
+# Prometheus scrapes /metrics, which both services serve on the same port as
+# their API. This is a separate policy from each service's own ingress rule
+# so that the reason for the opening — scraping — stays legible, and so that
+# removing monitoring does not mean editing the service policies.
+#
+# The source is identified by namespace name, `monitoring` being the
+# convention. An overlay whose Prometheus lives elsewhere patches this
+# selector; until it does, the scrape is denied rather than allowed from
+# everywhere.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-metrics-scrape
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081

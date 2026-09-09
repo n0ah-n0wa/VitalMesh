@@ -1,0 +1,52 @@
+# Non-secret configuration for the processor. The only secret it takes is
+# INTERNAL_TOKEN, which is in the Secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+data:
+  # As in the gateway: the strictest environment is the default, so that an
+  # overlay which forgets to choose gets the one that refuses a missing
+  # INTERNAL_TOKEN rather than the one that shrugs.
+  ENVIRONMENT: "production"
+
+  HTTP_ADDR: "0.0.0.0:8081"
+
+  LOG_LEVEL: "info"
+  LOG_FORMAT: "json"
+
+  # The three numbers the memory limit is derived from. A job may carry
+  # MAX_JOB_MEASUREMENTS readings at roughly 128 bytes each (~12.8 MB), and
+  # MAX_CONCURRENT_JOBS of them may be in flight, each having arrived in a
+  # body of up to HTTP_MAX_BODY_BYTES. Raising any of them without raising
+  # the Deployment's memory limit converts a busy processor into an
+  # OOMKilled one.
+  MAX_CONCURRENT_JOBS: "4"
+  MAX_JOB_MEASUREMENTS: "100000"
+  HTTP_MAX_BODY_BYTES: "16777216"
+
+  # A single job may run this long. It is well inside the processing
+  # timeout the gateway allows for a dispatch, because the gateway's call
+  # only hands the job over; it does not wait for the result.
+  PROCESSING_TIMEOUT: "5m"
+
+  # Running jobs get this long to finish once shutdown starts. The
+  # Deployment's terminationGracePeriodSeconds is set above it, so the
+  # kubelet does not SIGKILL a job the process was about to complete.
+  SHUTDOWN_TIMEOUT: "30s"
+
+  # How long a finished job stays readable through the jobs endpoint. It
+  # bounds in-memory job state, so it is a memory input as well as a
+  # behaviour one.
+  JOB_RETENTION: "15m"
+
+  # ANOMALY_RULES is deliberately absent, which means no rule is evaluated
+  # and nothing is flagged. The thresholds that decide what counts as an
+  # anomaly are a property of the deployment and its data, not of the
+  # image, and inventing a plausible-looking set here would put numbers
+  # into production that nobody chose. An overlay supplies them.

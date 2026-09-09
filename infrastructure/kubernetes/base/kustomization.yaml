@@ -1,0 +1,47 @@
+# The base every overlay builds on. Kustomize rather than Helm, per OQ-17:
+# the manifests are read as YAML, not as a template language, and an overlay
+# states its differences instead of restating the whole.
+#
+# This base is not applied directly. Two values in it are deliberately
+# unusable — the image tags and the empty Secrets — so that an overlay has
+# to supply them rather than inherit something plausible. `kustomize build`
+# renders it, and the validation gates check what comes out.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Every namespaced object below already names the namespace. Setting it here
+# as well means an overlay that renames the namespace changes one line.
+namespace: vitalmesh
+
+resources:
+  - namespace.yaml
+
+  # Identity before the things that use it, which is also the order these
+  # have to exist in.
+  - serviceaccount.yaml
+  - rbac.yaml
+  # Defaults for anything added to this namespace later.
+  - namespace-defaults.yaml
+
+  - configmap-api-gateway.yaml
+  - configmap-processor.yaml
+  - secret.yaml
+
+  # Migrations before the workloads that depend on the schema. Kubernetes
+  # has no ordering between them — the gateway simply reports not ready
+  # until the database answers — so this order is for the reader, and the
+  # deployment script is what actually waits for the Job.
+  - job-migrate.yaml
+
+  - deployment-api-gateway.yaml
+  - deployment-processor.yaml
+  - service.yaml
+
+  - poddisruptionbudget.yaml
+  - horizontalpodautoscaler.yaml
+
+  # Default-deny first, then the openings.
+  - networkpolicy-baseline.yaml
+  - networkpolicy-api-gateway.yaml
+  - networkpolicy-processor.yaml
+  - networkpolicy-migrate.yaml

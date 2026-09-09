@@ -1,0 +1,26 @@
+# The base admits gateway traffic only from a namespace labelled
+# vitalmesh.io/gateway-client=true, and nothing carries that label by
+# default. Deployed environments run an ingress controller in its own
+# namespace, so this adds it by name alongside the label rule — either is
+# enough, and naming it means the environment works without anyone
+# remembering to label a namespace by hand.
+#
+# ingress-nginx is the assumed controller. An environment using another one
+# patches this again; OQ-18 will settle which it is.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway
+  namespace: vitalmesh
+spec:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              vitalmesh.io/gateway-client: "true"
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8080

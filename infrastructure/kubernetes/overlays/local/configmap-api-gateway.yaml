@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+data:
+  # The one overlay that relaxes the base's fail-closed default. `local`
+  # permits sslmode=disable to PostgreSQL and a plaintext redis:// URL,
+  # which is what the in-cluster fixtures speak. Staging and production
+  # deliberately do not relax it.
+  ENVIRONMENT: "local"
+  LOG_LEVEL: "debug"
+
+  # One hash at a time, which is all a single-node cluster should be asked
+  # for, and it keeps the memory limit small enough to run beside
+  # PostgreSQL, Redis and the control plane on one machine.
+  PASSWORD_HASH_MAX_CONCURRENT: "1"
+
+  # No collector in this cluster. Unset means trace context is still
+  # propagated and trace ids still appear in logs; nothing is exported.
+  OTEL_EXPORTER_OTLP_ENDPOINT: ""

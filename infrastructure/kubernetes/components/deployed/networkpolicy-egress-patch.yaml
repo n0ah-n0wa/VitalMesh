@@ -1,0 +1,51 @@
+# Section 104: restricted network access.
+#
+# The base allows egress to PostgreSQL, Redis and the collector at any
+# address, because it cannot know where they are. A deployed environment
+# can say more: managed database and cache endpoints live inside the VPC,
+# and so does the collector, so nothing here has any business reaching a
+# public address. Narrowing to private space turns a compromised gateway
+# from something that can call out anywhere into something that can only
+# talk to the network it is already in.
+#
+# This is in the shared component rather than in the production overlay,
+# and that placement is the point. Section 104 requires the narrowing in
+# production; section 103 requires staging to validate security before
+# production relies on it. A policy that exists only in production is one
+# whose first real test is production. Both deployed environments get it,
+# so a rule that breaks something breaks it in staging first.
+#
+# RFC 1918 ranges rather than real subnet CIDRs, which are not known until
+# the VPC exists. Replacing these three entries with the actual database,
+# cache and collector subnets is the last narrowing to make, and it belongs
+# with the Terraform that creates them. Link-local — the instance metadata
+# address — is outside all three ranges and so is already excluded.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway
+  namespace: vitalmesh
+spec:
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: processor
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 8081
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+        - ipBlock:
+            cidr: 172.16.0.0/12
+        - ipBlock:
+            cidr: 192.168.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+        - protocol: TCP
+          port: 4318

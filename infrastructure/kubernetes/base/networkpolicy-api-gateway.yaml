@@ -1,0 +1,86 @@
+# What the gateway may talk to, and who may talk to it.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: api-gateway
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Ingress
+    - Egress
+
+  ingress:
+    # The gateway is the public surface, but what fronts it — an ingress
+    # controller, a load balancer target group — is a property of the
+    # environment and is not decided yet (OQ-18). Rather than name a
+    # controller that may not be the one used, or open the port to the whole
+    # cluster, the seam is a label: whichever namespace fronts the gateway
+    # carries it.
+    #
+    #   kubectl label namespace <ingress-ns> vitalmesh.io/gateway-client=true
+    #
+    # Until something is labelled this admits nothing, which is the right
+    # way round for a policy: an unreachable gateway is a visible mistake,
+    # an accidentally reachable one is not.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              vitalmesh.io/gateway-client: "true"
+      ports:
+        - protocol: TCP
+          port: 8080
+
+  egress:
+    # To the processor, by pod selector rather than by address, so it keeps
+    # working as pods are rescheduled.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: processor
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 8081
+
+    # To PostgreSQL and Redis. Their addresses are environment-specific —
+    # in-cluster for a local overlay, RDS and ElastiCache in a deployed one
+    # — so the base constrains the ports and leaves the destination open,
+    # and an overlay narrows the CIDR to the subnets that actually hold
+    # them. That narrowing is the point of the overlay; leaving it undone is
+    # a finding, not a default.
+    #
+    # Link-local is excluded. 169.254.169.254 is the instance metadata
+    # service on every major cloud, and a pod that can reach it can often
+    # read the node's credentials. Nothing here has any reason to.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432
+        - protocol: TCP
+          port: 6379
+
+    # To the OpenTelemetry collector over OTLP/HTTP. Same reasoning: the
+    # collector's location is environment-specific, and the service degrades
+    # to exporting nothing if it is unreachable, so this opening is small
+    # and non-critical.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 4318

@@ -1,0 +1,59 @@
+# Staging. Section 103: close enough to production to validate deployments,
+# migrations, networking, observability, autoscaling, service
+# communication, security and rollback — at a size nobody has to justify.
+#
+# It differs from production in size and in nothing else that matters. The
+# shape comes from ../../base, and everything true of any deployed
+# environment comes from the shared component, so what is written here is
+# only what is genuinely different: the domain, the sizes, the replica
+# floor and ceiling, the log level and where the secrets come from.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# The namespace is the separation. Kustomize renames the Namespace object
+# and rewrites every reference to it, including the RoleBinding subjects,
+# so this one line moves the whole environment.
+namespace: vitalmesh-staging
+
+resources:
+  - ../../base
+  # A namespace-wide ceiling; the file shows the arithmetic.
+  - resourcequota.yaml
+
+components:
+  - ../../components/deployed
+
+# Environment labels, added to every object.
+#
+# includeSelectors is false on purpose. A Deployment's selector is
+# immutable once created, and a label transformer that reached into
+# selectors would make every future change to these pairs a delete-and-
+# recreate. The namespace already separates the environments; these labels
+# are for finding things, not for routing.
+labels:
+  - pairs:
+      vitalmesh.io/environment: staging
+      app.kubernetes.io/instance: vitalmesh-staging
+    includeSelectors: false
+
+# The tag is set by the deployment pipeline, which knows the commit:
+#
+#   kustomize edit set image vitalmesh/api-gateway=<registry>/api-gateway:<sha>
+#
+# Section 32 requires an immutable identifier, so `set-by-ci` is a
+# placeholder that cannot be pulled rather than a `latest` that could.
+# One entry retags the Deployment and the migration Job together, which is
+# what keeps the schema and the code that expects it in step.
+images:
+  - name: vitalmesh/api-gateway
+    newTag: set-by-ci
+  - name: vitalmesh/processor
+    newTag: set-by-ci
+
+patches:
+  - path: configmap-api-gateway.yaml
+  - path: configmap-processor.yaml
+  - path: deployment-resources.yaml
+  - path: hpa.yaml
+  - path: ingress.yaml
+  - path: secret-references.yaml

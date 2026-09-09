@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+data:
+  ENVIRONMENT: "staging"
+  LOG_LEVEL: "debug"
+
+  # Two jobs at a time rather than production's eight, matching the
+  # smaller memory limit: 2 x (12.8 MB of readings + a 16 MiB body) is
+  # comfortably inside 512Mi.
+  MAX_CONCURRENT_JOBS: "2"
+
+  # Development bounds so that the anomaly path is exercised at all —
+  # without a rule set the engine flags nothing and a broken detector
+  # looks identical to a quiet one. These are technical thresholds for
+  # synthetic data, not clinical ones.
+  ANOMALY_RULES: '{"rules":[{"name":"heart-rate-bounds","kind":"THRESHOLD","measurement_types":["HEART_RATE"],"tiers":{"warning":{"lower":50,"upper":100},"critical":{"lower":40,"upper":150}}}]}'
+
+  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"

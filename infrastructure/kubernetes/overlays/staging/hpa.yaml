@@ -1,0 +1,25 @@
+# One replica at rest, three at most.
+#
+# OQ-25 records this as a deliberate deviation from the two-replica
+# minimum in section 36, taken for cost: staging exists to validate
+# behaviour, and a second idle replica validates nothing that the third
+# does not. It costs a moment of unavailability during a rolling update
+# and during node maintenance, which is acceptable here and is not in
+# production.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+spec:
+  minReplicas: 1
+  maxReplicas: 3
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+spec:
+  minReplicas: 1
+  maxReplicas: 3

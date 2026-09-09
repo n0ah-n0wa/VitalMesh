@@ -1,0 +1,72 @@
+# The local environment: a kind cluster, no cloud, no ingress, no secret
+# manager. Section 102 asks for exactly this — somewhere the manifests can
+# be validated against a real API server without AWS.
+#
+# It exists because the other two overlays cannot be deployed anywhere a
+# developer has: staging and production reach for managed PostgreSQL, a
+# managed cache, a TLS-terminating ingress and an external secret store.
+# This one supplies stand-ins for the first two, drops the third, and
+# generates the fourth from values that are not secret.
+#
+# It does NOT include the shared `deployed` component, and that omission is
+# what makes it local: no ingress, no proxy hops, and the base's
+# placeholder Secrets are replaced rather than deleted.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vitalmesh-local
+
+resources:
+  - ../../base
+  # PostgreSQL and Redis, in-cluster, for validation only. They hold
+  # nothing worth keeping and say so.
+  - fixtures.yaml
+
+labels:
+  - pairs:
+      vitalmesh.io/environment: local
+      app.kubernetes.io/instance: vitalmesh-local
+    includeSelectors: false
+
+# What `make docker-build` produces. This is the one overlay that names a
+# real, pullable tag, because it is the one that actually runs: the test
+# script loads these images into the kind node before applying.
+images:
+  - name: vitalmesh/api-gateway
+    newTag: dev
+  - name: vitalmesh/processor
+    newTag: dev
+
+# Replaces the base's empty placeholder Secrets, and kustomize rewrites
+# every secretKeyRef to the generated name — including the migration Job's.
+#
+# These values are not secrets. They are the same obviously-local strings
+# docker-compose.yml already carries, chosen to be useless anywhere else,
+# and they exist so that `kustomize build` is self-contained and the local
+# deployment is one command. Section 31 is about credentials that protect
+# something; nothing here protects anything.
+secretGenerator:
+  - name: vitalmesh-api-gateway
+    # The base's Secret declares its namespace, so this must name the same
+    # one for `replace` to find it. The overlay's namespace transformer
+    # moves the result to vitalmesh-local afterwards.
+    namespace: vitalmesh
+    behavior: replace
+    literals:
+      - DATABASE_URL=postgres://vitalmesh:vitalmesh@postgres:5432/vitalmesh?sslmode=disable
+      - JWT_SECRET=local-development-signing-key-not-a-secret
+      - PROCESSOR_TOKEN=local-development-internal-token
+      - REDIS_URL=redis://redis:6379
+  - name: vitalmesh-processor
+    namespace: vitalmesh
+    behavior: replace
+    literals:
+      # The other half of PROCESSOR_TOKEN above. They must match or every
+      # dispatch is rejected with 401.
+      - INTERNAL_TOKEN=local-development-internal-token
+
+patches:
+  - path: configmap-api-gateway.yaml
+  - path: configmap-processor.yaml
+  - path: deployment-resources.yaml
+  - path: hpa.yaml

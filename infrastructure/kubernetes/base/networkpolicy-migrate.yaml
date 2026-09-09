@@ -1,0 +1,49 @@
+# The migration Job's own policy.
+#
+# This was missing, and its absence is the kind of hole that a manifest
+# review finds and a schema check never will. The default-deny policy
+# selects every pod in the namespace, the Job's pod carries
+# app.kubernetes.io/name: migrate, and no other policy selects that label —
+# so the migration had DNS and nothing else. Under any CNI that enforces
+# policy the Job would resolve the database's name, fail to connect, retry
+# until its backoff limit ran out and stop, while `kubectl apply` reported
+# success and the schema stayed empty.
+#
+# The gateway's policy does not cover it: that one selects
+# app.kubernetes.io/name: api-gateway, and the Job is a different workload
+# with different labels even though it runs the same image.
+#
+# Egress only. Nothing has any reason to connect *to* a migration.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: migrate
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: migrate
+    app.kubernetes.io/component: migration
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: migrate
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Egress
+  egress:
+    # PostgreSQL, and only PostgreSQL. The Job reads DATABASE_URL and
+    # nothing else — no Redis, no processor, no collector — so this is the
+    # whole of what it needs.
+    #
+    # The destination is left open here for the same reason as in the
+    # gateway's policy: the base cannot know where the database is. The
+    # deployed component narrows it to private address space. Link-local is
+    # excluded so a migration cannot reach cloud instance metadata.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16
+      ports:
+        - protocol: TCP
+          port: 5432

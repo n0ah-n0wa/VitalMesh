@@ -1,0 +1,52 @@
+# What every deployed environment has and the base does not.
+#
+# A kustomize Component rather than a second base, because staging and
+# production are not variations on each other — they are the same shape at
+# different sizes. Everything that is identical between them lives here and
+# is written once; each overlay then states only what genuinely differs:
+# its domain, its sizes, its replica counts and where its secrets come
+# from. The local overlay does not include this component, which is what
+# makes it local.
+#
+# Three things are true of any environment reached from outside:
+#
+#   - traffic arrives through an ingress, so the gateway sits behind a
+#     proxy and must be told so;
+#   - the ingress controller must be allowed through the default-deny
+#     NetworkPolicy;
+#   - credentials come from outside git, so the base's empty placeholder
+#     Secrets must not be applied over them.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+
+resources:
+  - ingress.yaml
+
+patches:
+  - path: configmap-proxy-patch.yaml
+  - path: imagepullpolicy-patch.yaml
+  - path: networkpolicy-ingress-patch.yaml
+  - path: networkpolicy-egress-patch.yaml
+  - path: networkpolicy-processor-egress-patch.yaml
+  - path: networkpolicy-migrate-egress-patch.yaml
+  # Deleting the placeholders is the important one. The base ships two
+  # Secrets with no data so that the required key names are reviewable. In
+  # a deployed environment the real Secret is created by something else,
+  # and applying an empty object of the same name over it would replace
+  # working credentials with nothing — an outage caused by a deploy that
+  # reported success.
+  #
+  # Written inline against a target selector rather than as a patch file.
+  # kustomize v5.4.3 segfaults on a multi-document file containing
+  # `$patch: delete`, and one selector matching both Secrets says the same
+  # thing in less space anyway.
+  - target:
+      version: v1
+      kind: Secret
+      name: "vitalmesh-(api-gateway|processor)"
+    patch: |
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: placeholder
+      $patch: delete

@@ -1,0 +1,120 @@
+# Autoscaling for both services. Section 36 requires it for the Rust
+# processor; the gateway gets the same treatment because it is the tier that
+# absorbs the arrival rate.
+#
+# minReplicas is 2, which section 36 states as the target architecture and
+# which is also what makes the PodDisruptionBudgets and the maxUnavailable:
+# 0 rollout strategy mean anything: one replica cannot be rolled without an
+# outage. maxReplicas is 10 here and is expected to differ per environment
+# (section 36: "the exact values must be environment-specific"); an overlay
+# that runs on one small node should lower it rather than discover the
+# ceiling by scheduling failures.
+#
+# CPU is the only metric. Memory was considered and left out on purpose:
+#
+#   - the gateway is Go, and a garbage-collected runtime does not return
+#     resident memory promptly. Utilisation stays high after a burst of
+#     Argon2id hashing, so a memory target scales up readily and comes back
+#     down slowly or not at all — a ratchet, not a signal.
+#   - the processor's memory is a function of how many jobs it has admitted,
+#     and admission is already bounded by MAX_CONCURRENT_JOBS. It refuses
+#     work with 503 and Retry-After when saturated, so memory is close to a
+#     constant and near-useless as a scaling signal.
+#
+# OQ-25 permits CPU and memory, and points at custom Prometheus metrics
+# through an adapter if CPU turns out to be a poor signal. Queue saturation
+# is the metric that would actually describe the processor's load; adding it
+# needs the adapter, so it is left for when there is evidence rather than
+# guessed at now.
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: api-gateway
+    app.kubernetes.io/component: gateway
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vitalmesh-api-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          # Against the request (200m), not the limit. 70% leaves headroom
+          # for the time it takes a new pod to start and pass its probes.
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      # React immediately: the cost of an extra gateway pod is small and the
+      # cost of queuing behind a saturated one is paid by every caller.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Five minutes of sustained quiet before giving capacity back, so a
+      # gap between bursts does not remove the pods the next burst needs.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 60
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: vitalmesh-processor
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Longer than the gateway's. A job may run for PROCESSING_TIMEOUT
+      # (5m), and removing a pod that is mid-job cancels the work; the
+      # window is set so that scale-down waits out a job rather than
+      # interrupting one.
+      stabilizationWindowSeconds: 600
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

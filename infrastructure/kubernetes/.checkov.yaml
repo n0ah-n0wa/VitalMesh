@@ -1,0 +1,51 @@
+# Checkov's configuration for the rendered manifests.
+#
+# It is the fourth scanner over these files and it earned its place: it was
+# the only one to notice that the local fixtures ran as low uids, and the
+# only one to argue about image pull policy. Both were acted on. What is
+# left below are three checks this repository disagrees with, for reasons,
+# rather than three checks that were inconvenient.
+
+framework:
+  - kubernetes
+
+skip-check:
+  # CKV_K8S_15 "Image Pull Policy should be Always"
+  #
+  # Staging and production do set Always — the shared component patches it
+  # in, because a release rebuilt on a patched base image under an existing
+  # tag would otherwise be served stale from a node's cache.
+  #
+  # The base and the local overlay cannot. Local images are side-loaded into
+  # the kind node with `kind load` and exist in no registry at all, so
+  # Always would make the kubelet try to pull one and fail. The check has no
+  # per-environment form, so it is skipped and the policy is asserted by the
+  # local test suite instead, which would not start if it were wrong.
+  - CKV_K8S_15
+
+  # CKV_K8S_35 "Prefer using secrets as files over secrets as environment
+  # variables"
+  #
+  # The preference is correct and this is the one finding here that is not
+  # fixed. An environment variable is readable through /proc/<pid>/environ,
+  # is inherited by children, and tends to surface in crash dumps; a mounted
+  # file can also be rotated without restarting the pod.
+  #
+  # Acting on it is an application change, not a manifest one. Neither
+  # service can read a secret from a file — both take configuration from the
+  # environment only — so mounting one would produce a file nothing reads.
+  # Recorded as accepted, with the fix belonging to the services'
+  # configuration layers. kube-linter's read-secret-from-env-var says the
+  # same thing and is excluded there for the same reason.
+  - CKV_K8S_35
+
+  # CKV_K8S_43 "Image should use digest"
+  #
+  # A digest is the stricter identifier and Checkov is right that it is
+  # better. SPECIFICATIONS.md section 32 is the authority here and asks for
+  # an immutable identifier, recommending `service:<git-sha>`, which is what
+  # the deployment pipeline sets. Overriding the specification's own
+  # recommendation to satisfy a scanner is not a decision this review gets
+  # to make; moving to digests is a change to make deliberately, in the
+  # pipeline, with section 32 updated to match.
+  - CKV_K8S_43

@@ -1,0 +1,15 @@
+# Behind an ingress the connection the gateway sees comes from the
+# controller, not the caller, so the client address has to be taken one hop
+# back through X-Forwarded-For. Without this every request appears to come
+# from the same address and rate limiting counts the whole internet as one
+# caller.
+#
+# One hop, not more: each additional hop trusted is an address the caller
+# could have written themselves.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vitalmesh-api-gateway
+  namespace: vitalmesh
+data:
+  TRUSTED_PROXY_HOPS: "1"

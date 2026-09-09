@@ -1,0 +1,148 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vitalmesh-processor
+  namespace: vitalmesh
+  labels:
+    app.kubernetes.io/name: processor
+    app.kubernetes.io/component: processor
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  # Owned by the HorizontalPodAutoscaler; see the note in the gateway
+  # Deployment for why it is not written here.
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: processor
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: processor
+        app.kubernetes.io/component: processor
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      serviceAccountName: vitalmesh-processor
+      # Kubernetes injects an environment variable for every Service in the
+      # namespace into every container, a compatibility feature from before
+      # DNS. It tells a process more about its neighbours than it needs and
+      # grows with the namespace; both services find each other by DNS.
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+
+      # Longer than the gateway's because the work is longer. On SIGTERM
+      # the processor reports not ready, stops admitting jobs, and gives
+      # running ones SHUTDOWN_TIMEOUT (30s) to finish before cancelling
+      # them. 60s covers that plus the 5s preStop pause and leaves room,
+      # so the kubelet does not SIGKILL a job that was about to complete.
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: processor
+              app.kubernetes.io/part-of: vitalmesh
+
+      containers:
+        - name: processor
+          # Replaced by an overlay; see the gateway Deployment.
+          image: vitalmesh/processor:unset
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+
+          envFrom:
+            - configMapRef:
+                name: vitalmesh-processor
+
+          env:
+            - name: INTERNAL_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: vitalmesh-processor
+                  key: INTERNAL_TOKEN
+
+          resources:
+            # The container idles at 6 MiB; its size is set by the work it
+            # admits, not by its baseline. MAX_CONCURRENT_JOBS (4) jobs of
+            # MAX_JOB_MEASUREMENTS (100k) readings at ~128 bytes is ~51 MB
+            # of readings, each arriving in a body of up to
+            # HTTP_MAX_BODY_BYTES (16 MiB), so ~115 MB before the cost of
+            # turning JSON into structures. The limit is set well clear of
+            # that sum because being OOMKilled four minutes into a
+            # five-minute job loses the work; all three inputs are in the
+            # ConfigMap.
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              # This is the compute half of the system and the signal the
+              # HPA scales on. A tight CPU limit would throttle a job
+              # rather than fail it, which shows up as unexplained latency
+              # instead of a scaling event.
+              cpu: "2"
+              memory: 1Gi
+
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 30
+          # As with the gateway, liveness asks only whether the process
+          # answers. The processor has no external dependency to be down.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          # /ready here reflects lifecycle rather than dependencies: it
+          # turns true once the listener is bound and false the instant
+          # shutdown begins. That is what takes a draining pod out of the
+          # Service before it stops accepting, and it is why the same
+          # endpoint must not be used for liveness — a draining pod would
+          # otherwise be restarted while it finished its jobs.
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            capabilities:
+              drop:
+                - ALL
