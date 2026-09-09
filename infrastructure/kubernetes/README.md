@@ -121,6 +121,13 @@ contained.
 | `trivy config` | does anything trip a known Kubernetes misconfiguration |
 | `checkov` | the same question from a different engine, which disagrees usefully |
 
+kubeconform downloads a JSON schema per resource per Kubernetes version,
+so a full run would otherwise make around a hundred HTTPS requests and a
+single refused fetch fails the gate for a reason that has nothing to do
+with the manifests — which is what happened in CI once. The runs share a
+schema cache and retry a fetch error twice, and a failure prints the
+resource and the reason rather than only a count.
+
 Every built-in kube-linter check is enabled; `.kube-linter.yaml` lists the
 exclusions and argues each one. `.trivyignore.yaml` carries a single
 suppression, for a rule that reads the word `PASSWORD` in an Argon2id

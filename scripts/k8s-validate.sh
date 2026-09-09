@@ -55,6 +55,7 @@ TARGETS="base overlays/local overlays/staging overlays/production"
 failures=0
 ok()   { printf '  ok    %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; failures=$((failures + 1)); }
+note() { printf '        %s\n' "$1"; }
 
 # Docker on Windows needs a Windows path; MSYS hands this script a POSIX
 # one. cygpath -m gives C:/like/this, which Docker accepts on both.
@@ -104,7 +105,7 @@ for target in $TARGETS; do
     slug="$(printf '%s' "$target" | tr '/' '-')"
     for version in $K8S_VERSIONS; do
         # -strict rejects unknown fields; -summary keeps the output to a
-        # line.
+        # line; -verbose is what makes a failure say which resource.
         #
         # The `tail` that trims the summary is deliberately not part of
         # this pipeline. A pipeline's status in POSIX sh is its last
@@ -112,23 +113,44 @@ for target in $TARGETS; do
         # tail's success and this gate could never fail — which is how it
         # was first written, and what a deliberately invalid manifest
         # caught.
-        out="$(docker run --rm -i "$KUBECONFORM_IMAGE" \
-            -strict -summary -kubernetes-version "$version" - \
-            < "$RENDER_DIR/$slug.yaml" 2>&1)" && rc=0 || rc=$?
-        summary="$(printf '%s' "$out" | tail -1)"
+        #
+        # Retried, because kubeconform downloads a JSON schema per resource
+        # per version — around sixty HTTPS requests a run — and one refused
+        # fetch is reported as an Error, failing the gate for a reason that
+        # has nothing to do with the manifests. That is what CI hit: 27
+        # valid, 1 error, on a tree that validates cleanly here.
+        #
+        # Only an Error is retried. Invalid means kubeconform read the
+        # resource and disagreed with it, and repeating that would take
+        # longer to reach the same answer.
+        attempt=1
+        while [ "$attempt" -le 3 ]; do
+            out="$(docker run --rm -i -v vitalmesh-kubeconform:/cache "$KUBECONFORM_IMAGE" \
+                -strict -summary -verbose -cache /cache \
+                -kubernetes-version "$version" - \
+                < "$RENDER_DIR/$slug.yaml" 2>&1)" && rc=0 || rc=$?
+            summary="$(printf '%s' "$out" | tail -1)"
+            printf '%s' "$summary" | grep -q 'Errors: [1-9]' || break
+            [ "$attempt" -eq 3 ] && break
+            note "$target on $version: a schema fetch failed, retrying"
+            attempt=$((attempt + 1))
+        done
 
         # Exit code and summary are both checked. Either would do today;
         # together they survive a tool that changes which one it reports
         # through. A skipped resource is one no schema was found for, so
         # nothing validated it at all.
-        if [ "$rc" -ne 0 ]; then
+        #
+        # Every failure prints the whole output. The first version printed
+        # only the summary, so CI reported "Errors: 1" and nothing about
+        # which resource or why — a gate that fails without saying what
+        # failed costs more than it saves.
+        if [ "$rc" -ne 0 ] ||
+           ! printf '%s' "$summary" | grep -q 'Invalid: 0' ||
+           ! printf '%s' "$summary" | grep -q 'Errors: 0' ||
+           ! printf '%s' "$summary" | grep -q 'Skipped: 0'; then
             fail "$target on $version: $summary"
-        elif ! printf '%s' "$summary" | grep -q 'Invalid: 0'; then
-            fail "$target on $version: $summary"
-        elif ! printf '%s' "$summary" | grep -q 'Errors: 0'; then
-            fail "$target on $version: $summary"
-        elif ! printf '%s' "$summary" | grep -q 'Skipped: 0'; then
-            fail "$target on $version: resources were skipped, so nothing checked them"
+            printf '%s\n' "$out" | grep -viE ' is valid$' | sed 's/^/        /'
         else
             ok "$target on $version: $(printf '%s' "$summary" | sed 's/^Summary: //')"
         fi
