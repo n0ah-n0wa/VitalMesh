@@ -1,0 +1,34 @@
+# What never enters the build context.
+#
+# Two reasons. A smaller context is a faster build, but the important one is
+# that anything sent here can end up in a layer, and a layer is readable by
+# anyone who can pull the image. The safe default is to send only what the
+# build needs.
+
+# Local secrets and environment files (SPECIFICATIONS.md section 31). The
+# build needs no credential and is given none.
+.env
+.env.*
+*.pem
+*.key
+
+# Build output: rebuilt inside the image, and a stale copy here would be
+# sent over the wire for nothing. This directory is the largest thing in
+# the repository by far.
+target/
+
+# Integration tests and their fixtures. The image ships a binary; these run
+# in CI. Cargo discovers tests/ automatically, so leaving it out costs the
+# build nothing.
+#
+# benches/ is deliberately NOT excluded: Cargo.toml declares the two
+# benchmarks as explicit targets, and Cargo refuses to parse a manifest
+# whose declared target files are missing, so excluding them breaks the
+# build rather than shrinking it.
+tests/
+
+# Documentation and editor state.
+*.md
+.vscode/
+.idea/
+.DS_Store

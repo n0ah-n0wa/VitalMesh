@@ -1,0 +1,32 @@
+# What never enters the build context.
+#
+# Two reasons. A smaller context is a faster build, but the important one is
+# that anything sent here can end up in a layer, and a layer is readable by
+# anyone who can pull the image. The safe default is to send only what the
+# build needs.
+
+# Local secrets and environment files (SPECIFICATIONS.md section 31). The
+# build needs no credential and is given none.
+.env
+.env.*
+*.pem
+*.key
+
+# Build outputs and caches: rebuilt inside the image, and stale copies here
+# would silently shadow them.
+bin/
+*.test
+*.out
+*.prof
+
+# Tests and their fixtures. The image ships a binary, not a test suite; the
+# tests run in CI, not in the runtime image.
+**/*_test.go
+**/testdata/
+tests/
+
+# Documentation and editor state.
+*.md
+.vscode/
+.idea/
+.DS_Store

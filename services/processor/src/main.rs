@@ -1,5 +1,12 @@
 //! VitalMesh processor service binary.
 //!
+//! Usage:
+//!
+//!   processor                run the HTTP server
+//!   processor healthcheck    probe this process's own /health and exit 0
+//!                            when it answers; the container image has no
+//!                            shell to probe it with
+//!
 //! Exit codes: 0 on clean shutdown, 1 on a runtime failure, 2 on invalid
 //! configuration.
 
@@ -14,6 +21,13 @@ use processor::{SERVICE_NAME, VERSION, lifecycle};
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // The one argument this binary takes. The runtime image has no shell to
+    // probe the server with, so the binary probes itself; see
+    // `processor::healthcheck`.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        return ExitCode::from(processor::healthcheck::run().await);
+    }
+
     let config = match Config::from_env() {
         Ok(config) => config,
         Err(error) => {

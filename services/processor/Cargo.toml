@@ -17,7 +17,11 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # Metrics: the protobuf and push features are not used, so they are off.
 prometheus = { version = "0.14", default-features = false }
 time = { version = "0.3", default-features = false, features = ["std", "parsing", "formatting"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
+# io-util is needed by the healthcheck argument, which writes an HTTP
+# request to its own socket. It is listed here rather than left to the
+# dev-dependency below, because a feature that only the test build enables
+# makes `cargo test` pass while `cargo build` fails.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time", "io-util"] }
 tokio-util = { version = "0.7", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "std"] }

@@ -212,6 +212,43 @@ A feature is an application package (`patient` is the template) with a `Service`
 - **Idempotency locks** (section 24, OQ-10) are the ephemeral coordination of section 23. A `SET NX PX` lock lets a concurrent replay be refused without a database round trip; the unique constraint on `(account, method, path, key)` is what actually serialises replays. A lock that cannot be consulted is skipped, and an integration test runs the whole idempotency contract three times, with Redis, with Redis unreachable and with none configured, to show the outcomes are identical.
 - **Tests.** Everything above is tested against a real Redis (`make dev-redis`, `TEST_REDIS_URL`), with each test in its own key namespace, plus a failure path for each feature against an address nothing listens on.
 
+## Container image
+
+```bash
+make docker-build      # both service images
+make docker-verify     # non-root, no shell, healthy
+make docker-scan       # Trivy, failing on HIGH or CRITICAL
+```
+
+Two stages. The builder has a Go toolchain; the runtime has the binary and
+nothing else. The runtime base is `distroless/static`, which carries a CA
+bundle, timezone data and `/etc/passwd`: no shell, no package manager, no
+libc, because the binary is static with CGO off.
+
+**Non-root.** The image declares uid 65532 and the verification asserts the
+uid the kernel reports for the running process, not the one the image asked
+for. The container runs under `--read-only --cap-drop=ALL --security-opt
+no-new-privileges`, which the same check proves by starting it that way.
+
+**Health check.** The image has no shell to run a probe with, so the binary
+probes itself: `api-gateway healthcheck` opens `/health` on its own port and
+exits 0 when it answers. It checks liveness, not readiness, because a
+container waiting for its database is not one Docker should restart;
+Kubernetes uses separate probes against `/health` and `/ready`.
+
+**Deterministic and reproducible.** Dependencies come from `go.sum` under
+`-mod=readonly`, so a build that would amend its own lock file fails
+instead. `-trimpath` and `-buildvcs=false` keep the build machine's paths
+and git state out of the binary: building the same commit twice produces the
+same bytes, which was checked by building twice from scratch and comparing
+the binary's hash. Both base images are pinned by digest, so a rebuild
+months from now uses the same bytes and a scan result stays meaningful.
+
+**No secrets.** The build takes one argument, `VERSION`, which carries a git
+description. Nothing else is passed, `.dockerignore` keeps `.env` files and
+keys out of the context, and the verification fails on a credential-shaped
+string in the build history or the image environment.
+
 ## Observability hooks
 
 - **Metrics** (`observability/metrics.Recorder`): `middleware.Metrics` records every request as method, matched route pattern, status and duration; services record each operation with a closed outcome vocabulary (`ok`, `invalid`, `not_found`, `conflict`, `denied`, `error`, `cancelled`). Route patterns come from the router, never from request paths, so labels stay bounded and identifiers never become labels (SPECIFICATIONS.md section 41). `Noop` is wired until the observability phase binds Prometheus.

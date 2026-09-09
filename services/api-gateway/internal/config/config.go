@@ -213,6 +213,11 @@ const DefaultAlgorithmVersion = "1.0.0"
 // contracts/internal-api/processor-v1.json this gateway is built against.
 const InternalContractVersion = "1.1.1"
 
+// DefaultHTTPAddr is where the server listens when HTTP_ADDR is not set.
+// It is exported so that the health-check command reaches the same port the
+// server binds, and the two cannot disagree.
+const DefaultHTTPAddr = ":8080"
+
 // Bounds enforced on Redis-backed settings.
 const (
 	MaxRedisNamespaceLength = 64
@@ -369,7 +374,7 @@ func Load(lookup Lookup) (Config, error) {
 	cfg := Config{
 		Environment: Environment(p.string("ENVIRONMENT", string(Local))),
 		HTTP: HTTP{
-			Addr:              p.string("HTTP_ADDR", ":8080"),
+			Addr:              p.string("HTTP_ADDR", DefaultHTTPAddr),
 			ReadHeaderTimeout: p.duration("HTTP_READ_HEADER_TIMEOUT", 5*time.Second),
 			ReadTimeout:       p.duration("HTTP_READ_TIMEOUT", 10*time.Second),
 			WriteTimeout:      p.duration("HTTP_WRITE_TIMEOUT", 15*time.Second),

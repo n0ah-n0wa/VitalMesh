@@ -27,8 +27,12 @@ jobs:
           POSTGRES_DB: vitalmesh
         ports:
           - 5432:5432
+        # -h 127.0.0.1 for the same reason as in docker-compose.yml: without
+        # a host pg_isready uses the unix socket, which the temporary server
+        # initdb runs is already listening on, so the check can pass before
+        # anything is on TCP. Every client here connects over TCP.
         options: >-
-          --health-cmd "pg_isready -U vitalmesh -d vitalmesh"
+          --health-cmd "pg_isready -h 127.0.0.1 -U vitalmesh -d vitalmesh"
           --health-interval 2s
           --health-timeout 3s
           --health-retries 15
@@ -59,3 +63,31 @@ jobs:
           rustup default "$channel"
 
       - run: make verify
+
+  # Images are built and checked on their own, not inside `make verify`: the
+  # verification gates must stay runnable without a container runtime, and a
+  # slow image build must not sit in front of the tests.
+  containers:
+    name: images
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Build both images
+        run: make docker-build
+
+      # A Dockerfile can declare a non-root user and still ship a container
+      # that runs as root. This asserts the properties against real
+      # containers: the uid the kernel sees, a read-only root filesystem, no
+      # shell to exec into, and the image's own health check going healthy.
+      - name: Verify the containers
+        run: make docker-verify
+
+      # Fails the build on a HIGH or CRITICAL finding. A base image picks up
+      # vulnerabilities over time without the code changing, so this is the
+      # check that ages, and it is meant to.
+      - name: Scan the images and the lock files
+        run: make docker-scan

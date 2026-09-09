@@ -23,6 +23,7 @@ pub mod config;
 pub mod domain;
 pub mod engine;
 pub mod error;
+pub mod healthcheck;
 pub mod jobs;
 pub mod lifecycle;
 pub mod metrics;

@@ -25,7 +25,26 @@ TEST_DATABASE_URL ?= postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?ssl
 # keys, so one server serves them all.
 TEST_REDIS_URL ?= redis://localhost:6379
 
-.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke
+# Container images.
+#
+# The tag defaults to `dev`, which is what docker-compose.yml builds, so
+# every target here acts on the images the local environment actually runs.
+# They used to disagree: the Makefile tagged by commit and compose tagged
+# `dev`, so `make docker-verify` checked images nobody was running. Set
+# IMAGE_TAG to publish under a commit or a release instead; the binary is
+# stamped with VERSION either way.
+IMAGE_TAG       ?= dev
+GATEWAY_IMAGE   ?= vitalmesh/api-gateway:$(IMAGE_TAG)
+PROCESSOR_IMAGE ?= vitalmesh/processor:$(IMAGE_TAG)
+# Pinned: a scanner that changes under you turns a clean run into a failure
+# that has nothing to do with the code.
+TRIVY_IMAGE     ?= aquasec/trivy:0.58.2
+TRIVY           := docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v vitalmesh-trivy:/root/.cache/trivy $(TRIVY_IMAGE)
+TRIVY_FS        := docker run --rm -v vitalmesh-trivy:/root/.cache/trivy
+TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
+TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
+
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan up down demo
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -72,20 +91,62 @@ dev-db: ## Start the local PostgreSQL used by development and integration tests
 dev-redis: ## Start the local Redis used by development and integration tests
 	docker compose up -d --wait redis
 
-observability-up: ## Start Prometheus, Grafana and the OpenTelemetry collector
-	docker compose --profile observability up -d --wait prometheus grafana otel-collector
+# One build definition, in docker-compose.yml, rather than two that drift
+# apart. Compose owns the build arguments and the tags; this delegates so
+# that what is verified and scanned is what `docker compose up` runs.
+docker-build: ## Build the two service images
+	IMAGE_TAG=$(IMAGE_TAG) VERSION=$(VERSION) docker compose build api-gateway processor
+
+docker-verify: ## Check the images run as non-root, carry no shell and report healthy
+	GATEWAY_IMAGE="$(GATEWAY_IMAGE)" PROCESSOR_IMAGE="$(PROCESSOR_IMAGE)" sh scripts/container-verify.sh
+
+# Three scans, because none of them sees everything.
+#
+#   image   the operating system packages and the Go binary, which carries
+#           its own module list
+#   config  the two service Dockerfiles. It is scoped to them rather than
+#           run over the repository, because .devcontainer/Dockerfile is a
+#           toolchain image that runs as root on purpose and is never
+#           shipped; failing this gate on it would train people to ignore it
+#   source  the dependency lock files, which is the only place the Rust
+#           crates are visible: unlike a Go binary, a Rust binary carries no
+#           list of what went into it
+docker-scan: ## Scan the images and the dependency lock files for known vulnerabilities
+	@echo "== images: operating system packages and the Go binary =="
+	$(TRIVY) image $(TRIVY_VULN) $(GATEWAY_IMAGE)
+	$(TRIVY) image $(TRIVY_VULN) $(PROCESSOR_IMAGE)
+	@echo "== the service Dockerfiles =="
+	$(TRIVY_FS) -v "$(CURDIR)/$(GO_DIR):/scan" $(TRIVY_IMAGE) config $(TRIVY_SEVERITY) /scan
+	$(TRIVY_FS) -v "$(CURDIR)/$(RUST_DIR):/scan" $(TRIVY_IMAGE) config $(TRIVY_SEVERITY) /scan
+	@echo "== source: the dependency lock files, which cover the Rust crates =="
+	$(TRIVY_FS) -v "$(CURDIR):/repo" $(TRIVY_IMAGE) fs --scanners vuln,secret $(TRIVY_SEVERITY) /repo
+
+up: ## Start the whole local environment (the same as: docker compose up -d --wait)
+	docker compose up -d --wait
+	@echo "Gateway    http://localhost:8080"
+	@echo "Grafana    http://localhost:3000"
+	@echo "Demo       ./scripts/demo.sh"
+
+down: ## Stop the environment, keeping the database volume
+	docker compose down
+
+observability-up: ## Start only Prometheus, Grafana and the OpenTelemetry collector
+	docker compose up -d --wait prometheus grafana otel-collector
 	@echo "Grafana    http://localhost:3000"
 	@echo "Prometheus http://localhost:9090"
 	@echo "Collector  OTLP/HTTP on http://localhost:4318 (set OTEL_EXPORTER_OTLP_ENDPOINT to it)"
 
-observability-down: ## Stop the observability stack, leaving the database and Redis running
-	docker compose --profile observability rm -sf prometheus grafana otel-collector
+observability-down: ## Stop the observability stack, leaving the services running
+	docker compose rm -sf prometheus grafana otel-collector
+
+demo: ## Run the guided demo against the running environment
+	sh scripts/demo.sh
 
 observability-smoke: ## Check the running stack is scraping, recording and receiving spans
 	sh scripts/observability-smoke.sh
 
-dev-db-down: ## Stop and remove the local infrastructure
-	docker compose down
+dev-db-down: ## Stop the environment and discard its volumes
+	docker compose down -v
 
 migrate: ## Apply pending migrations to DATABASE_URL (defaults to the local database)
 	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/api-gateway migrate up

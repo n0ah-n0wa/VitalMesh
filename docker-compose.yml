@@ -1,23 +1,66 @@
-# Local infrastructure. Application services join this file as they gain
-# container images (see docs/IMPLEMENTATION_PLAN.md, Phase 2).
+# The complete local environment: both services, their dependencies, and the
+# observability stack that watches them.
 #
-#   docker compose up -d --wait postgres redis
+#   docker compose up
 #
-# The credentials below are for local development only.
+# That is the whole command. It builds both images, waits for PostgreSQL and
+# Redis to be healthy, applies the migrations, and starts everything else in
+# the right order. Nothing needs to be set first: every value below has a
+# development default, so a clean checkout starts.
+#
+# A subset works too, because nothing depends on more than it needs:
+#
+#   docker compose up -d --wait postgres redis      # what the tests need
+#   docker compose up -d --wait api-gateway         # and its dependencies
+#
+# The observability stack is not a dependency of either service. They export
+# metrics whether or not Prometheus scrapes them, and traces to a collector
+# that may not be running (SPECIFICATIONS.md sections 40 and 41), so
+# starting the services without it is a supported way to run.
+#
+# Credentials here are development values, chosen to be obviously local and
+# useless anywhere else. Nothing in this file is a secret: see .env.example
+# for how to override them, and section 31 for what a deployment must do
+# instead.
+#
+# Every published port is bound to 127.0.0.1. Docker's default is every
+# interface, which would put PostgreSQL, an unauthenticated Redis and an
+# anonymous Grafana on whatever network the machine happens to be on. These
+# ports are for the person at the keyboard, so that is who can reach them.
+
+# A fixed project name, so container and network names do not depend on the
+# directory the repository happens to sit in.
+name: vitalmesh
+
 services:
+  # ------------------------------------------------------------ data
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: vitalmesh
-      POSTGRES_PASSWORD: vitalmesh
-      POSTGRES_DB: vitalmesh
+      POSTGRES_USER: ${POSTGRES_USER:-vitalmesh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vitalmesh}
+      POSTGRES_DB: ${POSTGRES_DB:-vitalmesh}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      # The record of truth, so it survives `docker compose down`. Use
+      # `down -v` to discard it and start from an empty schema.
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vitalmesh -d vitalmesh"]
+      # -h 127.0.0.1 is what makes this check mean anything. Without a host
+      # pg_isready uses the unix socket, and while initdb runs on a fresh
+      # volume the entrypoint has a temporary server listening on that
+      # socket alone. The check then passes, dependants start, and they are
+      # refused because nothing is on TCP yet. Every client here connects
+      # over TCP, so the check has to as well.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U ${POSTGRES_USER:-vitalmesh} -d ${POSTGRES_DB:-vitalmesh}"]
       interval: 2s
       timeout: 3s
       retries: 15
+      # Time for initdb on a fresh volume before a failure counts against
+      # the retry budget.
+      start_period: 10s
+    restart: unless-stopped
 
   # Ephemeral shared state only: rate-limit counters, short-lived cache
   # entries and idempotency locks (SPECIFICATIONS.md section 23). Nothing
@@ -27,30 +70,137 @@ services:
     image: redis:7-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
       timeout: 3s
       retries: 15
+    restart: unless-stopped
 
-  # ------------------------------------------------------ observability
-  #
-  # Everything below is behind the `observability` profile, so the ordinary
-  # `docker compose up -d --wait postgres redis` does not start it and no
-  # test, build or verification gate depends on it. The application does not
-  # know whether any of it is running: metrics are served whether or not
-  # anyone scrapes them, and traces are exported to a collector that may or
-  # may not exist (SPECIFICATIONS.md sections 40 and 41).
-  #
-  #   docker compose --profile observability up -d --wait
-  #
-  # The services themselves run as host processes during development, so
-  # Prometheus reaches them through host.docker.internal, which
-  # `extra_hosts` makes resolvable on Linux as well as Docker Desktop.
+  # ------------------------------------------------------- application
+  # Migrations run as their own service and exit. The gateway waits for it
+  # to succeed rather than migrating on start-up, because several gateway
+  # replicas starting at once must not race each other through the schema.
+  migrate:
+    build:
+      context: ./services/api-gateway
+      args:
+        VERSION: ${VERSION:-dev}
+    image: vitalmesh/api-gateway:${IMAGE_TAG:-dev}
+    # Rebuilt on every `up`. Without this compose reuses whatever image
+    # already carries the tag, so editing the source and running the
+    # documented command would silently run the previous binary. A cached
+    # rebuild costs a second or two; running yesterday's code costs an
+    # afternoon.
+    pull_policy: build
+    command: ["migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-vitalmesh}:${POSTGRES_PASSWORD:-vitalmesh}@postgres:5432/${POSTGRES_DB:-vitalmesh}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # A one-shot job: run it, let it exit, and do not bring it back.
+    restart: "no"
+
+  processor:
+    build:
+      context: ./services/processor
+      args:
+        VERSION: ${VERSION:-dev}
+    image: vitalmesh/processor:${IMAGE_TAG:-dev}
+    # Rebuilt on every `up`. Without this compose reuses whatever image
+    # already carries the tag, so editing the source and running the
+    # documented command would silently run the previous binary. A cached
+    # rebuild costs a second or two; running yesterday's code costs an
+    # afternoon.
+    pull_policy: build
+    environment:
+      HTTP_ADDR: 0.0.0.0:8081
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      INTERNAL_TOKEN: ${PROCESSOR_TOKEN:-local-development-internal-token}
+      # Without a rule set the engine detects nothing, so a local
+      # environment with none looks like a broken detector rather than an
+      # unconfigured one. These are development bounds for a demonstration,
+      # not clinical thresholds; a deployment supplies its own.
+      #
+      # It is written literally rather than as ${VAR:-default} because the
+      # value contains braces, which would end the substitution early.
+      ANOMALY_RULES: '{"rules":[{"name":"heart-rate-bounds","kind":"THRESHOLD","measurement_types":["HEART_RATE"],"tiers":{"warning":{"lower":50,"upper":100},"critical":{"lower":40,"upper":150}}}]}'
+      # Tracing is optional: with the collector stopped the service still
+      # propagates trace context and logs trace ids, and exports nothing.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+    ports:
+      - "127.0.0.1:${PROCESSOR_PORT:-8081}:8081"
+    # The health check comes from the image: the runtime has no shell, so
+    # the binary probes itself. Inheriting it here is deliberate, so the
+    # image's own check is what compose waits on.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      args:
+        VERSION: ${VERSION:-dev}
+    image: vitalmesh/api-gateway:${IMAGE_TAG:-dev}
+    # Rebuilt on every `up`. Without this compose reuses whatever image
+    # already carries the tag, so editing the source and running the
+    # documented command would silently run the previous binary. A cached
+    # rebuild costs a second or two; running yesterday's code costs an
+    # afternoon.
+    pull_policy: build
+    environment:
+      HTTP_ADDR: 0.0.0.0:8080
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_FORMAT: ${LOG_FORMAT:-json}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgres://${POSTGRES_USER:-vitalmesh}:${POSTGRES_PASSWORD:-vitalmesh}@postgres:5432/${POSTGRES_DB:-vitalmesh}?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      # Local only. A deployment supplies a real value; start-up refuses a
+      # short one, and the value is never logged (section 31).
+      JWT_SECRET: ${JWT_SECRET:-local-development-signing-key-not-a-secret}
+      PROCESSOR_URL: http://processor:8081
+      PROCESSOR_TOKEN: ${PROCESSOR_TOKEN:-local-development-internal-token}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
+    ports:
+      - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      processor:
+        condition: service_healthy
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  # --------------------------------------------------- observability
+  # Not a dependency of anything above. Stopping all three leaves both
+  # services working, which is the property that matters.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.117.0
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./observability/otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP, which both services use
+      - "127.0.0.1:8888:8888"   # the collector's own metrics
+    # No health check: the image carries no shell or wget to run one with,
+    # and a check that cannot run is worse than none. `up --wait` treats a
+    # container with no health check as ready once it is running.
+    restart: unless-stopped
 
   prometheus:
-    profiles: ["observability"]
     image: prom/prometheus:v3.1.0
     command:
       - --config.file=/etc/prometheus/prometheus.yml
@@ -59,18 +209,17 @@ services:
     volumes:
       - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
     ports:
-      - "9090:9090"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+      - "127.0.0.1:9090:9090"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
       interval: 2s
       timeout: 3s
       retries: 30
+    restart: unless-stopped
 
   grafana:
-    profiles: ["observability"]
     image: grafana/grafana:11.5.1
     environment:
       # Local only: an unauthenticated Grafana is convenient on a laptop and
@@ -84,8 +233,9 @@ services:
     volumes:
       - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     depends_on:
       prometheus:
         condition: service_healthy
@@ -94,19 +244,19 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+    restart: unless-stopped
 
-  otel-collector:
-    profiles: ["observability"]
-    image: otel/opentelemetry-collector-contrib:0.117.0
-    command: ["--config=/etc/otel/collector.yaml"]
-    volumes:
-      - ./observability/otel/collector.yaml:/etc/otel/collector.yaml:ro
-    ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP, which both services use
-      - "8888:8888"   # the collector's own metrics
-    # No healthcheck: the image carries no shell or wget to run one with, and
-    # a check that cannot run is worse than none. `docker compose up --wait`
-    # treats a container with no healthcheck as ready once it is running, and
-    # the smoke test verifies the collector for real by asking it for its
-    # metrics.
+volumes:
+  # Development data that is worth keeping across a restart. Redis has none
+  # on purpose: nothing it holds is a record of truth.
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  # One network for the project, named rather than derived from the
+  # directory, so that a container joining it from outside compose can name
+  # it. Only the ports published above are reachable from the host;
+  # everything else talks over this network by service name.
+  default:
+    name: vitalmesh

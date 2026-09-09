@@ -10,6 +10,9 @@
 //	api-gateway users create <email> <role>
 //	                                    create an account; the password is read
 //	                                    from standard input
+//	api-gateway healthcheck             probe this process's own /health and
+//	                                    exit 0 when it answers; the container
+//	                                    image has no shell to probe it with
 //
 // Exit codes: 0 on success, 1 on a runtime failure, 2 on invalid
 // configuration or usage.
@@ -53,6 +56,8 @@ func run(args []string, stdin io.Reader) int {
 		return migrate(args[1:])
 	case "users":
 		return users(args[1:], stdin)
+	case "healthcheck":
+		return healthcheck()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q; see the package documentation\n", args[0])
 		return 2
@@ -117,7 +122,7 @@ func migrate(args []string) int {
 
 	switch args[0] {
 	case "up":
-		err = m.Up()
+		err = applyAndReport(m, m.Up)
 	case "down":
 		steps := 1
 		if len(args) > 1 {
@@ -126,7 +131,7 @@ func migrate(args []string) int {
 				return 2
 			}
 		}
-		err = m.Down(steps)
+		err = applyAndReport(m, func() error { return m.Down(steps) })
 	case "version":
 		version, dirty, verr := m.Version()
 		if verr != nil {
@@ -154,6 +159,40 @@ func migrate(args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// applyAndReport applies a schema change and says which version it left
+// behind. Without it a successful migration prints nothing, so the one-shot
+// migration container in docker-compose.yml exits silently and the only
+// record that the schema moved is the schema itself. A version number is
+// safe to print: it names a file in the repository, not any data.
+func applyAndReport(m *postgres.Migrator, apply func() error) error {
+	before, _, err := m.Version()
+	if err != nil {
+		return err
+	}
+	if err := apply(); err != nil {
+		return err
+	}
+	after, _, err := m.Version()
+	if err != nil {
+		return err
+	}
+	fmt.Println(schemaMoveMessage(before, after))
+	return nil
+}
+
+// schemaMoveMessage describes a migration run. It is separate from the
+// database work so that the wording can be tested without one.
+func schemaMoveMessage(before, after uint) string {
+	switch {
+	case before == after:
+		return fmt.Sprintf("migrate: schema already at version %d, nothing to apply", after)
+	case after > before:
+		return fmt.Sprintf("migrate: schema applied, version %d to %d", before, after)
+	default:
+		return fmt.Sprintf("migrate: schema rolled back, version %d to %d", before, after)
+	}
 }
 
 // users implements `users create <email> <role>`. The password comes from

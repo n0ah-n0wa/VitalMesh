@@ -51,3 +51,24 @@ func TestUsageErrorsExitWithTwo(t *testing.T) {
 		}
 	}
 }
+
+// A migration run that prints nothing leaves no record of what it did. The
+// one-shot migration container is the only place this text is read, so the
+// wording is pinned here rather than left to be noticed as missing.
+func TestSchemaMoveMessage(t *testing.T) {
+	cases := map[string]struct {
+		before, after uint
+		want          string
+	}{
+		"fresh database":  {0, 7, "migrate: schema applied, version 0 to 7"},
+		"already current": {7, 7, "migrate: schema already at version 7, nothing to apply"},
+		"rolled back":     {7, 6, "migrate: schema rolled back, version 7 to 6"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := schemaMoveMessage(tc.before, tc.after); got != tc.want {
+				t.Errorf("schemaMoveMessage(%d, %d) = %q, want %q", tc.before, tc.after, got, tc.want)
+			}
+		})
+	}
+}

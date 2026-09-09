@@ -352,8 +352,15 @@ pub const BYTES_PER_READING: usize = 128;
 /// they are configured to.
 const DEFAULT_MAX_BODY_BYTES: usize = 16 << 20;
 
+/// Where the server listens when `HTTP_ADDR` is not set. It is public so
+/// that the health-check command reaches the same port the server binds,
+/// and the two cannot disagree.
+pub const DEFAULT_HTTP_ADDR: &str = "0.0.0.0:8081";
+
 fn default_addr() -> SocketAddr {
-    SocketAddr::from(([0, 0, 0, 0], 8081))
+    DEFAULT_HTTP_ADDR
+        .parse()
+        .expect("the default address is a valid socket address")
 }
 
 fn positive_usize(raw: &str) -> Option<usize> {

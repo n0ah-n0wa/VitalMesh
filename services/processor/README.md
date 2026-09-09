@@ -173,6 +173,47 @@ Every failure uses one envelope, on every route:
 
 `code` is stable and is what a client branches on; `retryable` states whether repeating the identical request could succeed (SPECIFICATIONS.md section 93), and a failure that has something specific to add carries it in `details`, such as the limit and the count for `JOB_TOO_LARGE`. Error kinds map to statuses: invalid 400, unauthenticated 401, not found 404, method not allowed 405, conflict 409, unsupported media 415, validation 422, overloaded/cancelled/unavailable 503 (overloaded adds `Retry-After: 1`), timeout 504, internal 500. A cancellation is a 503 that is *not* retryable: the work stopped because someone asked it to.
 
+## Container image
+
+```bash
+make docker-build      # both service images
+make docker-verify     # non-root, no shell, healthy
+make docker-scan       # Trivy, failing on HIGH or CRITICAL
+```
+
+Two stages. The builder has a Rust toolchain; the runtime has the binary and
+the C runtime it links against. The base is `distroless/cc`: glibc, libgcc
+and a CA bundle, with no shell and no package manager.
+
+A musl build on `distroless/static` would drop libc from the image
+altogether. It is not used, because musl's allocator is markedly slower
+under the concurrent allocation this service does, and the pipeline's
+throughput was measured and tuned against glibc. A 20 MB saving is not worth
+a slower engine.
+
+**Non-root.** The image declares uid 65532, and the verification asserts the
+uid the kernel reports for the running process. The container runs under
+`--read-only --cap-drop=ALL --security-opt no-new-privileges`.
+
+**Health check.** The image has no shell, so the binary probes itself:
+`processor healthcheck` writes an HTTP request to its own socket and exits 0
+on a 200. The request is written by hand rather than through an HTTP client,
+because the service has no client dependency and adding one so it can talk
+to itself would put a whole HTTP stack in the image for four lines. It
+probes liveness: readiness turns false the moment shutdown begins, and a
+draining container is not one Docker should restart.
+
+**Deterministic and reproducible.** `cargo fetch --locked` in its own layer,
+then `cargo build --locked --offline`, so the compile reaches the network
+for nothing and a build that would amend `Cargo.lock` fails instead.
+Building the same commit twice from scratch produces the same binary bytes,
+which was checked. Both base images are pinned by digest.
+
+**No secrets.** One build argument, `VERSION`. `.dockerignore` keeps `.env`
+files, keys and `target/` out of the context; `benches/` is deliberately
+kept, because Cargo refuses to parse a manifest whose declared targets are
+missing.
+
 ## Observability
 
 Every request logs one structured record with the request id, correlation id, method, path, status and duration. A job adds a `process` span carrying its id, algorithm version and reading count, and one record on completion with the status, duration, and the counts of accepted, skipped and rejected readings, results and anomalies. Nothing from a payload is logged: not a value, not an identifier of a measurement, and never the internal token. Prometheus metrics and OpenTelemetry export arrive with the observability phase; the log fields above are the ones those exporters will read.

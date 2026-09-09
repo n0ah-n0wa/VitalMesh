@@ -5,9 +5,16 @@ renders the dashboards, and an OpenTelemetry collector receives their
 traces (SPECIFICATIONS.md sections 39–43).
 
 ```bash
-make observability-up      # Prometheus, Grafana, the collector
-make observability-smoke   # check it is actually observing something
-make observability-down    # stop it; the database and Redis keep running
+docker compose up -d --wait   # everything, including this stack
+make observability-smoke      # check it is actually observing something
+```
+
+The stack starts with the rest of the environment. To run only it, or to
+stop only it and leave the services running:
+
+```bash
+make observability-up
+make observability-down
 ```
 
 | Service | Address | What it is for |
@@ -19,10 +26,11 @@ make observability-down    # stop it; the database and Redis keep running
 
 ## It is optional, and that is the point
 
-Everything here sits behind the `observability` compose profile, so
-`docker compose up -d --wait postgres redis` does not start it and no
-build, test or verification gate depends on it. `make verify` never touches
-it.
+The stack starts with `docker compose up`, but nothing depends on it.
+Stopping all three containers leaves both services running and correct, and
+no build, test or verification gate touches it: `make verify` needs only
+PostgreSQL and Redis, which is why `docker compose up -d --wait postgres
+redis` is a supported way to start.
 
 The services do not know whether any of it is running. Metrics are served
 whether or not anyone scrapes them. Traces are exported to a collector that
@@ -33,17 +41,16 @@ context and still log trace ids; they simply export nothing.
 
 ## Pointing the services at it
 
-The services run as host processes during development, so Prometheus
-reaches them through `host.docker.internal`, which `extra_hosts` in
-`docker-compose.yml` makes resolvable on Linux as well as Docker Desktop.
-Export traces by setting one variable before starting each service:
+Under compose the services are scraped by their service name and export
+traces to `http://otel-collector:4318`, both configured already. Nothing
+needs setting.
 
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-```
-
-When a service runs as a container on this network instead, replace the
-scrape target in `prometheus/prometheus.yml` with its container name.
+To scrape a service you are running as a host process instead, change its
+target in `prometheus/prometheus.yml` to `host.docker.internal:8080` and
+give the prometheus service an `extra_hosts` entry for
+`host.docker.internal:host-gateway`, which makes that name resolve on Linux
+as well as on Docker Desktop. Set `OTEL_EXPORTER_OTLP_ENDPOINT` to
+`http://localhost:4318` for a host process to export traces.
 
 ## Dashboards
 

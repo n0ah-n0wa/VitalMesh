@@ -359,7 +359,17 @@ func TestTheLimiterSurvivesAnOutageAndReturnsToTheSharedCounter(t *testing.T) {
 
 	// Redis comes back.
 	proxy.start()
-	deadline := time.Now().Add(5 * time.Second)
+	// Wait for the proxy to be accepting again before asking anything of
+	// the limiter. Without this the test races the listener coming back and
+	// reports "the limiter never recovered" when what actually happened is
+	// that Redis was still unreachable, which is a different bug entirely.
+	proxy.waitUntilAccepting(t)
+
+	// The client refuses to dial for a recovery interval after a failure,
+	// so recovery is not instant even once Redis is reachable. The deadline
+	// is generous because this runs alongside every other integration
+	// package, on a machine that may be busy.
+	deadline := time.Now().Add(30 * time.Second)
 	var recovered ratelimit.Decision
 	for time.Now().Before(deadline) {
 		recovered = limiter.Allow(ctx, id)
@@ -430,6 +440,23 @@ func (p *redisProxy) start() {
 	p.listener = listener
 	p.addr = listener.Addr().String()
 	go p.accept(listener)
+}
+
+// waitUntilAccepting blocks until the proxy answers a connection, so a test
+// never mistakes a listener that has not come back for a client that has
+// not recovered.
+func (p *redisProxy) waitUntilAccepting(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", p.url()[len("redis://"):], time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the proxy never started accepting again")
 }
 
 // stop closes the listener and every connection through it, so that calls
