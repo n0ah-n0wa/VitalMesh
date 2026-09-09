@@ -122,11 +122,11 @@ contained.
 | `checkov` | the same question from a different engine, which disagrees usefully |
 
 kubeconform downloads a JSON schema per resource per Kubernetes version,
-so a full run would otherwise make around a hundred HTTPS requests and a
-single refused fetch fails the gate for a reason that has nothing to do
-with the manifests — which is what happened in CI once. The runs share a
-schema cache and retry a fetch error twice, and a failure prints the
-resource and the reason rather than only a count.
+so a full run would otherwise make around a hundred HTTPS requests. The
+runs share a schema cache, which brings that down to roughly thirty, and
+the tool images are pulled once up front so that no step has to tell a
+tool's output apart from Docker's. A failure prints the resource and the
+reason rather than only a count.
 
 Every built-in kube-linter check is enabled; `.kube-linter.yaml` lists the
 exclusions and argues each one. `.trivyignore.yaml` carries a single

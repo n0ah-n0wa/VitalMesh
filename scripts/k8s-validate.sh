@@ -81,17 +81,62 @@ repo="$(host_path "$(pwd)")"
 rm -rf "$RENDER_DIR"
 mkdir -p "$RENDER_DIR"
 
+# Pull the tools first, so no step has to tell a tool's own output apart
+# from Docker's. It also means the first target does not pay for every
+# download while the rest start warm.
+printf '\nTools\n'
+missing=0
+for image in "$KUSTOMIZE_IMAGE" "$KUBECONFORM_IMAGE" "$KUBE_LINTER_IMAGE" \
+             "$TRIVY_IMAGE" "$CHECKOV_IMAGE"; do
+    docker image inspect "$image" >/dev/null 2>&1 && continue
+    missing=$((missing + 1))
+    docker pull -q "$image" >/dev/null 2>&1 || fail "could not pull $image"
+done
+if [ "$missing" -eq 0 ]; then
+    ok "all five tool images already present"
+else
+    ok "pulled $missing tool image(s)"
+fi
+
 printf '\nRendering\n'
 for target in $TARGETS; do
     slug="$(printf '%s' "$target" | tr '/' '-')"
     out="$RENDER_DIR/$slug.yaml"
-    if rendered="$(docker run --rm -v "$repo/$KUBE_DIR:/work" -w /work \
-        "$KUSTOMIZE_IMAGE" build "$target" 2>&1)"; then
-        printf '%s\n' "$rendered" > "$out"
-        ok "$target -> $(grep -c '^kind:' "$out") objects"
+    # `2>&1 >"$out"` and not `>"$out" 2>&1`: order matters here. stderr is
+    # pointed at the command substitution first, then stdout is redirected
+    # to the file, so the manifests and the tool's chatter end up in
+    # different places.
+    #
+    # This was written the other way, with both streams captured together,
+    # and it put Docker's own output inside the manifests: on a machine
+    # that does not already have the kustomize image, `docker run` writes
+    # "Unable to find image ... Pulling from ..." to stderr, and that went
+    # into the rendered YAML ahead of the first document. kubeconform then
+    # reported "line 2: mapping values are not allowed in this context" —
+    # line 1 being Docker's prose and line 2 the `apiVersion:` after it.
+    #
+    # It only ever failed on the first target, because the pull happens
+    # once; it never failed on a developer's machine, because the image is
+    # already there; and the object count still looked right, because
+    # Docker's progress lines do not start with `kind:`.
+    if noise="$(docker run --rm -v "$repo/$KUBE_DIR:/work" -w /work \
+        "$KUSTOMIZE_IMAGE" build "$target" 2>&1 >"$out")"; then
+
+        # What was written has to be YAML. A renderer that exits 0 while
+        # producing something else is exactly the failure above, and one
+        # look at the first meaningful line catches the whole class of it
+        # at the point it happens rather than three steps downstream.
+        first="$(grep -vE '^[[:space:]]*(#|$)' "$out" | head -1)"
+        case "$first" in
+            apiVersion:*|---*)
+                ok "$target -> $(grep -c '^kind:' "$out") objects" ;;
+            *)
+                fail "$target: the render is not YAML; it begins $(printf '%s' "$first" | cut -c1-60)" ;;
+        esac
+        [ -n "$noise" ] && printf '%s\n' "$noise" | sed 's/^/        /'
     else
         fail "$target: kustomize build failed"
-        printf '%s\n' "$rendered" | sed 's/^/        /'
+        printf '%s\n' "$noise" | sed 's/^/        /'
     fi
 done
 
@@ -114,27 +159,23 @@ for target in $TARGETS; do
         # was first written, and what a deliberately invalid manifest
         # caught.
         #
-        # Retried, because kubeconform downloads a JSON schema per resource
-        # per version — around sixty HTTPS requests a run — and one refused
-        # fetch is reported as an Error, failing the gate for a reason that
-        # has nothing to do with the manifests. That is what CI hit: 27
-        # valid, 1 error, on a tree that validates cleanly here.
+        # A shared schema cache, because kubeconform fetches one schema per
+        # kind per version and a full run would otherwise make around a
+        # hundred HTTPS requests. All eight invocations share the volume, so
+        # a run downloads roughly thirty.
         #
-        # Only an Error is retried. Invalid means kubeconform read the
-        # resource and disagreed with it, and repeating that would take
-        # longer to reach the same answer.
-        attempt=1
-        while [ "$attempt" -le 3 ]; do
-            out="$(docker run --rm -i -v vitalmesh-kubeconform:/cache "$KUBECONFORM_IMAGE" \
-                -strict -summary -verbose -cache /cache \
-                -kubernetes-version "$version" - \
-                < "$RENDER_DIR/$slug.yaml" 2>&1)" && rc=0 || rc=$?
-            summary="$(printf '%s' "$out" | tail -1)"
-            printf '%s' "$summary" | grep -q 'Errors: [1-9]' || break
-            [ "$attempt" -eq 3 ] && break
-            note "$target on $version: a schema fetch failed, retrying"
-            attempt=$((attempt + 1))
-        done
+        # There is deliberately no retry here. One was added on the theory
+        # that CI's "Errors: 1" was a refused download; it was not — it was
+        # Docker's image-pull output being written into the manifests by the
+        # render step above. The retry could never have helped, and its
+        # "a schema fetch failed, retrying" line asserted a cause that was
+        # untrue, which sent the next person looking in the wrong place. An
+        # error here now fails immediately and says what it was.
+        out="$(docker run --rm -i -v vitalmesh-kubeconform:/cache "$KUBECONFORM_IMAGE" \
+            -strict -summary -verbose -cache /cache \
+            -kubernetes-version "$version" - \
+            < "$RENDER_DIR/$slug.yaml" 2>&1)" && rc=0 || rc=$?
+        summary="$(printf '%s' "$out" | tail -1)"
 
         # Exit code and summary are both checked. Either would do today;
         # together they survive a tool that changes which one it reports
