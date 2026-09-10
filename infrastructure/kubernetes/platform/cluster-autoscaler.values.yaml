@@ -1,0 +1,65 @@
+# Helm values for the Cluster Autoscaler, chart
+# autoscaler/cluster-autoscaler 9.59.0. Installed by
+# scripts/eks-platform-install.sh, which sets the cluster name, the region
+# and the service account's role ARN from the Terraform outputs.
+#
+# The autoscaler resizes the managed node group between the min and max
+# set in Terraform, adding a node when a pod is Pending for want of room
+# and removing one that has been mostly empty for ten minutes. Its IAM role
+# (infrastructure/terraform/modules/eks/irsa.tf) lets it resize only groups
+# tagged for this cluster, which EKS tags managed node groups with itself.
+#
+# The autoscaler's minor version must match the cluster's Kubernetes minor
+# version; the image tag below is pinned to it and is the one value to
+# change with a Kubernetes upgrade.
+
+cloudProvider: aws
+
+# Finds the node group by the tags EKS put on its Auto Scaling group.
+autoDiscovery:
+  # clusterName is set at install.
+  enabled: true
+
+image:
+  tag: v1.34.5
+
+rbac:
+  serviceAccount:
+    create: true
+    name: cluster-autoscaler
+    # eks.amazonaws.com/role-arn is set at install from the Terraform output.
+
+extraArgs:
+  # One node group across three zones: keep the zones even when scaling.
+  balance-similar-node-groups: true
+  # Do not remove a node just because a system pod would have to move.
+  skip-nodes-with-system-pods: false
+  # A node whose pods lack a PodDisruptionBudget is still drained gracefully.
+  skip-nodes-with-local-storage: false
+  scale-down-unneeded-time: 10m
+  scale-down-utilization-threshold: "0.5"
+  # Never scale down past what the Terraform minimum says.
+  expander: least-waste
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 300Mi
+  limits:
+    memory: 600Mi
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+# Runs on the node group it scales; there is nowhere else.
+priorityClassName: system-cluster-critical

@@ -44,7 +44,7 @@ TRIVY_FS        := docker run --rm -v vitalmesh-trivy:/root/.cache/trivy
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan k8s-validate k8s-local-test k8s-failure-test up down demo
+.PHONY: help setup format format-check lint test contracts-check contracts-lock integration-test e2e-test build line-endings verify clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -149,6 +149,11 @@ k8s-local-test: k8s-validate ## Deploy the local overlay to a kind cluster and t
 # The script says so too, and refuses to run against nothing.
 k8s-failure-test: ## Break each dependency in turn and check the behaviour
 	sh scripts/k8s-failure-test.sh
+
+# Static checks for the Terraform (fmt, validate, trivy, checkov), none of
+# which needs an AWS account. Planning against a real account is separate.
+tf-validate: ## Validate the Terraform without touching AWS (fmt, validate, trivy, checkov)
+	sh scripts/tf-validate.sh
 
 up: ## Start the whole local environment (the same as: docker compose up -d --wait)
 	docker compose up -d --wait

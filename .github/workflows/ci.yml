@@ -106,3 +106,19 @@ jobs:
 
       - name: Validate the Kubernetes manifests
         run: make k8s-validate
+
+  # The Terraform is checked without AWS: init skips the backend and validate
+  # never configures a provider, so this job needs no credentials and is
+  # given none. Planning against a real account is a separate, credentialed
+  # step.
+  terraform:
+    name: terraform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Validate the Terraform
+        run: make tf-validate

@@ -8,11 +8,11 @@ metadata:
   name: vitalmesh-api-gateway
   namespace: vitalmesh
 spec:
-  ingressClassName: nginx
   tls:
+    # No Secret: the load balancer serves the ACM certificate Terraform
+    # issued for this host (ingress_domain_name must equal it).
     - hosts:
         - api.vitalmesh.example
-      secretName: vitalmesh-production-tls
   rules:
     - host: api.vitalmesh.example
       http:

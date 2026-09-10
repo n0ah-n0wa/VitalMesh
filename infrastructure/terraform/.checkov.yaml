@@ -1,0 +1,17 @@
+# Checkov's configuration for the Terraform. Every check is enforced unless it
+# is skipped with a reason. Skips that concern one resource are inline, as a
+# #checkov:skip comment inside that resource, so the reason sits beside what
+# it excuses. Only a skip that is a policy for every resource belongs here.
+
+framework:
+  - terraform
+
+skip-path:
+  - .terraform
+
+skip-check:
+  # One year of log retention. Log groups keep log_retention_days, one value
+  # per environment: 14 in staging, which holds synthetic data only, and 365
+  # in production, which the platform module enforces as a floor. CKV_AWS_66,
+  # which catches a log group with no retention set at all, stays on.
+  - CKV_AWS_338

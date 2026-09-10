@@ -16,3 +16,22 @@ Thumbs.db
 
 # Rendered Kubernetes manifests, rebuilt by `make k8s-validate` on every run.
 /infrastructure/kubernetes/.rendered/
+
+# Terraform. State can hold sensitive values and lives in the remote
+# backend; provider plugins are downloaded per machine. The dependency lock
+# files (.terraform.lock.hcl) are deliberately NOT ignored: they pin provider
+# checksums and belong in review like any other lock file.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+# Per-deployment values (account ids, admin ARNs, allowed CIDRs). Not
+# secrets, but specific to one AWS account; the .example beside each is
+# what is committed.
+terraform.tfvars

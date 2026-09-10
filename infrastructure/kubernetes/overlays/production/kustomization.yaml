@@ -42,4 +42,5 @@ patches:
   - path: deployment-resources.yaml
   - path: hpa.yaml
   - path: ingress.yaml
+  - path: networkpolicy-ingress.yaml
   - path: secret-references.yaml

@@ -1,0 +1,25 @@
+# Bootstrap's own state, moved into the bucket bootstrap created. Terraform
+# reads only *.tf files, so this does nothing until it is copied to
+# backend.tf.
+#
+# After bootstrap's first apply, which keeps its state locally:
+#
+#   cp backend.tf.example backend.tf
+#   terraform init -migrate-state \
+#     -backend-config="bucket=$(terraform output -raw state_bucket_name)" \
+#     -backend-config="kms_key_id=$(terraform output -raw state_kms_key_arn)"
+#
+# Then commit backend.tf, so that everyone after you uses the remote copy,
+# and delete the local terraform.tfstate files (git ignores them).
+#
+# Rebuilding an account from nothing is the one time to remove backend.tf
+# again: the bucket it names does not exist yet.
+
+terraform {
+  backend "s3" {
+    key          = "bootstrap/terraform.tfstate"
+    region       = "eu-central-1"
+    encrypt      = true
+    use_lockfile = true
+  }
+}

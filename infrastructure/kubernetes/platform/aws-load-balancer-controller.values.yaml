@@ -1,0 +1,65 @@
+# Helm values for the AWS Load Balancer Controller, chart
+# eks/aws-load-balancer-controller 3.5.0 (controller v3.5.0). Installed by
+# scripts/eks-platform-install.sh, which sets clusterName, region, vpcId and
+# the service account's role ARN from the Terraform outputs.
+#
+# The controller turns the application's Ingress into an Application Load
+# Balancer and keeps its target group pointed at the pods. Its IAM role is
+# created in infrastructure/terraform/modules/eks/irsa.tf.
+
+replicaCount: 2
+
+serviceAccount:
+  create: true
+  name: aws-load-balancer-controller
+  # eks.amazonaws.com/role-arn is set at install from the Terraform output.
+
+# The IngressClass the overlays name.
+createIngressClassResource: true
+ingressClass: alb
+
+# Pods are targets directly, so the controller must never fall back to
+# instance mode, which would need NodePorts and a wider security group.
+defaultTargetType: ip
+
+# Readiness gates are opted into per namespace by label
+# (components/deployed/namespace-readiness-gate-patch.yaml), which the
+# webhook below serves.
+enablePodReadinessGateInject: true
+
+# The controller runs as an ordinary workload: non-root, read-only root
+# filesystem, no capabilities, seccomp, as the application's own pods do.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 256Mi
+
+podDisruptionBudget:
+  maxUnavailable: 1
+
+# Spread the two replicas across zones and nodes.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        app.kubernetes.io/name: aws-load-balancer-controller
+
+# Nothing here uses the Gateway API yet.
+controllerConfig:
+  featureGates:
+    ALBGatewayAPI: false
+    NLBGatewayAPI: false

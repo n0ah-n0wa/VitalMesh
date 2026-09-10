@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars, which git ignores, and set your account ID.
+# Nothing here is a secret; it is specific to one AWS account.
+
+allowed_account_ids = ["123456789012"]
+
+# aws_region        = "eu-central-1"
+# github_repository = "n0ah-n0wa/VitalMesh"

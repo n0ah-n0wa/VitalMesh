@@ -8,12 +8,15 @@
 # from. The local overlay does not include this component, which is what
 # makes it local.
 #
-# Three things are true of any environment reached from outside:
+# Four things are true of any environment reached from outside:
 #
-#   - traffic arrives through an ingress, so the gateway sits behind a
-#     proxy and must be told so;
-#   - the ingress controller must be allowed through the default-deny
-#     NetworkPolicy;
+#   - traffic arrives through an Application Load Balancer, so the gateway
+#     sits behind a proxy and must be told so;
+#   - the load balancer must be allowed through the default-deny
+#     NetworkPolicy, by the address ranges it connects from, which each
+#     overlay names;
+#   - the namespace asks for load balancer readiness gates, so a rolling
+#     update waits for the load balancer as well as for Kubernetes;
 #   - credentials come from outside git, so the base's empty placeholder
 #     Secrets must not be applied over them.
 apiVersion: kustomize.config.k8s.io/v1alpha1
@@ -26,6 +29,7 @@ patches:
   - path: configmap-proxy-patch.yaml
   - path: imagepullpolicy-patch.yaml
   - path: networkpolicy-ingress-patch.yaml
+  - path: namespace-readiness-gate-patch.yaml
   - path: networkpolicy-egress-patch.yaml
   - path: networkpolicy-processor-egress-patch.yaml
   - path: networkpolicy-migrate-egress-patch.yaml

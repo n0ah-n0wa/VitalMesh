@@ -1,0 +1,25 @@
+# Copy to terraform.tfvars, which git ignores. Nothing here is a secret; it
+# is specific to one AWS account and one team.
+#
+# Production can live in the same account as staging, since every name,
+# key, role and state object is per environment; a separate account is the
+# stronger isolation and needs nothing here beyond a different ID.
+
+allowed_account_ids = ["123456789012"]
+
+# Given cluster-admin. Whoever runs terraform apply is NOT made admin
+# implicitly, so include your own role.
+cluster_admin_principal_arns = ["arn:aws:iam::123456789012:role/Admin"]
+
+# Who may reach the Kubernetes API. 203.0.113.0/24 is a documentation range
+# that routes nowhere: until it is replaced, nobody can reach the endpoint,
+# which is the safe way round.
+cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"]
+
+alarm_email = ""
+
+# The hostname the Ingress serves and the hosted zone it lives in. Set both
+# once a domain exists (OQ-18); they must match the host in
+# infrastructure/kubernetes/overlays/production/ingress.yaml. Production refuses to plan without them.
+# ingress_domain_name = "api.vitalmesh.example"
+# route53_zone_id     = "Z0123456789ABCDEFGHIJ"

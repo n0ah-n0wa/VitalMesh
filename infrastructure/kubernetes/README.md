@@ -9,6 +9,8 @@ components/deployed/     what staging and production share and local does not
 overlays/local/          kind: in-cluster PostgreSQL and Redis, no ingress
 overlays/staging/        section 103
 overlays/production/     section 104
+platform/                what a deployed cluster runs beside the application:
+                         the load balancer controller and the autoscaler
 kind/cluster.yaml        the local cluster
 ```
 
@@ -23,18 +25,20 @@ the image tags cannot be pulled — an overlay that fails to override them
 fails loudly.
 
 **`components/deployed/`** is what is true of any environment reached from
-outside and is identical between them: an Ingress, the NetworkPolicy
-opening for the ingress controller, `TRUSTED_PROXY_HOPS=1`, and the
-deletion of the base's placeholder Secrets. Written once, included by
+outside and is identical between them: an Ingress with the Application
+Load Balancer annotations, the readiness-gate label on the namespace,
+`TRUSTED_PROXY_HOPS=1`, and the deletion of the base's placeholder
+Secrets. Written once, included by
 staging and production, and deliberately not by local — which is what
 makes local local.
 
 **Each overlay** states only what genuinely differs. Between staging and
-production that is: the domain, resource sizes, replica floor and ceiling,
-log level, trace sampling, hash concurrency, and which Secret names to
-read. The egress narrowing section 104 asks for lives in the component
-rather than in production, so that staging exercises it first: a
-restriction whose first real test is production is not a validated one.
+production that is: the domain, the public subnet ranges the load balancer
+connects from, resource sizes, replica floor and ceiling, log level, trace
+sampling, hash concurrency, and which Secret names to read. The egress
+narrowing section 104 asks for lives in the component rather than in
+production, so that staging exercises it first: a restriction whose first
+real test is production is not a validated one.
 
 ## What differs, and where to change it
 
@@ -45,6 +49,7 @@ restriction whose first real test is production is not a validated one.
 | gateway memory limit | 256Mi | 384Mi | 1Gi |
 | processor CPU limit | 500m | 1 | 4 |
 | domain | none | `api.staging.vitalmesh.example` | `api.vitalmesh.example` |
+| load balancer source ranges | none | `10.20.0.0/24`, `10.20.1.0/24` | `10.30.0.0/24` to `10.30.2.0/24` |
 | `ENVIRONMENT` | `local` | `staging` | `production` |
 | `LOG_LEVEL` | debug | debug | info |
 | trace sampling | not exported | 1.0 | 0.1 |
@@ -170,9 +175,12 @@ inside one.
 
 - **Domains** are `.example`, reserved by RFC 2606 and never resolvable,
   until a real one exists (OQ-18). Three values per overlay change it.
-- **Ingress class** is `nginx` in both deployed overlays, with no
-  controller-specific annotations. Which controller terminates TLS is
-  OQ-18 as well.
+- **The load balancer's source ranges** in each overlay's
+  `networkpolicy-ingress.yaml` are the public subnets the Terraform
+  carves (`public_subnet_cidrs` output). They are correct for the
+  address plans in `infrastructure/terraform/environments`; a changed
+  `vpc_cidr` or `az_count` must be mirrored here, and nothing checks that
+  automatically.
 - **Deployed egress** is narrowed to RFC 1918 rather than to the real
   database, cache and collector subnets, which are not known until the VPC
   exists. That last narrowing belongs with the Terraform that creates them.
@@ -192,5 +200,7 @@ inside one.
 
 ## Not here yet
 
-The retention `CronJob`, ECR image references, IRSA, and the AWS ingress
-annotations. Nothing in these manifests is cloud-specific.
+The retention `CronJob` and ECR image references. The deployed component's
+Ingress annotations and the readiness-gate label are the one cloud-specific
+part of these manifests; `platform/README.md` says why an Application Load
+Balancer rather than an in-cluster ingress controller.

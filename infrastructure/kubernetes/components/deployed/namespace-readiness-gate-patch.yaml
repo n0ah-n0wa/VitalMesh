@@ -1,0 +1,12 @@
+# With pods as load balancer targets, a new pod is Ready to Kubernetes
+# before the load balancer has finished registering it and health-checking
+# it. A rolling update that trusts Ready alone can then retire the old pod
+# while the new one is not yet taking load balancer traffic. This label asks
+# the controller to add a readiness gate to every pod in the namespace, so
+# Ready means "registered and healthy at the load balancer" as well.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vitalmesh
+  labels:
+    elbv2.k8s.aws/pod-readiness-gate-inject: enabled
