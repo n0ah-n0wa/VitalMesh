@@ -31,7 +31,7 @@ opentelemetry-otlp = { version = "0.32.0", default-features = false, features = 
 tracing-opentelemetry = { version = "0.33.0", default-features = false }
 
 [dev-dependencies]
-criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 tokio = { version = "1", features = ["io-util"] }
 tower = { version = "0.5", features = ["util"] }
 
