@@ -51,6 +51,12 @@ TRIVY_CACHE     ?= vitalmesh-trivy
 TF_PLUGIN_CACHE ?= vitalmesh-tf-plugins
 export TRIVY_CACHE TF_PLUGIN_CACHE
 
+# The Go toolchain is exactly the one installed, never one downloaded on
+# demand: actions/setup-go sets this in CI, so setting it here too means a
+# tool or module that needs a newer Go fails the same way locally as it
+# does in CI, instead of passing locally on a silently fetched toolchain.
+export GOTOOLCHAIN ?= local
+
 # Coverage floors for the Go service, as percentages of statements, checked
 # by scripts/coverage-floor.sh. GO_COVERAGE_MIN applies to the unit suite
 # alone (make test-go); GO_COVERAGE_MIN_ALL to the unit, integration and
@@ -65,7 +71,10 @@ TRIVY_IMAGE     ?= aquasec/trivy:0.74.0
 TRIVY           := docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v $(TRIVY_CACHE):/root/.cache/trivy $(TRIVY_IMAGE)
 TRIVY_FS        := docker run --rm -v $(TRIVY_CACHE):/root/.cache/trivy
 GITLEAKS_IMAGE  ?= ghcr.io/gitleaks/gitleaks:v8.30.1
-GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.8.0
+# govulncheck runs through `go run`, so its own go directive must be within
+# the pinned toolchain (go.mod): v1.8.0 requires Go 1.26 and fails under
+# GOTOOLCHAIN=local. Check the directive before bumping this pin.
+GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 

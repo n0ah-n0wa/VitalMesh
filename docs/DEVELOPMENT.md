@@ -4,7 +4,7 @@
 
 | Tool | Version | Notes |
 |---|---|---|
-| Go | 1.25.14 | pinned in `services/api-gateway/go.mod`; an older 1.25 install downloads it automatically via `GOTOOLCHAIN=auto` |
+| Go | 1.25.14 | pinned in `services/api-gateway/go.mod`. The Makefile exports `GOTOOLCHAIN=local`, as CI does, so the installed Go must be exactly this one; set `GOTOOLCHAIN=auto` in your own environment if you would rather have Go download it |
 | Rust | 1.89.0 | pinned in `services/processor/rust-toolchain.toml`; install via [rustup](https://rustup.rs), which picks up the pin and the `rustfmt`/`clippy` components automatically |
 | GNU make | 4.x | |
 | git | any recent | the line-ending gate reads the git index |
@@ -156,7 +156,10 @@ and in `scripts/k8s-validate.sh`, `scripts/tf-validate.sh` and
 checkov, terraform, yq, actionlint), and the Helm charts in
 `infrastructure/kubernetes/platform`. Bump the pin, run `make ci-local`,
 triage anything new: a scanner update that surfaces a real finding is
-the update doing its job.
+the update doing its job. `GOVULNCHECK` runs through `go run`, so the
+release's own `go` directive must be within the pinned toolchain; the
+Makefile exports `GOTOOLCHAIN=local`, as CI does, so a release that
+needs a newer Go fails locally too rather than fetching one.
 
 **Coverage.** Every Go suite writes a profile with cross-package
 accounting (`-coverpkg=./...`, so a handler exercised only end to end
