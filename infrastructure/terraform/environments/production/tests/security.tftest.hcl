@@ -520,6 +520,32 @@ run "platform" {
     error_message = "The deploy policy must name every resource and every action; no wildcards."
   }
 
+  # Read-only outside the cluster: the deploy role can read (its parameter,
+  # its secrets, image digests) and describe, never create, change or
+  # delete an AWS resource.
+  assert {
+    condition = alltrue(flatten([
+      for s in data.aws_iam_policy_document.deploy.statement : [
+        for a in s.actions : anytrue([for prefix in ["eks:Describe", "ssm:GetParameter", "secretsmanager:Get", "secretsmanager:Describe", "kms:Decrypt", "ecr:Describe"] : startswith(a, prefix)])
+      ]
+    ]))
+    error_message = "Every action in the deploy policy must be a read or a describe."
+  }
+
+  # The deployment facts are published as a plain parameter (they are not
+  # secrets) and name the secrets by ARN rather than carrying values.
+  assert {
+    condition     = aws_ssm_parameter.deploy.type == "String" && aws_ssm_parameter.deploy.name == "/vitalmesh/production/deploy" && jsondecode(aws_ssm_parameter.deploy.value).namespace == "vitalmesh-production" && jsondecode(aws_ssm_parameter.deploy.value).app_secret_arn == aws_secretsmanager_secret.app.arn
+    error_message = "The deploy parameter must be a plain String naming this environment's namespace and secret ARNs."
+  }
+
+  # Production has no test account: no secret, nothing in the parameter, and
+  # the deploy role reads exactly three secrets.
+  assert {
+    condition     = length(aws_secretsmanager_secret.e2e) == 0 && jsondecode(aws_ssm_parameter.deploy.value).e2e_secret_arn == null && jsondecode(aws_ssm_parameter.deploy.value).e2e_email == null
+    error_message = "Production must have no end-to-end test account: no secret, and nothing about one in the deploy parameter."
+  }
+
   assert {
     condition = anytrue([
       for s in data.aws_iam_policy_document.deploy.statement : contains(s.actions, "kms:Decrypt") && anytrue([for c in s.condition : c.variable == "kms:ViaService"])

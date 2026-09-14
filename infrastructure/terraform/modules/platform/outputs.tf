@@ -130,3 +130,13 @@ output "ingress_certificate_arn" {
   description = "ACM certificate for ingress_domain_name, validated and ready for the load balancer, or null when no domain is set."
   value       = var.ingress_domain_name == null ? null : aws_acm_certificate_validation.ingress[0].certificate_arn
 }
+
+output "deploy_parameter_name" {
+  description = "SSM parameter the deploy role reads for this environment's endpoints and secret ARNs."
+  value       = aws_ssm_parameter.deploy.name
+}
+
+output "e2e_secret_arn" {
+  description = "Secret holding the end-to-end test account's password, or null where no such account exists (production)."
+  value       = var.create_e2e_account ? aws_secretsmanager_secret.e2e[0].arn : null
+}

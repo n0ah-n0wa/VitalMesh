@@ -1,0 +1,212 @@
+# Promotes a release that has passed staging to production. Dispatched by
+# hand, with the number of the Release run to promote; nothing here builds,
+# scans or pushes an image.
+#
+#   verify             no AWS, no environment: read the chosen Release run
+#                      and its release record, and refuse unless the run is
+#                      a Release, from main, that succeeded, whose record
+#                      names a commit on main. What would be deployed is put
+#                      in the run summary, for the reviewer to read before
+#                      approving.
+#   deploy-production  deploy.yml with environment: production. This job
+#                      does not start until the production environment's
+#                      required reviewers approve it (docs/GITHUB_CONFIGURATION.md);
+#                      only then is the OIDC token for the production role
+#                      issued. It deploys the record's digests, which
+#                      deploy.yml re-checks against the registry, and rolls
+#                      back if the rollout does not complete.
+#   smoke-production   no credentials: the released version is in service
+#                      over TLS, refusing what it should.
+#
+# The artifacts are the ones staging tested: the record lists the digests,
+# the registry is checked to still hold them under the commit's tag, and
+# the tag is immutable. The production role is reachable from exactly one
+# job in this file and from no other workflow; the verify and smoke jobs
+# hold no AWS credential at all.
+name: Promote to production
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: The run ID of the Release workflow run to promote (the number in its URL; it must have passed staging)
+        required: true
+        type: string
+
+permissions: {}
+
+# One promotion at a time, and never cancelled part way.
+concurrency:
+  group: promote-production
+  cancel-in-progress: false
+
+jobs:
+  # The production environment's branch policy already refuses a job from
+  # any other branch; this says why, earlier and in words.
+  wrong-branch:
+    name: wrong branch
+    if: github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: |
+          echo "::error::Promotions run from main only (this is ${{ github.ref }}): the workflow file that deploys production must be the reviewed one."
+          exit 1
+
+  verify:
+    name: verify the release
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      # To read another run's conclusion and download its artifact.
+      actions: read
+      contents: read
+    outputs:
+      commit: ${{ steps.record.outputs.commit }}
+      image_tag: ${{ steps.record.outputs.image_tag }}
+      api_gateway_digest: ${{ steps.record.outputs.api_gateway_digest }}
+      processor_digest: ${{ steps.record.outputs.processor_digest }}
+      version: ${{ steps.record.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id }}
+    steps:
+      # The whole history, to check the commit is on main.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: The input is a run ID
+        run: |
+          set -euo pipefail
+          if ! echo "$RELEASE_RUN_ID" | grep -Eq '^[0-9]{1,20}$'; then
+            echo "::error::release_run_id must be a number, got '$RELEASE_RUN_ID'"
+            exit 1
+          fi
+
+      - name: The run is a Release from main that succeeded
+        id: run
+        run: |
+          set -euo pipefail
+          run="$(gh run view "$RELEASE_RUN_ID" --repo "${{ github.repository }}" --json databaseId,workflowName,event,headBranch,headSha,conclusion,url)"
+          echo "$run" | jq .
+          name="$(echo "$run" | jq -r .workflowName)"
+          branch="$(echo "$run" | jq -r .headBranch)"
+          conclusion="$(echo "$run" | jq -r .conclusion)"
+          if [ "$name" != "Release" ]; then echo "::error::run $RELEASE_RUN_ID is a '$name' run, not a Release"; exit 1; fi
+          if [ "$branch" != "main" ]; then echo "::error::run $RELEASE_RUN_ID released '$branch', not main"; exit 1; fi
+          if [ "$conclusion" != "success" ]; then echo "::error::run $RELEASE_RUN_ID concluded '$conclusion'; only a run that passed staging can be promoted"; exit 1; fi
+          echo "head_sha=$(echo "$run" | jq -r .headSha)" >> "$GITHUB_OUTPUT"
+          echo "url=$(echo "$run" | jq -r .url)" >> "$GITHUB_OUTPUT"
+
+      # The record exists only if every staging stage passed (release.yml,
+      # job record): its absence is a refusal.
+      - name: The release record
+        id: record
+        env:
+          HEAD_SHA: ${{ steps.run.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          if ! gh run download "$RELEASE_RUN_ID" --repo "${{ github.repository }}" --name release --dir record; then
+            echo "::error::run $RELEASE_RUN_ID has no release record: it did not pass every staging stage, or its record has expired"
+            exit 1
+          fi
+          record=record/release.json
+          jq . "$record"
+          commit="$(jq -r .commit "$record")"
+          image_tag="$(jq -r .image_tag "$record")"
+          gateway="$(jq -r '.images["vitalmesh/api-gateway"]' "$record")"
+          processor="$(jq -r '.images["vitalmesh/processor"]' "$record")"
+          version="$(jq -r .version "$record")"
+          run_id="$(jq -r .release_run_id "$record")"
+          repo="$(jq -r .repository "$record")"
+
+          [ "$repo" = "${{ github.repository }}" ] || { echo "::error::the record is for $repo"; exit 1; }
+          [ "$run_id" = "$RELEASE_RUN_ID" ] || { echo "::error::the record names run $run_id, not $RELEASE_RUN_ID"; exit 1; }
+          [ "$commit" = "$HEAD_SHA" ] || { echo "::error::the record's commit $commit is not the run's head $HEAD_SHA"; exit 1; }
+          if [ "$(jq -r .staging.smoke "$record")" != "passed" ] || [ "$(jq -r .staging.e2e "$record")" != "passed" ]; then
+            echo "::error::the record does not say staging passed"
+            exit 1
+          fi
+          echo "$image_tag" | grep -Eq '^sha-[0-9a-f]{40}$' || { echo "::error::image_tag '$image_tag' is not sha-<commit>"; exit 1; }
+          [ "$image_tag" = "sha-$commit" ] || { echo "::error::image_tag '$image_tag' does not name commit $commit"; exit 1; }
+          for d in "$gateway" "$processor"; do
+            echo "$d" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::digest '$d' is not sha256:<64 hex>"; exit 1; }
+          done
+          # On main: an image built from a commit that was merged, not one
+          # that was pushed and later removed.
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::commit $commit is not on main"; exit 1; }
+          [ "$(git rev-parse --short "$commit")" = "$version" ] || { echo "::error::the record's version '$version' is not the short form of $commit"; exit 1; }
+
+          {
+            echo "commit=$commit"
+            echo "image_tag=$image_tag"
+            echo "api_gateway_digest=$gateway"
+            echo "processor_digest=$processor"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Promotion candidate"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Release run | [$RELEASE_RUN_ID](${{ steps.run.outputs.url }}) |"
+            echo "| commit | \`$commit\` ($(git log -1 --format='%s' "$commit")) |"
+            echo "| version | \`$version\` |"
+            echo "| gateway | \`$gateway\` |"
+            echo "| processor | \`$processor\` |"
+            echo "| staging | deployed to \`$(jq -r .staging.host "$record")\`, smoke and E2E passed, recorded $(jq -r .recorded_at "$record") |"
+            echo
+            echo "Approving the production deployment below deploys exactly these digests."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Waits for the production environment's reviewers. Everything it deploys
+  # comes from the verified record; it rebuilds nothing.
+  deploy-production:
+    name: production
+    needs: verify
+    uses: ./.github/workflows/deploy.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      environment: production
+      commit: ${{ needs.verify.outputs.commit }}
+      image_tag: ${{ needs.verify.outputs.image_tag }}
+      api_gateway_digest: ${{ needs.verify.outputs.api_gateway_digest }}
+      processor_digest: ${{ needs.verify.outputs.processor_digest }}
+      rollback_on_failure: true
+
+  smoke-production:
+    name: production smoke
+    needs: [verify, deploy-production]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.commit }}
+
+      - name: Smoke test
+        env:
+          HOST: ${{ needs.deploy-production.outputs.ingress_host }}
+          EXPECTED_VERSION: ${{ needs.deploy-production.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOST" ]; then
+            echo "::error::production has no ingress hostname in its deploy parameter"
+            exit 1
+          fi
+          GATEWAY_URL="https://$HOST" sh scripts/smoke.sh
+          {
+            echo "## Production: ${{ needs.verify.outputs.commit }} is in service"
+            echo
+            echo "\`https://$HOST\` answers with version \`$EXPECTED_VERSION\`. To roll back, promote the previous release run (docs/DEPLOYMENT.md, Production)."
+          } >> "$GITHUB_STEP_SUMMARY"

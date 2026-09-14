@@ -139,3 +139,17 @@ run "no_https" {
 
   expect_failures = [var.ingress_domain_name]
 }
+
+run "e2e_account_in_production" {
+  command = plan
+
+  module {
+    source = "../../modules/platform"
+  }
+
+  variables {
+    create_e2e_account = true
+  }
+
+  expect_failures = [var.create_e2e_account]
+}

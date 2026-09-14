@@ -1,0 +1,389 @@
+# Deploys one commit's images, by digest, to one environment. Called by
+# release.yml; not runnable on its own.
+#
+# The job runs inside the GitHub environment it deploys to, which is what
+# makes the OIDC token's subject `repo:<repository>:environment:<name>`:
+# the only subject the environment's deploy role trusts
+# (infrastructure/terraform/modules/platform/deploy.tf). Whatever protection
+# the environment carries in GitHub gates this job, and so the role. The
+# staging role cannot touch production and the production role cannot
+# touch staging; this workflow holds one at a time and only ever the one
+# for the environment it was called with.
+#
+# What the job does, in order: confirm the registry holds, under this
+# commit's tag, exactly the digests the images job produced (a deployment
+# names images by digest, section 32; "latest" is never a reference here);
+# write the Kubernetes Secrets from Secrets Manager; render the overlay with
+# those digests, leaving out the objects a cluster admin owns; apply
+# server-side; wait for the migration Job; wait for both rollouts, with a
+# timeout on each and, where asked, a rollback to the previous revision if
+# a rollout fails; provision the end-to-end account where the environment
+# has one. Whatever happens, the manifests as applied and, on failure, the
+# cluster's account of what went wrong are uploaded as an artifact. No
+# secret value is ever printed: each is masked the moment it is read.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: staging or production
+        required: true
+        type: string
+      commit:
+        description: The commit being deployed; the manifests are taken from it
+        required: true
+        type: string
+      image_tag:
+        description: The tag both images carry in ECR (sha-<commit>)
+        required: true
+        type: string
+      api_gateway_digest:
+        description: Digest of vitalmesh/api-gateway as the images job pushed it
+        required: true
+        type: string
+      processor_digest:
+        description: Digest of vitalmesh/processor as the images job pushed it
+        required: true
+        type: string
+      rollback_on_failure:
+        description: If a rollout does not complete, roll both Deployments back to their previous revision before failing
+        required: false
+        type: boolean
+        default: false
+    outputs:
+      ingress_host:
+        description: The hostname the environment's Ingress serves, or empty if it has none
+        value: ${{ jobs.deploy.outputs.ingress_host }}
+      version:
+        description: The version string compiled into the released images (the short commit)
+        value: ${{ jobs.deploy.outputs.version }}
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: ubuntu-24.04
+    # The sum of the step timeouts below plus a margin: nothing here may
+    # hang for longer than a person would wait.
+    timeout-minutes: 40
+    environment: ${{ inputs.environment }}
+    # One deployment per environment at a time, in order.
+    concurrency:
+      group: deploy-${{ inputs.environment }}
+      cancel-in-progress: false
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      ingress_host: ${{ steps.facts.outputs.ingress_host }}
+      version: ${{ steps.version.outputs.version }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+      REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION || 'eu-central-1' }}.amazonaws.com
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      ENVIRONMENT: ${{ inputs.environment }}
+      # The same pinned tools scripts/k8s-validate.sh renders with.
+      KUSTOMIZE_IMAGE: registry.k8s.io/kustomize/kustomize:v5.4.3
+      YQ_IMAGE: mikefarah/yq:4.44.6
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.commit }}
+
+      # The references have the shape a commit-pinned deployment has, before
+      # any credential is obtained.
+      - name: The references are a commit tag and two digests
+        env:
+          GATEWAY_DIGEST: ${{ inputs.api_gateway_digest }}
+          PROCESSOR_DIGEST: ${{ inputs.processor_digest }}
+        run: |
+          set -euo pipefail
+          if ! echo "$IMAGE_TAG" | grep -Eq '^sha-[0-9a-f]{40}$'; then
+            echo "::error::image_tag must be sha-<40 hex commit>, got '$IMAGE_TAG'; 'latest' or a branch name is never deployed"
+            exit 1
+          fi
+          for d in "$GATEWAY_DIGEST" "$PROCESSOR_DIGEST"; do
+            if ! echo "$d" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::a digest input is not sha256:<64 hex>: '$d'"
+              exit 1
+            fi
+          done
+
+      # What the images report as their version: the short commit, as
+      # `make docker-build` compiled it in. The smoke test checks the
+      # running service says the same.
+      - name: The released version
+        id: version
+        run: echo "version=$(git rev-parse --short "${{ inputs.commit }}")" >> "$GITHUB_OUTPUT"
+
+      - name: Assume the ${{ inputs.environment }} deploy role through OIDC
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/vitalmesh-${{ inputs.environment }}-deploy
+          role-session-name: gha-deploy-${{ inputs.environment }}-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Identity
+        run: aws sts get-caller-identity
+
+      # Where everything is, from the parameter Terraform keeps current.
+      # The first ten keys are required; the last three describe what the
+      # environment may not have (a hostname, a test account).
+      - name: Deployment facts
+        id: facts
+        run: |
+          set -euo pipefail
+          facts="$(aws ssm get-parameter --name "/vitalmesh/$ENVIRONMENT/deploy" --query Parameter.Value --output text)"
+          for key in cluster_name namespace database_address database_port database_name database_master_secret_arn redis_primary_endpoint redis_port redis_auth_secret_arn app_secret_arn; do
+            value="$(printf '%s' "$facts" | jq -r --arg k "$key" '.[$k]')"
+            if [ -z "$value" ] || [ "$value" = "null" ]; then
+              echo "::error::deploy parameter lacks $key"
+              exit 1
+            fi
+            echo "$key=$value" >> "$GITHUB_OUTPUT"
+          done
+          for key in ingress_host e2e_email e2e_secret_arn; do
+            echo "$key=$(printf '%s' "$facts" | jq -r --arg k "$key" '.[$k] // ""')" >> "$GITHUB_OUTPUT"
+          done
+          echo "cluster $(printf '%s' "$facts" | jq -r .cluster_name), namespace $(printf '%s' "$facts" | jq -r .namespace), host $(printf '%s' "$facts" | jq -r '.ingress_host // "(none)"')"
+
+      # The registry's digest for this commit's tag must be the digest the
+      # images job produced: what is deployed is what was scanned and
+      # pushed, and nothing has replaced it since.
+      - name: The registry holds these digests under this tag
+        env:
+          GATEWAY_DIGEST: ${{ inputs.api_gateway_digest }}
+          PROCESSOR_DIGEST: ${{ inputs.processor_digest }}
+        run: |
+          set -euo pipefail
+          check() {
+            actual="$(aws ecr describe-images --repository-name "vitalmesh/$1" --image-ids "imageTag=$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+            if [ "$actual" != "$2" ]; then
+              echo "::error::vitalmesh/$1:$IMAGE_TAG is $actual in the registry, but the images job pushed $2"
+              exit 1
+            fi
+            echo "vitalmesh/$1:$IMAGE_TAG = $2"
+          }
+          check api-gateway "$GATEWAY_DIGEST"
+          check processor "$PROCESSOR_DIGEST"
+
+      - name: Cluster credentials
+        run: |
+          set -euo pipefail
+          aws eks update-kubeconfig --name "${{ steps.facts.outputs.cluster_name }}" --region "$AWS_REGION" >/dev/null
+          kubectl version --client
+          kubectl auth can-i create deployments -n "${{ steps.facts.outputs.namespace }}"
+
+      # Each value is masked as soon as it is read, so nothing below can
+      # print it, and the composed URLs (which carry a password and a token)
+      # are masked too. The values reach kubectl as files in a directory
+      # only this user can read, never as command-line arguments.
+      - name: Kubernetes Secrets from Secrets Manager
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+          APP_SECRET_ARN: ${{ steps.facts.outputs.app_secret_arn }}
+          REDIS_SECRET_ARN: ${{ steps.facts.outputs.redis_auth_secret_arn }}
+          DB_SECRET_ARN: ${{ steps.facts.outputs.database_master_secret_arn }}
+          DB_HOST: ${{ steps.facts.outputs.database_address }}
+          DB_PORT: ${{ steps.facts.outputs.database_port }}
+          DB_NAME: ${{ steps.facts.outputs.database_name }}
+          REDIS_HOST: ${{ steps.facts.outputs.redis_primary_endpoint }}
+          REDIS_PORT: ${{ steps.facts.outputs.redis_port }}
+        run: |
+          set -euo pipefail
+          umask 077
+          dir="$(mktemp -d)"
+          trap 'rm -rf "$dir"' EXIT
+
+          app="$(aws secretsmanager get-secret-value --secret-id "$APP_SECRET_ARN" --query SecretString --output text)"
+          jwt_secret="$(printf '%s' "$app" | jq -r .JWT_SECRET)";           echo "::add-mask::$jwt_secret"
+          processor_token="$(printf '%s' "$app" | jq -r .PROCESSOR_TOKEN)"; echo "::add-mask::$processor_token"
+
+          redis_token="$(aws secretsmanager get-secret-value --secret-id "$REDIS_SECRET_ARN" --query SecretString --output text)"
+          echo "::add-mask::$redis_token"
+
+          db="$(aws secretsmanager get-secret-value --secret-id "$DB_SECRET_ARN" --query SecretString --output text)"
+          db_user="$(printf '%s' "$db" | jq -r .username)"
+          db_password="$(printf '%s' "$db" | jq -r .password)";        echo "::add-mask::$db_password"
+          db_password_uri="$(printf '%s' "$db" | jq -r '.password|@uri')"; echo "::add-mask::$db_password_uri"
+
+          # sslmode=require; verify-full once the images carry the RDS CA
+          # bundle (infrastructure/terraform/README.md, Secrets).
+          database_url="postgres://${db_user}:${db_password_uri}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require"
+          redis_url="rediss://:${redis_token}@${REDIS_HOST}:${REDIS_PORT}"
+          echo "::add-mask::$database_url"
+          echo "::add-mask::$redis_url"
+
+          printf '%s' "$database_url"    > "$dir/DATABASE_URL"
+          printf '%s' "$redis_url"       > "$dir/REDIS_URL"
+          printf '%s' "$jwt_secret"      > "$dir/JWT_SECRET"
+          printf '%s' "$processor_token" > "$dir/PROCESSOR_TOKEN"
+          printf '%s' "$processor_token" > "$dir/INTERNAL_TOKEN"
+
+          kubectl create secret generic "vitalmesh-api-gateway-$ENVIRONMENT" -n "$NAMESPACE" \
+            --from-file="DATABASE_URL=$dir/DATABASE_URL" --from-file="REDIS_URL=$dir/REDIS_URL" \
+            --from-file="JWT_SECRET=$dir/JWT_SECRET" --from-file="PROCESSOR_TOKEN=$dir/PROCESSOR_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -
+          kubectl create secret generic "vitalmesh-processor-$ENVIRONMENT" -n "$NAMESPACE" \
+            --from-file="INTERNAL_TOKEN=$dir/INTERNAL_TOKEN" \
+            --dry-run=client -o yaml | kubectl apply --server-side --force-conflicts -f -
+
+      # The overlay, with this commit's digests in place of the committed
+      # `set-by-ci` tags, and without the objects a cluster admin owns (the
+      # Namespace, its ResourceQuota and LimitRange, applied once by hand;
+      # the deploy role cannot touch them, which is the point).
+      - name: Render the overlay
+        env:
+          GATEWAY_DIGEST: ${{ inputs.api_gateway_digest }}
+          PROCESSOR_DIGEST: ${{ inputs.processor_digest }}
+        run: |
+          set -euo pipefail
+          overlay="infrastructure/kubernetes/overlays/$ENVIRONMENT"
+          docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/infrastructure/kubernetes:/kube" -w "/kube/overlays/$ENVIRONMENT" "$KUSTOMIZE_IMAGE" \
+            edit set image "vitalmesh/api-gateway=$REGISTRY/vitalmesh/api-gateway@$GATEWAY_DIGEST" "vitalmesh/processor=$REGISTRY/vitalmesh/processor@$PROCESSOR_DIGEST"
+          docker run --rm -v "$PWD/infrastructure/kubernetes:/kube:ro" -w "/kube/overlays/$ENVIRONMENT" "$KUSTOMIZE_IMAGE" build . > rendered.yaml
+          docker run --rm -i "$YQ_IMAGE" 'select(.kind != "Namespace" and .kind != "ResourceQuota" and .kind != "LimitRange")' < rendered.yaml > apply.yaml
+          echo "rendering $overlay: $(grep -c '^kind:' rendered.yaml) objects, $(grep -c '^kind:' apply.yaml) to apply"
+          grep -E '^\s+image: ' apply.yaml | sort -u
+          # Belt and braces: nothing rendered may reference a tag.
+          if grep -E '^\s+image: .*:(latest|dev|set-by-ci)$' apply.yaml; then echo "::error::a rendered image reference is a tag, not a digest"; exit 1; fi
+
+      # A Job's spec is immutable, so last release's migration Job goes
+      # before this one is applied (infrastructure/kubernetes/README.md).
+      - name: Apply
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+        run: |
+          set -euo pipefail
+          kubectl -n "$NAMESPACE" delete job vitalmesh-migrate --ignore-not-found
+          kubectl apply --server-side --force-conflicts -f apply.yaml
+
+      - name: Migrations (up to 15 minutes)
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+        run: |
+          set -euo pipefail
+          if ! kubectl -n "$NAMESPACE" wait --for=condition=complete --timeout=15m job/vitalmesh-migrate; then
+            echo "::error::the migration Job did not complete"
+            kubectl -n "$NAMESPACE" describe job vitalmesh-migrate | tail -30
+            kubectl -n "$NAMESPACE" logs job/vitalmesh-migrate --all-containers --tail=100 || true
+            exit 1
+          fi
+
+      # Rolling updates with maxUnavailable 0 and readiness gates from the
+      # load balancer: the old pods stay until the new ones are Ready and
+      # registered, so a build that cannot start never takes traffic. Ten
+      # minutes each is well beyond a healthy rollout. On failure, with
+      # rollback_on_failure, both Deployments go back to their previous
+      # revision (the previous digests), and the step still fails: a
+      # rollback is a recovery, not a success.
+      - name: Rollout (up to 10 minutes each)
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+          ROLLBACK: ${{ inputs.rollback_on_failure }}
+        run: |
+          set -euo pipefail
+          failed=""
+          for d in vitalmesh-processor vitalmesh-api-gateway; do
+            if ! kubectl -n "$NAMESPACE" rollout status "deployment/$d" --timeout=10m; then
+              failed="$failed $d"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "::error::rollout did not complete for:$failed"
+            if [ "$ROLLBACK" = "true" ]; then
+              echo "rolling both Deployments back to their previous revision"
+              for d in vitalmesh-api-gateway vitalmesh-processor; do
+                kubectl -n "$NAMESPACE" rollout undo "deployment/$d" || true
+              done
+              for d in vitalmesh-api-gateway vitalmesh-processor; do
+                kubectl -n "$NAMESPACE" rollout status "deployment/$d" --timeout=5m || echo "::error::rollback of $d did not complete either"
+              done
+              echo "::warning::rolled back; the environment runs the previous revision. Note that migrations are not rolled back (docs/DEPLOYMENT.md)."
+            fi
+            exit 1
+          fi
+
+      # The account the end-to-end tests sign in with, created with the
+      # gateway's own command inside the cluster: the pod is the migration
+      # Job's own template (same image digest, same restricted security
+      # context, same labels, so the same NetworkPolicy lets it reach the
+      # database) with the command swapped, and the password on its
+      # standard input. Creating an account that exists fails, which is
+      # fine; the sign-in in the E2E job is the check that matters.
+      - name: End-to-end account
+        if: steps.facts.outputs.e2e_secret_arn != ''
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+          E2E_EMAIL: ${{ steps.facts.outputs.e2e_email }}
+          E2E_SECRET_ARN: ${{ steps.facts.outputs.e2e_secret_arn }}
+          GATEWAY_IMAGE: ${{ env.REGISTRY }}/vitalmesh/api-gateway@${{ inputs.api_gateway_digest }}
+        run: |
+          set -euo pipefail
+          password="$(aws secretsmanager get-secret-value --secret-id "$E2E_SECRET_ARN" --query SecretString --output text)"
+          echo "::add-mask::$password"
+          overrides="$(docker run --rm -i -e E2E_EMAIL "$YQ_IMAGE" -o json 'select(.kind == "Job" and .metadata.name == "vitalmesh-migrate") | {"apiVersion": "v1", "kind": "Pod", "metadata": {"labels": .spec.template.metadata.labels}, "spec": (.spec.template.spec | .restartPolicy = "Never" | .containers[0].name = "vitalmesh-e2e-account" | .containers[0].args = ["users", "create", strenv(E2E_EMAIL), "OPERATOR"] | .containers[0].stdin = true | .containers[0].stdinOnce = true)}' < apply.yaml)"
+          if printf '%s\n' "$password" | kubectl run vitalmesh-e2e-account -n "$NAMESPACE" --image="$GATEWAY_IMAGE" -i --rm --restart=Never --quiet --overrides="$overrides"; then
+            echo "created $E2E_EMAIL"
+          else
+            echo "$E2E_EMAIL was not created now (it normally exists already); the E2E sign-in is the check"
+          fi
+
+      # What the cluster has to say when something above failed: the pods,
+      # their recent events, the description of any that are not running,
+      # and the last lines of each container's logs (the services never log
+      # secrets). Collected into the artifact below.
+      - name: Diagnostics
+        if: failure()
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+        run: |
+          mkdir -p diagnostics
+          {
+            echo "== pods"; kubectl -n "$NAMESPACE" get pods -o wide
+            echo; echo "== deployments"; kubectl -n "$NAMESPACE" get deployments,replicasets,jobs -o wide
+            echo; echo "== events (last 200)"; kubectl -n "$NAMESPACE" get events --sort-by=.lastTimestamp | tail -200
+          } > diagnostics/overview.txt 2>&1 || true
+          for pod in $(kubectl -n "$NAMESPACE" get pods -o jsonpath='{range .items[?(@.status.phase!="Running")]}{.metadata.name}{"\n"}{end}' 2>/dev/null); do
+            kubectl -n "$NAMESPACE" describe pod "$pod" > "diagnostics/describe-$pod.txt" 2>&1 || true
+          done
+          for pod in $(kubectl -n "$NAMESPACE" get pods -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+            kubectl -n "$NAMESPACE" logs "$pod" --all-containers --tail=300 > "diagnostics/logs-$pod.txt" 2>&1 || true
+            kubectl -n "$NAMESPACE" logs "$pod" --all-containers --previous --tail=300 > "diagnostics/logs-$pod-previous.txt" 2>&1 || rm -f "diagnostics/logs-$pod-previous.txt"
+          done
+          ls -la diagnostics
+
+      # The manifests exactly as applied (digests included; no Secret is in
+      # them) and, on failure, the diagnostics: what a person needs to see
+      # what this run did to the cluster.
+      - name: Artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: deploy-${{ inputs.environment }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            rendered.yaml
+            apply.yaml
+            diagnostics/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Summary
+        if: always()
+        env:
+          NAMESPACE: ${{ steps.facts.outputs.namespace }}
+        run: |
+          {
+            echo "## ${{ inputs.environment }}: ${{ inputs.commit }}"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| version | \`${{ steps.version.outputs.version }}\` |"
+            echo "| gateway | \`${{ inputs.api_gateway_digest }}\` |"
+            echo "| processor | \`${{ inputs.processor_digest }}\` |"
+            echo "| host | \`${{ steps.facts.outputs.ingress_host || '(none)' }}\` |"
+            echo "| ingress | \`$(kubectl -n "$NAMESPACE" get ingress vitalmesh-api-gateway -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo 'not yet')\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

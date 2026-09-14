@@ -88,6 +88,10 @@ module "platform" {
   log_retention_days = 14
   alarm_email        = var.alarm_email
 
+  # The end-to-end tests' account, which only staging has: its data is
+  # synthetic, and the pipeline signs in to it after every deployment.
+  create_e2e_account = true
+
   # Deleted secrets go immediately, so a destroyed staging can be recreated
   # under the same secret names the next day.
   secret_recovery_window_days = 0

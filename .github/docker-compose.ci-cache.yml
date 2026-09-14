@@ -1,0 +1,25 @@
+# Layered onto docker-compose.yml by CI only:
+#
+#   COMPOSE="docker compose -f docker-compose.yml -f .github/docker-compose.ci-cache.yml"
+#   COMPOSE_BAKE=true make docker-build
+#
+# It adds nothing to the build definition; it tells BuildKit to read and
+# write image layers in the GitHub Actions cache, one scope per image, so
+# an unchanged Go module download or Cargo dependency build is not
+# repeated on every run. The cache is a performance detail: a cache miss
+# builds from scratch and produces the same image, which is why it is safe
+# to use for what is verified and scanned. A developer's `docker compose
+# build` does not see this file and behaves as before.
+services:
+  api-gateway:
+    build:
+      cache_from:
+        - type=gha,scope=api-gateway
+      cache_to:
+        - type=gha,mode=max,scope=api-gateway
+  processor:
+    build:
+      cache_from:
+        - type=gha,scope=processor
+      cache_to:
+        - type=gha,mode=max,scope=processor

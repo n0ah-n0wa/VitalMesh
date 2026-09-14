@@ -1,9 +1,23 @@
+# The pipeline. Every job runs a `make` target, so that what CI checks and
+# what a developer runs are the same commands (docs/DEVELOPMENT.md,
+# "Reproducing CI locally"); the workflow adds only the runners, the service
+# containers and the caches.
+#
+# Jobs run in parallel and none is optional: the `ci` job at the end is the
+# one branch protection requires, and it fails if any other did. Caches
+# hold downloads and build layers only (Go modules, Cargo registry and
+# target, image layers, the vulnerability database, provider plugins):
+# nothing whose staleness could change a verdict.
+#
+# Every action is pinned to a commit, not a tag. A tag can be moved; the
+# comment beside each pin says which release it was taken from.
 name: CI
 
 on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions: {}
 
@@ -11,11 +25,126 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  # Caches for the container-based tools, restored by actions/cache below.
+  # Locally these are Docker named volumes; the Makefile takes either.
+  TRIVY_CACHE: ${{ github.workspace }}/.cache/trivy
+  TF_PLUGIN_CACHE: ${{ github.workspace }}/.cache/tf-plugins
+
 jobs:
-  verify:
-    name: make verify
+  # ------------------------------------------------------------------ Go
+
+  go:
+    name: go
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      # The version comes from go.mod; the module cache is keyed on go.sum,
+      # so a dependency change invalidates it and nothing else does.
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
+
+      - name: Dependencies
+        run: make setup-go
+
+      - name: Formatting (gofmt)
+        run: make format-check-go
+
+      - name: Static analysis (go vet, every build tag)
+        run: make lint-go
+
+      - name: Unit tests (race detector)
+        run: make test-go
+
+  # ---------------------------------------------------------------- Rust
+
+  rust:
+    name: rust
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Toolchain pinned in rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' services/processor/rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          rustup default "$channel"
+
+      # Registry and target directory, keyed on Cargo.lock and the toolchain.
+      # Cargo checks every cached artifact's fingerprint before using it, so
+      # a stale entry is rebuilt, never trusted.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/processor
+
+      - name: Dependencies
+        run: make setup-rust
+
+      - name: Formatting (rustfmt)
+        run: make format-check-rust
+
+      - name: Static analysis (clippy, warnings are errors)
+        run: make lint-rust
+
+      - name: Tests
+        run: make test-rust
+
+  # ----------------------------------------------------------- contracts
+
+  # Both services against the API contracts, and the contracts against
+  # their lock file: a change to either side that the other does not agree
+  # with fails here.
+  contracts:
+    name: contracts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
+
+      - name: Toolchain pinned in rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' services/processor/rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/processor
+
+      - name: Contract tests
+        run: make contracts-check
+
+  # --------------------------------------------------------- integration
+
+  # The gateway against a real PostgreSQL and a real Redis, then the real
+  # gateway against the real processor binary. The service containers are
+  # the same images docker-compose.yml runs locally.
+  integration:
+    name: integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
     permissions:
       contents: read
     services:
@@ -50,31 +179,127 @@ jobs:
       TEST_REDIS_URL: redis://localhost:6379
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
         with:
           go-version-file: services/api-gateway/go.mod
-          cache-dependency-path: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
 
-      - name: Install Rust toolchain pinned in rust-toolchain.toml
+      - name: Toolchain pinned in rust-toolchain.toml
         run: |
           channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' services/processor/rust-toolchain.toml)"
-          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+          rustup toolchain install "$channel" --profile minimal
           rustup default "$channel"
 
-      - run: make verify
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/processor
+
+      # The unit suite runs again here, for its coverage profile: the merged
+      # floor below needs every suite's profile in one place.
+      - name: Unit tests (for the merged coverage profile)
+        run: make test-go
+
+      - name: PostgreSQL integration tests
+        run: make integration-test-postgres
+
+      - name: Redis integration tests
+        run: make integration-test-redis
+
+      - name: End-to-end (gateway against the processor binary)
+        run: make e2e-test
+
+      - name: Coverage across every suite, against the floor
+        run: |
+          set -euo pipefail
+          make coverage-go 2>&1 | tee services/api-gateway/coverage.txt
+          { echo "## Go coverage"; echo; echo '```'; cat services/api-gateway/coverage.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage profile
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: go-coverage-${{ github.run_id }}-${{ github.run_attempt }}
+          path: services/api-gateway/coverage*.out
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # --------------------------------------------------------------- build
+
+  build:
+    name: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
+
+      - name: Toolchain pinned in rust-toolchain.toml
+        run: |
+          channel="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' services/processor/rust-toolchain.toml)"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: services/processor
+
+      - name: Build both services
+        run: make build
+
+      - name: Line endings in the index
+        run: make line-endings
+
+  # ---------------------------------------------------------- containers
 
   # Images are built and checked on their own, not inside `make verify`: the
   # verification gates must stay runnable without a container runtime, and a
   # slow image build must not sit in front of the tests.
   containers:
-    name: images
+    name: containers
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 30
     permissions:
       contents: read
+    env:
+      # The override adds the GitHub Actions layer cache to the build;
+      # COMPOSE_BAKE routes the build through BuildKit's bake, which is
+      # what can read and write that cache. The build definition is still
+      # docker-compose.yml.
+      COMPOSE: docker compose -f docker-compose.yml -f .github/docker-compose.ci-cache.yml
+      COMPOSE_BAKE: "true"
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      # A docker-container builder: the default builder cannot export layers
+      # to a remote cache.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Today, for the cache key
+        id: today
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TRIVY_CACHE }}
+          key: trivy-db-${{ runner.os }}-${{ steps.today.outputs.date }}
+          # Trivy refreshes a database older than its own freshness window,
+          # so restoring yesterday's is a head start, not a stale verdict.
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
 
       - name: Build both images
         run: make docker-build
@@ -89,8 +314,62 @@ jobs:
       # Fails the build on a HIGH or CRITICAL finding. A base image picks up
       # vulnerabilities over time without the code changing, so this is the
       # check that ages, and it is meant to.
-      - name: Scan the images and the lock files
+      - name: Scan the images and the Dockerfiles
         run: make docker-scan
+
+  # -------------------------------------------------------- dependencies
+
+  dependencies:
+    name: dependency scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
+
+      - name: Today, for the cache key
+        id: today
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TRIVY_CACHE }}
+          key: trivy-db-${{ runner.os }}-${{ steps.today.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Lock files (trivy) and reachable Go vulnerabilities (govulncheck)
+        run: make deps-scan
+
+  # ------------------------------------------------------------- secrets
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      # The whole history, not the latest commit: a secret removed in a
+      # later commit is still in every clone.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Git history and working tree (gitleaks)
+        run: make secret-scan
+
+  # ---------------------------------------------------------- Kubernetes
 
   # Manifests are checked on their own: the gates need no Go or Rust
   # toolchain and no database, and a schema error should not wait behind a
@@ -103,22 +382,117 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
-      - name: Validate the Kubernetes manifests
+      - name: Today, for the cache key
+        id: today
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TRIVY_CACHE }}
+          key: trivy-db-${{ runner.os }}-${{ steps.today.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Render, schema-check, lint and scan every overlay
         run: make k8s-validate
 
-  # The Terraform is checked without AWS: init skips the backend and validate
-  # never configures a provider, so this job needs no credentials and is
-  # given none. Planning against a real account is a separate, credentialed
-  # step.
+  # ----------------------------------------------------------- Terraform
+
+  # The Terraform is checked without AWS: init skips the backend, validate
+  # never configures a provider and the tests run against a mocked one, so
+  # this job needs no credentials and is given none. Planning against a
+  # real account is a separate, credentialed step.
   terraform:
     name: terraform
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
 
-      - name: Validate the Terraform
+      # The AWS provider is well over a hundred megabytes. Keyed on the lock
+      # files, which pin every provider's checksum: a cached plugin that did
+      # not match them would be refused by init, not used.
+      - name: Provider plugin cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE }}
+          key: tf-plugins-${{ runner.os }}-${{ hashFiles('infrastructure/terraform/**/.terraform.lock.hcl') }}
+
+      - name: Today, for the cache key
+        id: today
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TRIVY_CACHE }}
+          key: trivy-db-${{ runner.os }}-${{ steps.today.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      - name: Format, validate, test against a mocked AWS, and scan
         run: make tf-validate
+
+  # ------------------------------------------------------------- verdict
+
+  # The one check branch protection requires. It runs whatever happened
+  # above and fails unless every job succeeded, so a skipped or cancelled
+  # job cannot pass as green.
+  ci:
+    name: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    if: always()
+    needs:
+      - go
+      - rust
+      - contracts
+      - integration
+      - build
+      - containers
+      - dependencies
+      - secrets
+      - manifests
+      - terraform
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          sparse-checkout: .github/workflows/ci.yml
+          sparse-checkout-cone-mode: false
+
+      # Three ways this could go green wrongly, each closed: a jq failure
+      # producing an empty list (pipefail, and the count is checked); a job
+      # that did not run (its result is "skipped", not "success"); and a job
+      # added to this file but not to the needs list above (the list is
+      # compared with the file's own jobs).
+      - name: Every job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$RESULTS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          required="$(echo "$RESULTS" | jq -r 'keys[]' | sort)"
+          declared="$(yq '.jobs | keys | .[]' .github/workflows/ci.yml | grep -vx ci | sort)"
+          if [ "$required" != "$declared" ]; then
+            echo "::error::the ci job does not require every job in ci.yml"
+            diff <(echo "$required") <(echo "$declared") || true
+            exit 1
+          fi
+          total="$(echo "$RESULTS" | jq 'length')"
+          succeeded="$(echo "$RESULTS" | jq '[.[] | select(.result == "success")] | length')"
+          if [ "$total" -lt 1 ] || [ "$succeeded" != "$total" ]; then
+            echo "::error::not green: $succeeded of $total required jobs succeeded"
+            echo "$RESULTS" | jq -r 'to_entries[] | select(.value.result != "success") | "  \(.key): \(.value.result)"'
+            exit 1
+          fi
+          echo "green: all $total required jobs succeeded"

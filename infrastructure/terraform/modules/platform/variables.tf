@@ -256,6 +256,18 @@ variable "secret_recovery_window_days" {
   type        = number
 }
 
+variable "create_e2e_account" {
+  description = "Create the end-to-end test account's secret (vitalmesh/<env>/e2e) and let the deploy role read it. Staging only: its data is synthetic."
+  type        = bool
+  default     = false
+
+  # Production floor: no test account in production.
+  validation {
+    condition     = var.environment != "production" || !var.create_e2e_account
+    error_message = "production must not have an end-to-end test account."
+  }
+}
+
 variable "secret_version" {
   description = "Increase to generate and install new application secrets and a new Redis AUTH token. They never enter Terraform state, so this number is how Terraform knows to write new ones."
   type        = number

@@ -36,8 +36,8 @@ set -eu
 KUSTOMIZE_IMAGE="registry.k8s.io/kustomize/kustomize:v5.4.3"
 KUBECONFORM_IMAGE="ghcr.io/yannh/kubeconform:v0.6.7"
 KUBE_LINTER_IMAGE="stackrox/kube-linter:v0.7.1"
-TRIVY_IMAGE="aquasec/trivy:0.58.2"
-CHECKOV_IMAGE="bridgecrew/checkov:3.2.334"
+TRIVY_IMAGE="aquasec/trivy:0.74.0"
+CHECKOV_IMAGE="bridgecrew/checkov:3.3.17"
 
 # The versions the manifests are claimed to work on. 1.30 is the floor: the
 # preStop sleep handler is GA there. Both are checked so that a field valid
@@ -220,7 +220,7 @@ printf '\nMisconfiguration (trivy)\n'
 # trivy the overlay patch fragments, which are not whole objects — a patch
 # that sets only resource limits has no security context, and every one of
 # them would be reported as missing everything it does not mention.
-if out="$(docker run --rm -v vitalmesh-trivy:/root/.cache/trivy \
+if out="$(docker run --rm -v "${TRIVY_CACHE:-vitalmesh-trivy}:/root/.cache/trivy" \
     -v "$repo/$RENDER_DIR:/scan" -v "$repo/$KUBE_DIR/.trivyignore.yaml:/ignore.yaml:ro" \
     "$TRIVY_IMAGE" config --severity HIGH,CRITICAL --exit-code 1 --quiet \
     --ignorefile /ignore.yaml /scan 2>&1)"; then

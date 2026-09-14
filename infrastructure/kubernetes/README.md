@@ -200,7 +200,12 @@ inside one.
 
 ## Not here yet
 
-The retention `CronJob` and ECR image references. The deployed component's
-Ingress annotations and the readiness-gate label are the one cloud-specific
-part of these manifests; `platform/README.md` says why an Application Load
-Balancer rather than an in-cluster ingress controller.
+The retention `CronJob`. The deployed component's Ingress annotations and
+the readiness-gate label are the one cloud-specific part of these
+manifests; `platform/README.md` says why an Application Load Balancer
+rather than an in-cluster ingress controller. Image references are set at
+deploy time: `.github/workflows/deploy.yml` replaces the committed
+`set-by-ci` tags with the ECR digests of the commit being deployed, writes
+the Kubernetes Secrets from Secrets Manager, and applies the overlay
+without the Namespace, ResourceQuota and LimitRange (a cluster admin's,
+applied once) with the commands above.

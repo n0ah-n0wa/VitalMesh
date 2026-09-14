@@ -35,3 +35,8 @@ override.tf.json
 # secrets, but specific to one AWS account; the .example beside each is
 # what is committed.
 terraform.tfvars
+
+# Go coverage profiles, written by make test-go, the integration targets and
+# make e2e-test, merged by make coverage-go.
+services/api-gateway/coverage*.out
+services/api-gateway/coverage.txt

@@ -25,8 +25,8 @@
 set -eu
 
 TERRAFORM_IMAGE="hashicorp/terraform:1.16.2"
-TRIVY_IMAGE="aquasec/trivy:0.58.2"
-CHECKOV_IMAGE="bridgecrew/checkov:3.2.334"
+TRIVY_IMAGE="aquasec/trivy:0.74.0"
+CHECKOV_IMAGE="bridgecrew/checkov:3.3.17"
 
 TF_DIR="infrastructure/terraform"
 ROOTS="bootstrap environments/staging environments/production"
@@ -63,7 +63,7 @@ tf() {
     shift
     docker run --rm \
         -v "$repo/$TF_DIR:/tf" -w "/tf/$workdir" \
-        -v vitalmesh-tf-plugins:/plugins -e TF_PLUGIN_CACHE_DIR=/plugins \
+        -v "${TF_PLUGIN_CACHE:-vitalmesh-tf-plugins}:/plugins" -e TF_PLUGIN_CACHE_DIR=/plugins \
         -e TF_IN_AUTOMATION=1 \
         "$TERRAFORM_IMAGE" "$@"
 }
@@ -124,7 +124,7 @@ done
 # #checkov:skip comment on the resource concerned with the argument beside
 # it. The one exception is the policy-wide skip in .checkov.yaml.
 printf '\nMisconfiguration (trivy)\n'
-if out="$(docker run --rm -v vitalmesh-trivy:/root/.cache/trivy \
+if out="$(docker run --rm -v "${TRIVY_CACHE:-vitalmesh-trivy}:/root/.cache/trivy" \
     -v "$repo/$TF_DIR:/scan:ro" \
     "$TRIVY_IMAGE" config --severity HIGH,CRITICAL --exit-code 1 --quiet \
     --skip-dirs "**/.terraform" /scan 2>&1)"; then

@@ -1,3 +1,8 @@
+output "arn" {
+  description = "ARN of the replication group, for resource-scoped IAM statements."
+  value       = aws_elasticache_replication_group.this.arn
+}
+
 output "replication_group_id" {
   description = "ID of the replication group."
   value       = aws_elasticache_replication_group.this.id

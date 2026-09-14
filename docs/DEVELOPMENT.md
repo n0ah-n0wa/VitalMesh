@@ -29,33 +29,148 @@ Line endings: `.gitattributes` forces LF for every text file, so a Windows `core
 
 ## Make targets
 
-Run `make help` for the list. The gates that CI runs are exactly the ones `make verify` runs locally.
+Run `make help` for the list. Every CI job runs one of these targets and nothing else, so what CI checks and what you run are the same commands; `make verify` is the code gates together, `make ci-local` is everything (see [Reproducing CI locally](#reproducing-ci-locally)).
 
 | Target | What it does |
 |---|---|
-| `make setup` | checks that `go` and `cargo` are installed, downloads Go modules and Cargo crates |
+| `make setup` | checks that `go` and `cargo` are installed, then `setup-go` (Go modules) and `setup-rust` (Cargo crates, `--locked`) |
 | `make format` | `gofmt -w` and `cargo fmt` |
-| `make format-check` | fails if any file is not formatted |
-| `make lint` | `go vet` and `cargo clippy --all-targets -D warnings` |
-| `make test` | unit tests: `go test -race ./...` and `cargo test` |
+| `make format-check` | `format-check-go` and `format-check-rust`: fails if any file is not formatted |
+| `make lint` | `lint-go` (`go vet`, with every build tag) and `lint-rust` (`cargo clippy --all-targets -D warnings`) |
+| `make test` | `test-go` (`go test -race ./...`, with the unit coverage floor) and `test-rust` (`cargo test`) |
 | `make contracts-check` | checks the API contracts and that both services' types agree with them |
 | `make contracts-lock` | re-records a reviewed contract change in its lock file |
 | `make dev-db` / `make dev-redis` | start the local PostgreSQL / Redis (`docker compose`) |
 | `make docker-build` | build both service images |
 | `make docker-verify` | check the images run as non-root, carry no shell and report healthy |
-| `make docker-scan` | scan the images and the lock files, failing on HIGH or CRITICAL |
+| `make docker-scan` | scan the built images and the service Dockerfiles, failing on HIGH or CRITICAL |
+| `make deps-scan` | scan `Cargo.lock` and `go.sum` (trivy) and the reachable Go call graph (govulncheck), failing on HIGH or CRITICAL |
+| `make secret-scan` | gitleaks over the whole git history and the working tree |
 | `make observability-up` / `-down` | start / stop Prometheus, Grafana and the OpenTelemetry collector |
 | `make observability-smoke` | check the running stack is scraping, recording and receiving spans |
 | `make dev-db-down` | stop and remove the local infrastructure |
-| `make integration-test` | integration tests against `TEST_DATABASE_URL` and `TEST_REDIS_URL` (default: the local PostgreSQL and Redis) |
+| `make integration-test` | `integration-test-postgres` (the repository, the application layer, the processor client) and `integration-test-redis` (the client, the cache, rate limiting), against `TEST_DATABASE_URL` and `TEST_REDIS_URL` (default: the local PostgreSQL and Redis) |
 | `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
+| `make coverage-go` | merges the Go coverage profiles from every suite and checks the merged floor (`GO_COVERAGE_MIN_ALL`) |
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make build` | builds `bin/api-gateway` and `services/processor/target/debug/processor` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
-| `make verify` | `format-check lint test contracts-check integration-test e2e-test build line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
+| `make verify` | `format-check lint test contracts-check integration-test e2e-test coverage-go build line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
+| `make ci-local` | `verify`, then `deps-scan secret-scan docker-build docker-verify docker-scan k8s-validate tf-validate`: every check CI runs; needs Docker as well |
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
+
+## Reproducing CI locally
+
+CI (`.github/workflows/ci.yml`) is ten jobs that each run one `make`
+target, plus a final `ci` job that fails unless all ten succeeded; that
+last one is what branch protection requires. The workflow adds only what a
+laptop does not have by default: the runners, the PostgreSQL and Redis
+service containers, and caches. Nothing it checks is CI-only.
+
+| CI job | Runs | What it needs |
+|---|---|---|
+| `go` | `make setup-go format-check-go lint-go test-go` | Go |
+| `rust` | `make setup-rust format-check-rust lint-rust test-rust` | Rust |
+| `contracts` | `make contracts-check` | Go and Rust |
+| `integration` | `make test-go integration-test-postgres integration-test-redis e2e-test coverage-go` | Go, Rust, PostgreSQL and Redis (`make dev-db dev-redis`) |
+| `build` | `make build line-endings` | Go, Rust, git |
+| `containers` | `make docker-build docker-verify docker-scan` | Docker |
+| `dependency scan` | `make deps-scan` | Docker (trivy) and Go (govulncheck) |
+| `secret scan` | `make secret-scan` | Docker (gitleaks), the full git history |
+| `kubernetes manifests` | `make k8s-validate` | Docker |
+| `terraform` | `make tf-validate` | Docker |
+
+So:
+
+```bash
+make dev-db dev-redis   # the two services CI provides as containers
+make ci-local           # every job above, in order
+```
+
+or `make verify` for the code gates alone, which is what to run before
+every push; the scans and the image build are slower and rarely change
+their answer for a code-only change.
+
+**Toolchains.** CI installs the Go version from `go.mod` and the Rust
+channel from `rust-toolchain.toml`, which is what `go` and `rustup` do
+locally without being asked. The scanners (trivy, gitleaks, checkov,
+kubeconform, kube-linter, kustomize, terraform) run in pinned containers
+in both places, so their versions cannot differ between your machine and
+CI. The one tool that runs natively is `govulncheck`, pinned by module
+version in the Makefile and fetched by `go run`.
+
+**Without the toolchains** (Windows, or a machine with Docker only), run
+the code gates inside the dev container and the Docker-based jobs from the
+host:
+
+```bash
+docker build -t vitalmesh-dev .devcontainer
+docker run --rm --network vitalmesh -v "$(pwd):/workspace" \
+  -v vitalmesh-target:/tmp/target -e CARGO_TARGET_DIR=/tmp/target \
+  -e TEST_DATABASE_URL='postgres://vitalmesh:vitalmesh@postgres:5432/vitalmesh?sslmode=disable' \
+  -e TEST_REDIS_URL='redis://redis:6379' \
+  vitalmesh-dev make verify
+```
+
+`--network vitalmesh` is the compose network, so `postgres` and `redis`
+resolve inside the container. In Git Bash set `MSYS_NO_PATHCONV=1` first.
+The Docker-based targets (`deps-scan` is the exception: its govulncheck
+half needs Go, so run it in the container too) work from the host with the
+Docker socket, exactly as CI runs them.
+
+**What CI caches, and why it is safe.** Go modules (keyed on `go.sum`),
+the Cargo registry and target directory (keyed on `Cargo.lock` and the
+toolchain; Cargo re-checks every fingerprint), image layers in the GitHub
+Actions cache (`.github/docker-compose.ci-cache.yml`; a miss rebuilds the
+same image), the trivy vulnerability database (trivy refreshes a stale
+one itself), and the Terraform provider plugins (keyed on the lock files,
+whose checksums `init` verifies). Every cache holds downloads or build
+products whose staleness is detected by the tool that uses them; no test
+result, scan verdict or rendered manifest is ever cached. Locally the
+scanner and provider caches are the Docker volumes `vitalmesh-trivy` and
+`vitalmesh-tf-plugins`; `TRIVY_CACHE` and `TF_PLUGIN_CACHE` point them
+elsewhere, which is what CI does.
+
+**The four workflows that touch AWS** (`terraform-plan.yml`,
+`release.yml`, `deploy.yml`, `promote.yml`) are not reproducible locally as workflows:
+they authenticate with short-lived OIDC tokens as roles that trust only
+GitHub's own job identities, and they skip themselves with a notice until
+the repository is configured. [GITHUB_CONFIGURATION.md](GITHUB_CONFIGURATION.md)
+has that configuration; [DEPLOYMENT.md](DEPLOYMENT.md) describes the
+staging pipeline, its timeouts and artifacts, and the rollback procedure.
+The checks those workflows run (`scripts/smoke.sh`, `scripts/demo.sh`, the
+image gates) run locally against `docker compose up`.
+
+**When CI is red and local is green**, the difference is almost always one
+of: the branch is behind `main` (CI merges the pull request first); a
+scanner database updated overnight (a new advisory against an unchanged
+lock file is a real finding, not flakiness); or the git history, which
+`secret-scan` reads in full and a shallow clone lacks.
+
+**Pins outside Dependabot's reach**, to review each quarter: the tool
+images in the Makefile (`TRIVY_IMAGE`, `GITLEAKS_IMAGE`, `GOVULNCHECK`)
+and in `scripts/k8s-validate.sh`, `scripts/tf-validate.sh` and
+`.github/workflows/deploy.yml` (kustomize, kubeconform, kube-linter,
+checkov, terraform, yq, actionlint), and the Helm charts in
+`infrastructure/kubernetes/platform`. Bump the pin, run `make ci-local`,
+triage anything new: a scanner update that surfaces a real finding is
+the update doing its job.
+
+**Coverage.** Every Go suite writes a profile with cross-package
+accounting (`-coverpkg=./...`, so a handler exercised only end to end
+still counts). `make test-go` holds the unit profile at `GO_COVERAGE_MIN`
+(70%); `make coverage-go` merges unit, integration and E2E into
+`services/api-gateway/coverage.out` and holds it at `GO_COVERAGE_MIN_ALL`
+(85%). Both floors are ratchets: raise them when coverage rises, never
+lower them to pass. `go tool cover -html=services/api-gateway/coverage.out`
+shows what is uncovered.
+
+**Do not fix a red gate by loosening it.** A suppression is a comment on
+the finding with the reason, in the file that carries the finding
+(`#checkov:skip`, `#trivy:ignore`, `.trivyignore.yaml` in
+`infrastructure/kubernetes`), and it is reviewed like code.
 
 ## The local environment
 
@@ -184,6 +299,34 @@ docker run --rm -p 127.0.0.1:8080:8080   -e DATABASE_URL=postgres://vitalmesh:vi
 `make docker-verify` starts both images with exactly that hardening and
 fails if either needs to write to its root filesystem, runs as root, or has
 a shell to exec into.
+
+### Publishing
+
+`.github/workflows/release.yml` publishes the images for a commit once CI
+has passed on `main`: it builds both, runs `docker-verify` and
+`docker-scan` on exactly what it is about to push, then tags them
+`sha-<commit>` and pushes to ECR. The scan runs before any registry
+credential exists in the job; a HIGH or CRITICAL finding stops the job
+there, and a stopped job pushes nothing. The repositories refuse to retag
+(`IMMUTABLE` in Terraform), so a tag always means the image first pushed
+with it, and there is no `latest`: the deployment pins the digests the
+release job outputs, and checks the registry still holds them under that
+tag before applying anything.
+
+The build and the gates are the same commands locally, with the tag the
+release job would use:
+
+```bash
+IMAGE_TAG="sha-$(git rev-parse HEAD)" make docker-build docker-verify docker-scan
+```
+
+That reproduces everything up to the push, which needs the account (the
+push role, `docs/GITHUB_CONFIGURATION.md`) and is the one step a laptop
+does not do. To see the gate refuse, scan something old:
+
+```bash
+GATEWAY_IMAGE=alpine:3.12 PROCESSOR_IMAGE=alpine:3.12 make docker-scan   # exits 1
+```
 
 ## Watching what the services do
 

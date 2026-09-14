@@ -17,13 +17,21 @@ variables {
   cluster_endpoint_public_access_cidrs = ["203.0.113.0/24"]
 }
 
+# A mocked apply rather than a plan: the secret ARN asserted below is unknown
+# until then, and the mock creates nothing.
 run "plans" {
-  command = plan
+  command = apply
 
   # The overlay deploys into this namespace, and the deploy role may manage
   # this one only: the two have to agree.
   assert {
     condition     = output.kubernetes_namespace == "vitalmesh-staging"
     error_message = "The namespace must match infrastructure/kubernetes/overlays/staging."
+  }
+
+  # Staging has the end-to-end account's secret, and the pipeline can find it.
+  assert {
+    condition     = output.e2e_secret_arn != null
+    error_message = "Staging must create the end-to-end test account's secret."
   }
 }

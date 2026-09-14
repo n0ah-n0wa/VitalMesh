@@ -1,0 +1,30 @@
+# gitleaks configuration for `make secret-scan` and the CI secret-scan job.
+#
+# The default rule set, unchanged. The only addition is a path allowlist for
+# generated output that git ignores and that therefore can never be
+# committed, so that the working-tree scan (`gitleaks dir`) reports the same
+# things the history scan (`gitleaks git`) does:
+#
+#   infrastructure/kubernetes/.rendered/   what `make k8s-validate` renders
+#       from the overlays. The local overlay generates the kind cluster's
+#       dev-only Secret values from tracked, reviewed fixtures; rendered,
+#       they are base64 `data:` fields that match the kubernetes-secret-yaml
+#       rule. Nothing in the tracked source is allowlisted.
+#   .terraform/                            provider binaries and module
+#       copies downloaded by terraform init.
+#
+# Allowlisting a path is not the same as allowlisting a secret: a real
+# credential committed anywhere tracked is still found, in the working tree
+# and in every commit.
+
+title = "VitalMesh"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated, git-ignored build output"
+paths = [
+  '''infrastructure/kubernetes/\.rendered/''',
+  '''(^|/)\.terraform/''',
+]

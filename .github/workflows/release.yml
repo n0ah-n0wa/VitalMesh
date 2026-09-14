@@ -1,0 +1,332 @@
+# From a commit that CI has passed on main to a running, tested staging.
+#
+#   images          build both images for that commit, verify and scan them,
+#                   tag them with the commit, push them to ECR. The scan runs
+#                   before the registry login exists: a finding stops the
+#                   job, and nothing after a stopped step runs, so an image
+#                   that fails its scan is never pushed. The digests are the
+#                   job's outputs.
+#   deploy-staging  deploy those digests to staging (deploy.yml): secrets,
+#                   manifests, migrations, rollout, with a rollback to the
+#                   previous revision if the rollout does not complete.
+#   smoke-staging   from the outside, with no credentials: the gateway is
+#                   up, serving the released version over TLS, refusing
+#                   unauthenticated requests, redirecting plain HTTP.
+#   e2e-staging     the guided demo (scripts/demo.sh) against staging as a
+#                   real client: sign in, register a patient, record
+#                   readings, run a job through the Rust engine, read the
+#                   results, replay a request.
+#
+#   record          once every stage above has passed, write the release
+#                   record (release.json: the commit, the tag, the digests,
+#                   what staging ran) as an artifact. Its existence is the
+#                   proof that this commit went through staging, and it is
+#                   what a production promotion (promote.yml) deploys from.
+#
+# Production is not deployed by this workflow. Promotion is a separate,
+# manually dispatched workflow gated by the production environment's
+# reviewers; there is no path from here to the production role, and
+# nothing in this file names it.
+#
+# Triggered by a CI run completing on main, and only if it succeeded: the
+# commit released is the one that run tested (workflow_run.head_sha), not
+# whatever main points at by the time this starts. A manual dispatch from
+# main releases main's head, for a re-run.
+#
+# Images are named by commit, never "latest": the tag is sha-<commit>, the
+# repositories refuse to retag, and the deployment pins the digest. Every
+# step authenticates with a short-lived OIDC token exchanged for a role
+# scoped to what that step does; no AWS key exists anywhere. The smoke
+# test holds no credential at all.
+#
+# A re-run for the same commit is safe: the images are pushed once and
+# found thereafter, and a deployment of the same digests is a no-op.
+name: Release
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+# Releases queue rather than cancel: a deployment interrupted half way is
+# worse than one that waits.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  not-configured:
+    name: not configured
+    if: vars.AWS_ACCOUNT_ID == ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: echo "::notice title=Release skipped::The repository variable AWS_ACCOUNT_ID is not set, so there is nowhere to release to. docs/GITHUB_CONFIGURATION.md lists what to configure."
+
+  # CI did not pass: say so, rather than silently doing nothing.
+  ci-failed:
+    name: ci failed
+    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: echo "::notice title=Not released::CI concluded '${{ github.event.workflow_run.conclusion }}' for ${{ github.event.workflow_run.head_sha }}; only a commit CI has passed is released."
+
+  # A manual run from any branch but main would build for minutes and then
+  # be refused by STS (the push role trusts main only); refuse it first.
+  wrong-branch:
+    name: wrong branch
+    if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - run: |
+          echo "::error::Release runs from main only (this is ${{ github.ref }}); a branch is released by merging it."
+          exit 1
+
+  images:
+    name: images
+    if: vars.AWS_ACCOUNT_ID != '' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.workflow_run.conclusion == 'success')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # The commit being released: the one CI tested, or main's head on a
+      # manual run.
+      RELEASE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+      REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION || 'eu-central-1' }}.amazonaws.com
+      COMPOSE: docker compose -f docker-compose.yml -f .github/docker-compose.ci-cache.yml
+      COMPOSE_BAKE: "true"
+      TRIVY_CACHE: ${{ github.workspace }}/.cache/trivy
+    outputs:
+      commit: ${{ env.RELEASE_SHA }}
+      image_tag: sha-${{ env.RELEASE_SHA }}
+      api_gateway_digest: ${{ steps.push.outputs.api_gateway_digest }}
+      processor_digest: ${{ steps.push.outputs.processor_digest }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ env.RELEASE_SHA }}
+
+      - name: The commit being released
+        run: |
+          echo "IMAGE_TAG=sha-$RELEASE_SHA" >> "$GITHUB_ENV"
+          echo "VERSION=$(git rev-parse --short "$RELEASE_SHA")" >> "$GITHUB_ENV"
+          git log -1 --format='%H %s' "$RELEASE_SHA"
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Today, for the cache key
+        id: today
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Trivy database cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TRIVY_CACHE }}
+          key: trivy-db-${{ runner.os }}-${{ steps.today.outputs.date }}
+          restore-keys: |
+            trivy-db-${{ runner.os }}-
+
+      # The same three gates CI runs, on the exact images that will be
+      # pushed. Nothing below this point runs unless all three pass.
+      - name: Build both images
+        run: make docker-build
+      - name: Verify the containers
+        run: make docker-verify
+      - name: Scan the images and the Dockerfiles (a finding stops the job here)
+        run: make docker-scan
+
+      # Only reached when every step above succeeded.
+      - name: Assume the image-push role through OIDC
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/vitalmesh-ecr-push
+          role-session-name: gha-images-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Identity
+        run: aws sts get-caller-identity
+
+      # A token good for twelve hours, used once and never written anywhere.
+      - name: Log in to the registry
+        run: aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS --password-stdin "$REGISTRY"
+
+      # The tag is immutable in ECR, so a commit's images are pushed once:
+      # a re-run finds them and reports the same digests. The digest of
+      # what is in the registry, not of the local build, is what the job
+      # outputs: it is the deployment's reference.
+      - name: Push, and output the digests
+        id: push
+        run: |
+          set -euo pipefail
+          {
+            echo "## Images for $RELEASE_SHA"
+            echo
+            echo "| Image | Digest |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for image in api-gateway processor; do
+            repo="vitalmesh/$image"
+            digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+            case "$digest" in
+              sha256:*)
+                echo "$repo:$IMAGE_TAG is already in the registry as $digest; tags are immutable, so it is the image pushed for this commit" ;;
+              *)
+                docker tag "$repo:$IMAGE_TAG" "$REGISTRY/$repo:$IMAGE_TAG"
+                docker push "$REGISTRY/$repo:$IMAGE_TAG"
+                digest="$(aws ecr describe-images --repository-name "$repo" --image-ids "imageTag=$IMAGE_TAG" --query 'imageDetails[0].imageDigest' --output text)"
+                case "$digest" in sha256:*) ;; *) echo "::error::pushed $repo:$IMAGE_TAG but the registry does not report a digest for it"; exit 1 ;; esac ;;
+            esac
+            echo "$(printf '%s' "$image" | tr '-' '_')_digest=$digest" >> "$GITHUB_OUTPUT"
+            echo "| \`$repo:$IMAGE_TAG\` | \`$digest\` |" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  deploy-staging:
+    name: staging
+    needs: images
+    uses: ./.github/workflows/deploy.yml
+    permissions:
+      id-token: write
+      contents: read
+    with:
+      environment: staging
+      commit: ${{ needs.images.outputs.commit }}
+      image_tag: ${{ needs.images.outputs.image_tag }}
+      api_gateway_digest: ${{ needs.images.outputs.api_gateway_digest }}
+      processor_digest: ${{ needs.images.outputs.processor_digest }}
+      rollback_on_failure: true
+
+  # No credentials: what any client on the internet can see. Fails if the
+  # hostname does not resolve, the certificate is wrong, the service is not
+  # answering, or the running version is not the one just released.
+  smoke-staging:
+    name: staging smoke
+    needs: [images, deploy-staging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.images.outputs.commit }}
+
+      - name: Smoke test
+        env:
+          HOST: ${{ needs.deploy-staging.outputs.ingress_host }}
+          EXPECTED_VERSION: ${{ needs.deploy-staging.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "$HOST" ]; then
+            echo "::error::staging has no ingress_domain_name, so there is no hostname to test; set it (infrastructure/terraform/environments/staging) and create the DNS record"
+            exit 1
+          fi
+          GATEWAY_URL="https://$HOST" sh scripts/smoke.sh
+
+  # The guided demo as a real client of staging, signed in as the account
+  # the deployment provisioned. Its output is the artifact: every request
+  # and every response, with the token never printed.
+  e2e-staging:
+    name: staging e2e
+    needs: [images, deploy-staging, smoke-staging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: staging
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ needs.images.outputs.commit }}
+
+      - name: Assume the staging deploy role through OIDC
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/vitalmesh-staging-deploy
+          role-session-name: gha-e2e-staging-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: End-to-end tests
+        env:
+          HOST: ${{ needs.deploy-staging.outputs.ingress_host }}
+        run: |
+          set -euo pipefail
+          facts="$(aws ssm get-parameter --name /vitalmesh/staging/deploy --query Parameter.Value --output text)"
+          email="$(printf '%s' "$facts" | jq -r '.e2e_email // ""')"
+          secret_arn="$(printf '%s' "$facts" | jq -r '.e2e_secret_arn // ""')"
+          if [ -z "$email" ] || [ -z "$secret_arn" ]; then
+            echo "::error::staging has no end-to-end account (create_e2e_account in infrastructure/terraform/environments/staging)"
+            exit 1
+          fi
+          password="$(aws secretsmanager get-secret-value --secret-id "$secret_arn" --query SecretString --output text)"
+          echo "::add-mask::$password"
+          set -o pipefail
+          GATEWAY_URL="https://$HOST" DEMO_EMAIL="$email" DEMO_PASSWORD="$password" DEMO_ACCOUNT_EXISTS=1 \
+            sh scripts/demo.sh 2>&1 | tee e2e.log
+
+      - name: Artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-staging-${{ github.run_id }}-${{ github.run_attempt }}
+          path: e2e.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Written only when every stage above succeeded (a needs list is an AND),
+  # so a run without this artifact is a run that did not pass staging. The
+  # promotion workflow reads it and deploys exactly these digests; it holds
+  # no secret, only what the run summary already shows.
+  record:
+    name: release record
+    needs: [images, deploy-staging, smoke-staging, e2e-staging]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Write the release record
+        env:
+          COMMIT: ${{ needs.images.outputs.commit }}
+          IMAGE_TAG: ${{ needs.images.outputs.image_tag }}
+          GATEWAY_DIGEST: ${{ needs.images.outputs.api_gateway_digest }}
+          PROCESSOR_DIGEST: ${{ needs.images.outputs.processor_digest }}
+          VERSION: ${{ needs.deploy-staging.outputs.version }}
+          STAGING_HOST: ${{ needs.deploy-staging.outputs.ingress_host }}
+        run: |
+          set -euo pipefail
+          jq -n             --arg commit "$COMMIT" --arg image_tag "$IMAGE_TAG" --arg version "$VERSION"             --arg gateway "$GATEWAY_DIGEST" --arg processor "$PROCESSOR_DIGEST"             --arg host "$STAGING_HOST" --arg run_id "${{ github.run_id }}" --arg repo "${{ github.repository }}"             '{
+              schema: 1,
+              repository: $repo,
+              release_run_id: ($run_id | tonumber),
+              commit: $commit,
+              version: $version,
+              image_tag: $image_tag,
+              images: { "vitalmesh/api-gateway": $gateway, "vitalmesh/processor": $processor },
+              staging: { deployed: true, smoke: "passed", e2e: "passed", host: $host },
+              recorded_at: (now | todate)
+            }' > release.json
+          cat release.json
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: release.json
+          retention-days: 90

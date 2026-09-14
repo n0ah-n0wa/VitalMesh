@@ -42,7 +42,13 @@ step "1. Create an operator account"
 # The gateway's own command, run in a one-off container on the compose
 # network. The password is read from standard input so it never appears in
 # a process list or a shell history.
-if printf '%s' "$PASSWORD" | docker compose run --rm --no-deps -T \
+#
+# Against a deployed environment the account is created by the deployment
+# pipeline inside the cluster, and DEMO_ACCOUNT_EXISTS=1 says so; then this
+# step is only the sign-in below.
+if [ "${DEMO_ACCOUNT_EXISTS:-0}" = "1" ]; then
+    note "$EMAIL is provisioned by the environment; not creating it here"
+elif printf '%s' "$PASSWORD" | docker compose run --rm --no-deps -T \
         -e DATABASE_URL="postgres://vitalmesh:vitalmesh@postgres:5432/vitalmesh?sslmode=disable" \
         api-gateway users create "$EMAIL" OPERATOR >/dev/null 2>&1; then
     note "created $EMAIL as OPERATOR"

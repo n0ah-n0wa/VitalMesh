@@ -1,0 +1,53 @@
+# What keeps the pins in this repository current. Every dependency here is
+# pinned (actions by commit, images by digest, Go modules by go.sum, crates
+# by Cargo.lock), which is only safe if something proposes the updates; the
+# alternative to this file is pins that age until a scanner fails the
+# build for a vulnerability fixed months earlier.
+#
+# Each update is a pull request that goes through the same CI as any other
+# change, so an update that breaks a gate is rejected by the gate, not
+# noticed in production. Updates are grouped so that a week's worth of
+# bumps is one review, not twenty.
+#
+# Not covered: the tool images named by tag in the Makefile and scripts
+# (trivy, checkov, gitleaks, kustomize, kubeconform, kube-linter,
+# terraform, yq) and the Helm charts in infrastructure/kubernetes/platform.
+# Dependabot does not read those files; docs/DEVELOPMENT.md lists them
+# under "Reproducing CI locally" as the pins to review by hand each quarter.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: gomod
+    directory: /services/api-gateway
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /services/processor
+    schedule:
+      interval: weekly
+    groups:
+      rust:
+        patterns: ["*"]
+
+  # The base images in both service Dockerfiles, and the dev container's.
+  - package-ecosystem: docker
+    directories:
+      - /services/api-gateway
+      - /services/processor
+      - /.devcontainer
+    schedule:
+      interval: weekly
+    groups:
+      images:
+        patterns: ["*"]

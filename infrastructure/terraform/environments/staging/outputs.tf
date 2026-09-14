@@ -105,3 +105,13 @@ output "ingress_certificate_arn" {
   description = "ACM certificate the load balancer serves, or null while no domain is set."
   value       = module.platform.ingress_certificate_arn
 }
+
+output "deploy_parameter_name" {
+  description = "SSM parameter the deploy workflow reads: endpoints and secret ARNs, kept current by Terraform."
+  value       = module.platform.deploy_parameter_name
+}
+
+output "e2e_secret_arn" {
+  description = "Secret holding the end-to-end test account's password (staging only; null in production, which has no such account)."
+  value       = module.platform.e2e_secret_arn
+}
