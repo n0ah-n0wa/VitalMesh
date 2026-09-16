@@ -286,11 +286,27 @@ func TestProcessDoesNotRetryWhenTheDeadlineLeavesNoRoom(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c, _ := newClient(t, srv.URL)
-	// A deadline that has almost passed: sleeping into it and being
-	// cancelled would waste what is left of the caller's budget.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	// The deadline is generous in wall-clock terms, so the first attempt
+	// always completes whatever the machine is doing, but the client's own
+	// clock is pushed to within a millisecond of it once that attempt has
+	// answered: sleeping into the deadline and being cancelled would waste
+	// what is left of the caller's budget, so no second attempt is made. A
+	// real 10 ms deadline tested the same thing but failed on a loaded
+	// machine, where even the first attempt could not finish in time.
+	const deadline = 5 * time.Second
+	var skew atomic.Int64
+	c := New(testConfig(srv.URL), discardLogger(), Options{
+		Sleep: func(context.Context, time.Duration) error { return nil },
+		Now:   func() time.Time { return time.Now().Add(time.Duration(skew.Load())) },
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), deadline)
 	defer cancel()
+	srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		skew.Store(int64(deadline - time.Millisecond))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = io.WriteString(w, errorBody("PROCESSOR_OVERLOADED"))
+	})
 
 	_, err := c.Process(ctx, request())
 	if err == nil {

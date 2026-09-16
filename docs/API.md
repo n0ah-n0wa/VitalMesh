@@ -4,7 +4,7 @@ This document describes the conventions every VitalMesh public endpoint follows.
 
 ## Versioning
 
-All public endpoints live under `/api/v1`. Breaking changes are published under a new prefix (`/api/v2`); the previous version keeps working until it is retired explicitly. Health endpoints (`/health`, `/ready`) and the Prometheus exposition (`/metrics`) are unversioned because they serve the platform, not clients. `/metrics` needs no credential and carries no identifiers; deployments restrict it at the network.
+All public endpoints live under `/api/v1`. Breaking changes are published under a new prefix (`/api/v2`); the previous version keeps working until it is retired explicitly. Health endpoints (`/health`, `/ready`) and the Prometheus exposition (`/metrics`) are unversioned because they serve the platform, not clients. `/health` answers `{"status":"ok","service":"api-gateway","version":"…","environment":"…"}`; `environment` is the value the process was configured with (`local`, `test`, `staging`, `production`) and lets tooling that writes data, such as the synthetic data loader, check what it is talking to first. `/metrics` needs no credential and carries no identifiers; deployments restrict it at the network.
 
 ## Content
 

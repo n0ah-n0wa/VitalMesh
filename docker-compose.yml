@@ -257,6 +257,8 @@ networks:
   # One network for the project, named rather than derived from the
   # directory, so that a container joining it from outside compose can name
   # it. Only the ports published above are reachable from the host;
-  # everything else talks over this network by service name.
+  # everything else talks over this network by service name. The stack
+  # test suite (scripts/stack-test.sh) runs a second project alongside
+  # this one and names its network after that project.
   default:
-    name: vitalmesh
+    name: ${VITALMESH_NETWORK:-vitalmesh}

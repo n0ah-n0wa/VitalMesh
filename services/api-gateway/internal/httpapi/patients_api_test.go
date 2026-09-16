@@ -60,7 +60,7 @@ func newPatientsAPI(t *testing.T) *patientsAPI {
 	rec := &httpMetrics{}
 
 	h, err := NewHandler(config.HTTP{MaxBodyBytes: 1 << 20, RequestTimeout: time.Second}, logger, Handlers{
-		Health:       handler.NewHealth("test", "v", health.NewReadiness(time.Second), logger),
+		Health:       handler.NewHealth("test", "v", "test", health.NewReadiness(time.Second), logger),
 		Patients:     handler.NewPatients(service, logger),
 		Authenticate: middleware.Authenticate(tokens, logger),
 		Idempotency:  middleware.Idempotency(idempotencytest.NewMemoryStore(), time.Hour, nil, logger),

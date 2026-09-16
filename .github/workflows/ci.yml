@@ -317,6 +317,36 @@ jobs:
       - name: Scan the images and the Dockerfiles
         run: make docker-scan
 
+  # --------------------------------------------------------------- stack
+  # The end-to-end suite against the real containerized stack: the images
+  # built from this commit, PostgreSQL and Redis, as a clean compose project
+  # that the suite drives over HTTP and takes services away from for the
+  # failure cases (scripts/stack-test.sh). The runner's Docker is the only
+  # thing it needs besides Go.
+  stack:
+    name: stack end-to-end
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      COMPOSE: docker compose -f docker-compose.yml -f .github/docker-compose.ci-cache.yml
+      COMPOSE_BAKE: "true"
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+        with:
+          go-version-file: services/api-gateway/go.mod
+          cache-dependency-path: services/api-gateway/go.sum
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Clean stack, suite, teardown
+        run: make stack-test
+
   # -------------------------------------------------------- dependencies
 
   dependencies:
@@ -459,6 +489,7 @@ jobs:
       - integration
       - build
       - containers
+      - stack
       - dependencies
       - secrets
       - manifests

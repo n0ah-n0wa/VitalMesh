@@ -14,24 +14,27 @@ import (
 
 // Health serves the liveness and readiness endpoints.
 type Health struct {
-	service   string
-	version   string
-	readiness *health.Readiness
-	logger    *slog.Logger
+	service     string
+	version     string
+	environment string
+	readiness   *health.Readiness
+	logger      *slog.Logger
 }
 
-// NewHealth returns a Health handler reporting the given service identity.
-func NewHealth(service, version string, readiness *health.Readiness, logger *slog.Logger) *Health {
-	return &Health{service: service, version: version, readiness: readiness, logger: logger}
+// NewHealth returns a Health handler reporting the given service identity
+// and deployment environment.
+func NewHealth(service, version, environment string, readiness *health.Readiness, logger *slog.Logger) *Health {
+	return &Health{service: service, version: version, environment: environment, readiness: readiness, logger: logger}
 }
 
 // Live reports process liveness. It never consults dependencies, so a
 // dependency outage cannot trigger a restart.
 func (h *Health) Live(w http.ResponseWriter, r *http.Request) {
 	body := model.Health{
-		Status:  model.StatusOK,
-		Service: h.service,
-		Version: h.version,
+		Status:      model.StatusOK,
+		Service:     h.service,
+		Version:     h.version,
+		Environment: h.environment,
 	}
 	if err := respond.JSON(w, http.StatusOK, body); err != nil {
 		respond.Error(w, r, h.logger, err)

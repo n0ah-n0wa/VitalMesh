@@ -2,6 +2,8 @@ package postgres
 
 import (
 	"errors"
+	"io"
+	"net"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -22,7 +24,43 @@ const (
 	codeSerializationFailure  = "40001"
 	codeDeadlockDetected      = "40P01"
 	codeInsufficientPrivilege = "42501"
+	// The server is there but cannot take the work, or is going away.
+	codeTooManyConnections = "53300"
+	codeAdminShutdown      = "57P01"
+	codeCrashShutdown      = "57P02"
+	codeCannotConnectNow   = "57P03"
+	// Class 08: connection exceptions.
+	classConnectionException = "08"
 )
+
+// unavailable is the answer for a database that cannot be reached: the
+// service is degraded rather than broken, the client may retry, and
+// readiness is what reports the outage (docs/FAILURE_MODES.md). The
+// message names no host, port or driver.
+func unavailable(err error) error {
+	return domain.Wrap(err, domain.KindUnavailable, "DATABASE_UNAVAILABLE", "The database is unavailable; retry later.")
+}
+
+// isConnectivity reports whether err is the database being unreachable
+// rather than anything about the query: a failed connection attempt, a
+// network error, a connection that died mid-conversation, or the pool's
+// own dial timeout.
+func isConnectivity(err error) bool {
+	var connectErr *pgconn.ConnectError
+	var netErr net.Error
+	switch {
+	case errors.As(err, &connectErr), errors.As(err, &netErr):
+		return true
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	case pgconn.SafeToRetry(err):
+		// The request never reached the server, so nothing ran.
+		return true
+	}
+	// pgconn reports a connection torn down under a query in words only.
+	msg := err.Error()
+	return strings.Contains(msg, "conn closed") || strings.Contains(msg, "connection reset") || strings.Contains(msg, "broken pipe")
+}
 
 // mapError classifies a driver error as a domain error where the cause is
 // a well-defined integrity or input rule, so callers can respond without
@@ -38,10 +76,18 @@ func mapError(err error) error {
 
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {
+		if isConnectivity(err) {
+			return unavailable(err)
+		}
 		return err
+	}
+	if strings.HasPrefix(pgErr.Code, classConnectionException) {
+		return unavailable(err)
 	}
 	code := constraintCode(pgErr)
 	switch pgErr.Code {
+	case codeTooManyConnections, codeAdminShutdown, codeCrashShutdown, codeCannotConnectNow:
+		return unavailable(err)
 	case codeUniqueViolation:
 		return domain.Wrap(err, domain.KindConflict, code, "The resource already exists.")
 	case codeForeignKeyViolation:

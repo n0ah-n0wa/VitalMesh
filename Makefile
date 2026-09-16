@@ -78,7 +78,7 @@ GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo synth-generate synth-load stack-test
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -112,8 +112,8 @@ format-check-rust: ## Fail if any Rust file is not rustfmt-formatted
 
 lint: lint-go lint-rust ## Run static analysis
 
-lint-go: ## go vet, with and without the integration build tag
-	cd $(GO_DIR) && go vet ./... && go vet -tags integration ./... && go vet -tags e2e ./...
+lint-go: ## go vet, with every build tag
+	cd $(GO_DIR) && go vet ./... && go vet -tags integration ./... && go vet -tags e2e ./... && go vet -tags stack ./...
 
 lint-rust: ## cargo clippy on every target, warnings are errors
 	cd $(RUST_DIR) && cargo clippy --all-targets --locked -- -D warnings
@@ -141,7 +141,7 @@ contracts-lock: ## Re-record a reviewed contract change in its lock file
 integration-test: integration-test-postgres integration-test-redis ## Run integration tests against PostgreSQL and Redis (see make dev-db, make dev-redis)
 
 integration-test-postgres: ## Integration tests backed by PostgreSQL (the repository, the application layer, the processor client)
-	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_REDIS_URL="$(TEST_REDIS_URL)" go test -race -tags integration $(GO_COVER) -coverprofile=coverage-integration-postgres.out ./internal/infra/postgres/... ./internal/infra/processorclient/... ./internal/app/...
+	cd $(GO_DIR) && TEST_DATABASE_URL="$(TEST_DATABASE_URL)" TEST_REDIS_URL="$(TEST_REDIS_URL)" go test -race -tags integration $(GO_COVER) -coverprofile=coverage-integration-postgres.out ./internal/infra/postgres/... ./internal/infra/processorclient/... ./internal/app/... ./internal/synth/...
 
 integration-test-redis: ## Integration tests backed by Redis (the client, the cache, rate limiting)
 	cd $(GO_DIR) && TEST_REDIS_URL="$(TEST_REDIS_URL)" go test -race -tags integration $(GO_COVER) -coverprofile=coverage-integration-redis.out ./internal/infra/redisclient/... ./internal/cache/... ./internal/ratelimit/...
@@ -266,8 +266,26 @@ observability-up: ## Start only Prometheus, Grafana and the OpenTelemetry collec
 observability-down: ## Stop the observability stack, leaving the services running
 	docker compose rm -sf prometheus grafana otel-collector
 
-demo: ## Run the guided demo against the running environment
+demo: ## The twelve-step demonstration: starts the environment and runs the whole system end to end (docs/DEMO.md)
 	sh scripts/demo.sh
+
+# The end-to-end suite against the real containerized stack: a clean compose
+# project (vitalmesh-e2e, its own ports and network) is built and started,
+# the suite runs against it over HTTP and takes services away for the
+# failure cases, and the project is removed. Needs Docker and Go.
+stack-test: ## Start a clean containerized stack, run the end-to-end suite against it, remove it
+	COMPOSE="$(COMPOSE)" sh scripts/stack-test.sh
+
+# Synthetic data (SPECIFICATIONS.md sections 106 and 107; docs/SYNTHETIC_DATA.md).
+# SYNTH_ARGS passes flags through: make synth-generate SYNTH_ARGS="--seed 7 --patients 50 --days 30"
+SYNTH_DIR  ?= .synth/default
+SYNTH_ARGS ?=
+
+synth-generate: ## Write a synthetic fixture to SYNTH_DIR (flags in SYNTH_ARGS; see docs/SYNTHETIC_DATA.md)
+	cd $(GO_DIR) && go run ./cmd/synth generate --out ../../$(SYNTH_DIR) --overwrite $(SYNTH_ARGS)
+
+synth-load: ## Load SYNTH_DIR into the local environment (make up): creates its accounts, patients, readings and jobs
+	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/synth load --from ../../$(SYNTH_DIR) \n		--target "$${GATEWAY_URL:-http://localhost:8080}" --environment local --users --jobs $(SYNTH_ARGS)
 
 observability-smoke: ## Check the running stack is scraping, recording and receiving spans
 	sh scripts/observability-smoke.sh
@@ -278,9 +296,10 @@ dev-db-down: ## Stop the environment and discard its volumes
 migrate: ## Apply pending migrations to DATABASE_URL (defaults to the local database)
 	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/api-gateway migrate up
 
-build: ## Build both services (Go binary in bin/, Rust binary in services/processor/target/)
+build: ## Build both services and the synth tool (Go binaries in bin/, Rust binary in services/processor/target/)
 	mkdir -p $(BIN_DIR)
 	cd $(GO_DIR) && go build -ldflags "$(GO_LDFLAGS)" -o ../../$(BIN_DIR)/api-gateway ./cmd/api-gateway
+	cd $(GO_DIR) && go build -ldflags "$(GO_LDFLAGS)" -o ../../$(BIN_DIR)/synth ./cmd/synth
 	cd $(RUST_DIR) && VITALMESH_VERSION=$(VERSION) cargo build --locked
 
 line-endings: ## Fail if any tracked file is stored with CRLF line endings
@@ -292,7 +311,7 @@ verify: format-check lint test contracts-check integration-test e2e-test coverag
 # Everything CI runs, in the order CI's dependency graph would settle on if
 # it ran serially. Needs Docker as well as the toolchains; see
 # docs/DEVELOPMENT.md, "Reproducing CI locally".
-ci-local: verify deps-scan secret-scan docker-build docker-verify docker-scan k8s-validate tf-validate ## Run every check CI runs, locally
+ci-local: verify deps-scan secret-scan docker-build docker-verify docker-scan stack-test k8s-validate tf-validate ## Run every check CI runs, locally
 	@echo "ci-local: every CI check passed"
 
 clean: ## Remove build outputs

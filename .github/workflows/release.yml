@@ -12,10 +12,11 @@
 #   smoke-staging   from the outside, with no credentials: the gateway is
 #                   up, serving the released version over TLS, refusing
 #                   unauthenticated requests, redirecting plain HTTP.
-#   e2e-staging     the guided demo (scripts/demo.sh) against staging as a
-#                   real client: sign in, register a patient, record
-#                   readings, run a job through the Rust engine, read the
-#                   results, replay a request.
+#   e2e-staging     the demonstration (scripts/demo.sh, docs/DEMO.md)
+#                   against staging as a real client: sign in, register a
+#                   synthetic patient, generate and record readings, run a
+#                   job through the Rust engine, wait for it, read the
+#                   results, and replay a request under its idempotency key.
 #
 #   record          once every stage above has passed, write the release
 #                   record (release.json: the commit, the tag, the digests,

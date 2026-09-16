@@ -24,6 +24,7 @@ tests/                    Cross-service test suites (e2e, integration, load, cha
 observability/            Prometheus, Grafana and OpenTelemetry configuration
 scripts/                  Helper scripts used by the Makefile and CI
 docs/                     Architecture, development and operations documentation
+                          (docs/SYNTHETIC_DATA.md: the seeded data generator and loader)
 .github/workflows/        GitHub Actions pipelines
 .devcontainer/            Reproducible toolchain image
 Makefile                  Unified developer interface (`make help`)
@@ -32,6 +33,7 @@ Makefile                  Unified developer interface (`make help`)
 ## Quick start
 
 ```bash
+make demo     # the whole system, end to end, on your machine (Docker only; docs/DEMO.md)
 make setup    # check prerequisites, download dependencies
 make verify   # format check, lint, tests, build, line-ending check
 make build    # bin/api-gateway and services/processor/target/debug/processor

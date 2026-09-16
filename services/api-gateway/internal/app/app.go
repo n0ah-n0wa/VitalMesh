@@ -124,7 +124,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 	jobs := processing.NewService(postgres.NewJobStore(pool), processor, cfg.Processing, logger, processing.Options{Metrics: rec, Tracer: tr})
 
 	handlers := httpapi.Handlers{
-		Health:         handler.NewHealth(ServiceName, version, readiness, logger),
+		Health:         handler.NewHealth(ServiceName, version, string(cfg.Environment), readiness, logger),
 		Auth:           handler.NewAuth(authService, logger),
 		Patients:       handler.NewPatients(patients, logger),
 		Measurements:   handler.NewMeasurements(measurements, logger),

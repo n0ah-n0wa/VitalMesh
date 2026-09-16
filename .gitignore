@@ -36,6 +36,9 @@ override.tf.json
 # what is committed.
 terraform.tfvars
 
+# Synthetic fixtures written by make synth-generate (regenerate them from a seed).
+/.synth/
+
 # Go coverage profiles, written by make test-go, the integration targets and
 # make e2e-test, merged by make coverage-go.
 services/api-gateway/coverage*.out

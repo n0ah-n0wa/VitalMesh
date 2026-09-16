@@ -18,7 +18,7 @@ path rather than deleting a workload.
 |---|---|---|
 | Gateway pod deleted | replaced, nothing lost | new pod Ready in seconds; `/ready` 200; data intact |
 | Processor pod deleted | replaced, processing resumes | new pod Ready; next job COMPLETED |
-| PostgreSQL unreachable | API degraded or unavailable | `/health` 200, `/ready` 503, pod withdrawn from the Service, uncached reads and writes 504, **no restart**, recovery in ~1s |
+| PostgreSQL unreachable | API degraded or unavailable | `/health` 200, `/ready` 503, pod withdrawn from the Service, uncached reads and writes `503 DATABASE_UNAVAILABLE` (or `504 REQUEST_TIMEOUT` when the network swallows the connection rather than refusing it), **no restart**, recovery in ~1s |
 | Redis unreachable | rate limiting and cache degrade | `/ready` stays 200, reads and sign-in work, rate limiting still returns 429 |
 | Processor unavailable | processing unavailable | `/ready` stays 200, call bounded at ~10s, job recorded FAILED, one row |
 | Processor slower than its budget | timeout, job not lost | attempt cut short, retry collects the result, one row, terminal state |

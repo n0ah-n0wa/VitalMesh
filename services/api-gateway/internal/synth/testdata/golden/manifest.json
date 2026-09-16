@@ -1,0 +1,97 @@
+{
+  "generator": "1",
+  "generated_at": "2026-09-16T11:58:14Z",
+  "spec": {
+    "seed": 42,
+    "users": {
+      "admins": 1,
+      "operators": 1,
+      "users": 1,
+      "domain": "synthetic.invalid"
+    },
+    "patients": {
+      "count": 2,
+      "reference_prefix": "",
+      "age_min": 18,
+      "age_max": 90,
+      "sex_weights": {
+        "FEMALE": 0.49,
+        "MALE": 0.49,
+        "OTHER": 0.01,
+        "UNKNOWN": 0.01
+      }
+    },
+    "time": {
+      "from": "2026-01-01T00:00:00Z",
+      "to": "2026-01-01T01:00:00Z",
+      "interval": "5m0s",
+      "jitter": 0.1
+    },
+    "source": "synthetic-monitor",
+    "streams": {
+      "HEART_RATE": {
+        "baseline": {
+          "mean": 72,
+          "sd": 8
+        },
+        "circadian": 4,
+        "noise": 3,
+        "decimals": 0,
+        "anomalies": {
+          "rate": 0.2,
+          "kinds": [
+            "spike",
+            "dip",
+            "drift",
+            "gap"
+          ],
+          "magnitude": {
+            "mean": 60,
+            "sd": 10
+          },
+          "duration": {
+            "mean": 5,
+            "sd": 2
+          }
+        }
+      },
+      "SPO2": {
+        "baseline": {
+          "mean": 97,
+          "sd": 1
+        },
+        "circadian": 0.3,
+        "noise": 0.7,
+        "decimals": 0,
+        "anomalies": {
+          "rate": 0.2,
+          "kinds": [
+            "dip",
+            "drift",
+            "gap"
+          ],
+          "magnitude": {
+            "mean": 10,
+            "sd": 3
+          },
+          "duration": {
+            "mean": 6,
+            "sd": 2
+          }
+        }
+      }
+    }
+  },
+  "counts": {
+    "users": 3,
+    "patients": 2,
+    "measurements": 48,
+    "anomalous": 10,
+    "gaps": 0
+  },
+  "digests": {
+    "measurements.ndjson": "sha256:1926defb9bfbd29a4aaeccede77baa3db20f7757ebcaa24c46f3f437a99faac9",
+    "patients.ndjson": "sha256:4ec5b28b534cc710abd3cfc043319d29a153be755c40bf75d061179eaf37cba8",
+    "users.ndjson": "sha256:ff97505e7505672d62babda0b6c3971184f943d7b1df1613aaec668063a98f02"
+  }
+}

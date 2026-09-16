@@ -27,7 +27,7 @@ func (c checker) Check(context.Context) error { return c.err }
 func newHealth(checkers ...health.Checker) (*Health, *bytes.Buffer) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
-	return NewHealth("api-gateway", "v1", health.NewReadiness(time.Second, checkers...), logger), &logBuf
+	return NewHealth("api-gateway", "v1", "test", health.NewReadiness(time.Second, checkers...), logger), &logBuf
 }
 
 func TestLive(t *testing.T) {
@@ -43,7 +43,7 @@ func TestLive(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	want := model.Health{Status: "ok", Service: "api-gateway", Version: "v1"}
+	want := model.Health{Status: "ok", Service: "api-gateway", Version: "v1", Environment: "test"}
 	if body != want {
 		t.Errorf("body = %+v, want %+v", body, want)
 	}

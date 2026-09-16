@@ -55,6 +55,11 @@ type Health struct {
 	Status  string `json:"status"`
 	Service string `json:"service"`
 	Version string `json:"version"`
+	// Environment is the deployment environment the process was configured
+	// with (local, test, staging, production). It lets tooling that writes
+	// data, such as the synthetic data loader, check what it is talking to
+	// before it writes anything.
+	Environment string `json:"environment"`
 }
 
 // Readiness is returned by GET /ready.

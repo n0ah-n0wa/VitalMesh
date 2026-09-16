@@ -52,19 +52,21 @@ Run `make help` for the list. Every CI job runs one of these targets and nothing
 | `make integration-test` | `integration-test-postgres` (the repository, the application layer, the processor client) and `integration-test-redis` (the client, the cache, rate limiting), against `TEST_DATABASE_URL` and `TEST_REDIS_URL` (default: the local PostgreSQL and Redis) |
 | `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
 | `make coverage-go` | merges the Go coverage profiles from every suite and checks the merged floor (`GO_COVERAGE_MIN_ALL`) |
+| `make stack-test` | starts a clean containerized stack as its own compose project, runs the end-to-end suite against it and removes it (`scripts/stack-test.sh`) |
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
-| `make build` | builds `bin/api-gateway` and `services/processor/target/debug/processor` |
+| `make synth-generate` / `make synth-load` | write a synthetic fixture (`SYNTH_DIR`, flags in `SYNTH_ARGS`) and load it into the local environment: accounts, patients, readings and jobs; see [SYNTHETIC_DATA.md](SYNTHETIC_DATA.md) |
+| `make build` | builds `bin/api-gateway`, `bin/synth` and `services/processor/target/debug/processor` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
 | `make verify` | `format-check lint test contracts-check integration-test e2e-test coverage-go build line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
-| `make ci-local` | `verify`, then `deps-scan secret-scan docker-build docker-verify docker-scan k8s-validate tf-validate`: every check CI runs; needs Docker as well |
+| `make ci-local` | `verify`, then `deps-scan secret-scan docker-build docker-verify docker-scan stack-test k8s-validate tf-validate`: every check CI runs; needs Docker as well |
 | `make clean` | removes build outputs |
 
 Cargo runs with `--locked`, so `Cargo.lock` must be updated deliberately (`cargo update -p <crate>`) and committed.
 
 ## Reproducing CI locally
 
-CI (`.github/workflows/ci.yml`) is ten jobs that each run one `make`
-target, plus a final `ci` job that fails unless all ten succeeded; that
+CI (`.github/workflows/ci.yml`) is eleven jobs that each run one `make`
+target, plus a final `ci` job that fails unless all eleven succeeded; that
 last one is what branch protection requires. The workflow adds only what a
 laptop does not have by default: the runners, the PostgreSQL and Redis
 service containers, and caches. Nothing it checks is CI-only.
@@ -77,6 +79,7 @@ service containers, and caches. Nothing it checks is CI-only.
 | `integration` | `make test-go integration-test-postgres integration-test-redis e2e-test coverage-go` | Go, Rust, PostgreSQL and Redis (`make dev-db dev-redis`) |
 | `build` | `make build line-endings` | Go, Rust, git |
 | `containers` | `make docker-build docker-verify docker-scan` | Docker |
+| `stack end-to-end` | `make stack-test` | Docker and Go (see [The stack suite](#the-stack-suite)) |
 | `dependency scan` | `make deps-scan` | Docker (trivy) and Go (govulncheck) |
 | `secret scan` | `make secret-scan` | Docker (gitleaks), the full git history |
 | `kubernetes manifests` | `make k8s-validate` | Docker |
@@ -248,23 +251,75 @@ that may not exist.
 `docker compose down -v` discards it and starts from an empty schema next
 time.
 
+## The stack suite
+
+`make stack-test` is the end-to-end suite against the real containerized
+application: the gateway and processor images built from the working
+tree, PostgreSQL and Redis, started by `scripts/stack-test.sh` as a
+compose project of its own (`vitalmesh-e2e`, gateway on port 18080,
+PostgreSQL on 15433) with its volumes removed first, so every run starts
+from an empty, freshly migrated database and never touches the
+environment `make up` runs. The suite
+(`services/api-gateway/tests/stack`, build tag `stack`) is a client of the
+public API. It reads the database only to check what was persisted, and
+drives `docker compose` to take services away.
+
+It validates, in a fixed order: authentication, patient creation,
+measurement and batch ingestion, processing (the job, the call from Go to
+Rust, the results persisted and read back, the planted anomaly found),
+authorization, idempotency, audit logging and rate limiting; then the
+failure cases: invalid input, duplicate requests (sequential and
+concurrent), the processor stopped, the processor hung (a timeout), the
+database stopped and Redis stopped, each followed by recovery, with the
+assertion that no container restarted and no job was left non-terminal.
+
+Every value it sends is fixed and every wait polls for a condition with a
+deadline, so a run either passes or names the assertion that failed. The
+whole run takes about two minutes, most of it the failure cases waiting
+for the gateway's own timeouts. `sh scripts/stack-test.sh up` starts the
+stack and leaves it for a look around, `test` runs the suite against it,
+`down` removes it; `E2E_KEEP=1` keeps a failed stack.
+
+Without Go on the host, start the stack from the host and run the suite
+in the dev container, which carries the Docker CLI and reaches the host's
+daemon through the socket:
+
+```bash
+sh scripts/stack-test.sh up
+docker run --rm --network vitalmesh-e2e -v /var/run/docker.sock:/var/run/docker.sock \
+  -v "$(pwd):/workspace" -w /workspace/services/api-gateway \
+  -e E2E_GATEWAY_URL=http://api-gateway:8080 \
+  -e E2E_DATABASE_URL='postgres://vitalmesh:vitalmesh@postgres:5432/vitalmesh?sslmode=disable' \
+  -e E2E_COMPOSE_PROJECT=vitalmesh-e2e -e E2E_COMPOSE_FILE=/workspace/docker-compose.yml \
+  -e VITALMESH_NETWORK=vitalmesh-e2e \
+  vitalmesh-dev go test -tags stack -count=1 -timeout 25m -v ./tests/stack/...
+sh scripts/stack-test.sh down
+```
+
 ## The demo
 
 ```bash
-docker compose up -d --wait
-./scripts/demo.sh
+make demo
 ```
 
-It creates an operator account, signs in, registers a patient, records
+Twelve steps, end to end: it starts the environment, creates an operator
+account, signs in, registers a synthetic patient, generates and submits
 sixty heart-rate readings with one deliberate spike, runs them through the
-Rust engine, reads the statistics and anomalies back, and then repeats a
-request with the same `Idempotency-Key` to show the stored response coming
-back rather than a second patient being created. Every step prints what it
-sent and what came back.
+Rust engine, waits for the job, reads the statistics and anomalies back,
+and then shows the metrics, the trace and the logs the run produced. Every
+step prints what it sent and what came back. [DEMO.md](DEMO.md) walks
+through it for a new developer.
 
 It is safe to run repeatedly: each run uses a fresh patient reference and
 fresh idempotency keys, and the account is created only if it is not
-already there.
+already there. `DEMO_NO_START=1 make demo` skips the start when the
+environment is already up.
+
+For more than one patient and one spike, `make synth-generate` and
+`make synth-load` fill the environment with a seeded synthetic data set:
+accounts, patients, every measurement type with noise and anomalies over a
+configurable range. [SYNTHETIC_DATA.md](SYNTHETIC_DATA.md) has the flags,
+the spec format and the safeguard that keeps it away from production.
 
 ## Container images
 
@@ -372,7 +427,7 @@ Do that only after checking the change against the compatibility rules in [`cont
 
 ## Running the services
 
-Both services read `HTTP_ADDR` and expose `GET /health` (liveness) and `GET /ready` (readiness), returning `{"status":"ok","service":"...","version":"..."}`.
+Both services read `HTTP_ADDR` and expose `GET /health` (liveness) and `GET /ready` (readiness), returning `{"status":"ok","service":"...","version":"..."}`; the gateway adds `"environment"` (local, test, staging or production), which the synthetic data loader checks before writing anything (see [SYNTHETIC_DATA.md](SYNTHETIC_DATA.md)).
 
 ```bash
 make build
