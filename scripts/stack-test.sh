@@ -15,7 +15,9 @@
 # answers reproducible.
 #
 # Environment:
-#   COMPOSE            the compose command (default: docker compose; CI adds its cache override)
+#   COMPOSE            the compose command, files included (default: docker compose -f docker-compose.yml;
+#                      CI passes the same with its cache override added). It is used as given, so
+#                      the compose file is never named twice, which compose rejects.
 #   E2E_PROJECT        compose project name (default vitalmesh-e2e)
 #   E2E_GATEWAY_PORT   host port of the gateway (default 18080); processor +1, PostgreSQL 15433, Redis 16379
 #   E2E_KEEP           set to 1 to leave the stack running after a failed suite, for a look around
@@ -29,7 +31,7 @@ GATEWAY_PORT="${E2E_GATEWAY_PORT:-18080}"
 PROCESSOR_PORT=$((GATEWAY_PORT + 1))
 POSTGRES_PORT="${E2E_POSTGRES_PORT:-15433}"
 REDIS_PORT="${E2E_REDIS_PORT:-16379}"
-COMPOSE="${COMPOSE:-docker compose}"
+COMPOSE="${COMPOSE:-docker compose -f docker-compose.yml}"
 
 # Everything the compose file reads, so that `up` here and `stop`/`start`
 # from the suite see the same project.
@@ -40,7 +42,7 @@ export GATEWAY_PORT PROCESSOR_PORT POSTGRES_PORT REDIS_PORT
 # should not pick up a developer's shell either.
 export ENVIRONMENT=local LOG_LEVEL=info
 
-compose() { $COMPOSE -f docker-compose.yml "$@"; }
+compose() { $COMPOSE "$@"; }
 
 up() {
     echo "== stack: removing any previous $PROJECT stack, volumes included"
