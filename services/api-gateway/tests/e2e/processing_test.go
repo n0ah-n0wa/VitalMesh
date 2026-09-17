@@ -195,6 +195,9 @@ func newSystem(t *testing.T, readings int, processorURL string) *system {
 			return "50ms", true
 		case "HTTP_REQUEST_TIMEOUT":
 			return "30s", true
+		case "HTTP_SHUTDOWN_TIMEOUT":
+			// At least the request timeout, as configuration requires.
+			return "30s", true
 		case "HTTP_WRITE_TIMEOUT":
 			return "40s", true
 		}

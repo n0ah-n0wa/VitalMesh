@@ -133,7 +133,7 @@ impl Engine {
         let mut running = self.lock();
         if running.contains_key(&id) {
             return Err(Error::new(
-                Kind::Conflict,
+                Kind::Busy,
                 "JOB_ALREADY_RUNNING",
                 "A job with this id is already running.",
             ));
@@ -325,7 +325,7 @@ mod tests {
             .run(job("dup"), async { Ok(()) })
             .await
             .expect_err("duplicate");
-        assert_eq!(err.kind(), Kind::Conflict);
+        assert_eq!(err.kind(), Kind::Busy);
         assert_eq!(
             engine.active_jobs(),
             1,

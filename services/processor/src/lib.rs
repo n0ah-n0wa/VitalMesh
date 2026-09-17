@@ -43,7 +43,7 @@ pub const SERVICE_NAME: &str = "processor";
 /// implements. It is reported by the internal health endpoint so the gateway
 /// can detect an incompatible peer, and `tests/contract.rs` fails if it ever
 /// disagrees with the document.
-pub const CONTRACT_VERSION: &str = "1.1.1";
+pub const CONTRACT_VERSION: &str = "1.1.2";
 
 /// Build identifier, injected by the Makefile through `VITALMESH_VERSION`.
 pub const VERSION: &str = match option_env!("VITALMESH_VERSION") {

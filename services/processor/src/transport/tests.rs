@@ -254,6 +254,7 @@ fn status_mapping_covers_every_kind() {
         Kind::Validation,
         Kind::NotFound,
         Kind::Conflict,
+        Kind::Busy,
         Kind::Overloaded,
         Kind::Timeout,
         Kind::Cancelled,

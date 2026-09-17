@@ -35,7 +35,7 @@ func BenchmarkReadingsForJob60k(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
-	store := postgres.NewJobStore(pool)
+	store := postgres.NewJobStore(pool, postgres.JobStoreOptions{})
 	from, to := base, base.Add(60000*time.Second)
 	params := processing.Parameters{MeasurementTypes: []domain.MeasurementType{domain.HeartRate}, From: &from, To: &to}
 	b.ResetTimer()

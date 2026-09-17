@@ -44,7 +44,7 @@ The processor reports only `PROCESSING`, `COMPLETED`, `FAILED` and `CANCELLED`; 
 |---|---|
 | `200` | `COMPLETED`, with the returned results |
 | `422` | `FAILED`, with the returned code (not retryable) |
-| `409` | unchanged; another attempt is already running |
+| `409` | unchanged; an earlier attempt is still running and will end on its own, so redispatch after a short delay |
 | `503` `PROCESSOR_OVERLOADED` or `PROCESSOR_SHUTTING_DOWN` | stays `PENDING`, redispatch later |
 | `503` `PROCESSING_CANCELLED` | `CANCELLED`, and not redispatched |
 | `504` | `FAILED` after the retry budget is spent, otherwise redispatch |
@@ -123,6 +123,7 @@ make contracts-lock   # re-record the fingerprint
 
 | Version | Change |
 |---|---|
+| 1.1.2 | Reclassified `409 JOB_ALREADY_RUNNING` as retryable (`x-retryable` and the body's `retryable` are now `true`). The condition is an earlier attempt at the same dispatch still running, which ends on its own and releases the id, so it is a temporary refusal in the sense of SPECIFICATIONS.md section 93, not a contract violation. The gateway had always treated it that way; the document and the service now say so too. No request or response shape changed. |
 | 1.1.1 | Raised the advertised `max_request_bytes` to match the default the processor now uses. A job at the advertised `max_job_measurements` weighs about 12 MB, which the previous 1 MiB default could not carry, so jobs well inside the ceiling were refused for their size. The processor now refuses to start if the two numbers contradict each other. Document only: no request or response shape changed. |
 | 1.1.0 | Declared `WWW-Authenticate` on `401`, as RFC 7235 requires. Removed `VALIDATION_FAILED` from the `422` on `POST /process`: the service never emits it there, because a body it cannot understand is a `400` and every `422` has a named cause. Documented the `details` that `JOB_TOO_LARGE` carries. |
 | 1.0.0 | First draft. Never served by any build, so 1.1.0 amends it rather than superseding it. |

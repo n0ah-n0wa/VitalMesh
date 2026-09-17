@@ -254,6 +254,15 @@ The request selects what to process:
 | the processing service is still working on an earlier attempt | `503 PROCESSOR_BUSY` | `FAILED` |
 | not every measurement could be processed | `503 PROCESSING_INCOMPLETE` | `FAILED` |
 | the two services disagree | `503 PROCESSOR_PROTOCOL_ERROR` | `FAILED` |
+| processed, but the results could not be stored | `503` or `504` naming the store failure | `FAILED`, `error_code` `PROCESSING_RESULTS_NOT_STORED` |
+| the gateway stopped while the job was in flight | the connection is lost | `PROCESSING` until its lease expires, then `FAILED`, `error_code` `PROCESSING_INTERRUPTED` |
+
+A job is held under a lease while it is dispatched. If the gateway running
+it dies before finishing (a crash rather than a shutdown), the job stays
+`PROCESSING` until the lease expires (`PROCESSING_JOB_LEASE`, 15 minutes by
+default) and is then failed by the next sweep with `PROCESSING_INTERRUPTED`.
+Read the job by id to see its terminal state; submit a new job to redo the
+work.
 
 `PROCESSING_INCOMPLETE` means the processing service would not process every measurement in the range. Rather than report statistics that silently cover less data than was asked for, the job fails and stores nothing; narrowing `from` and `to` to a range the service accepts is the way through.
 

@@ -93,6 +93,16 @@ const (
 	// gateway cannot use: a malformed body, or a failure that says the two
 	// services disagree. It never carries the processor's own words.
 	CodeProcessorProtocol = "PROCESSOR_PROTOCOL_ERROR"
+	// CodeResultsNotStored is recorded on a job the processor finished
+	// whose results could not be written, so the job did not complete. The
+	// client is told why the write failed; the job carries this code so it
+	// is FAILED rather than left PROCESSING.
+	CodeResultsNotStored = "PROCESSING_RESULTS_NOT_STORED"
+	// CodeProcessingInterrupted is recorded on a job whose lease expired
+	// while it was PROCESSING: the gateway running it stopped before the
+	// job finished (a crash, an OOM kill, a lost node). The lease sweep
+	// fails it so that an interrupted job never stays in flight for ever.
+	CodeProcessingInterrupted = "PROCESSING_INTERRUPTED"
 )
 
 const validationMessage = "The processing request is invalid."
@@ -455,6 +465,14 @@ func (s *Service) run(ctx context.Context, job domain.ProcessingJob, valid NewJo
 	// always has its results, and a job with results is always COMPLETED.
 	completed, err := s.store.CompleteJob(ctx, started.ID, s.now(), results, outcome.ServiceVersion)
 	if err != nil {
+		// The work was done but nothing of it was kept, so the job did not
+		// complete. Left PROCESSING it would look in flight for ever; it is
+		// failed with a code that says what happened, on the failure
+		// record's own deadline, because the likeliest cause is that the
+		// request's has just passed.
+		s.failQuietly(ctx, started, Failure{Code: CodeResultsNotStored, Message: "The results could not be stored."})
+		s.logger.ErrorContext(ctx, "processing results not stored",
+			"job_id", started.ID, "attempt_count", started.AttemptCount, "error", err)
 		return domain.ProcessingJob{}, s.storeError(ctx, err)
 	}
 	s.metrics.Batch("processing.results", len(results))

@@ -166,6 +166,11 @@ services:
       JWT_SECRET: ${JWT_SECRET:-local-development-signing-key-not-a-secret}
       PROCESSOR_URL: http://processor:8081
       PROCESSOR_TOKEN: ${PROCESSOR_TOKEN:-local-development-internal-token}
+      # How long a dispatch may hold a job before the lease sweep fails it
+      # as interrupted, and how often the sweep runs. The stack suite
+      # shortens both to watch the recovery (scripts/stack-test.sh).
+      PROCESSING_JOB_LEASE: ${PROCESSING_JOB_LEASE:-15m}
+      PROCESSING_LEASE_SWEEP_INTERVAL: ${PROCESSING_LEASE_SWEEP_INTERVAL:-1m}
       OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4318}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"

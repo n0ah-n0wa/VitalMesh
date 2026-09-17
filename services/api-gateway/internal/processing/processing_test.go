@@ -838,6 +838,34 @@ func TestResultsPagesAndRefusesAnInvisiblePatient(t *testing.T) {
 
 // ------------------------------------------------------- store failures
 
+// The processor did the work but the results could not be written. The job
+// must not be left PROCESSING, which would look in flight for ever: it is
+// FAILED with a code that says the results were not stored, and the client
+// sees why the write failed (SPECIFICATIONS.md sections 92 and 94).
+func TestAFailedResultsWriteFailsTheJobRatherThanLeavingItProcessing(t *testing.T) {
+	store := &fakeStore{readings: readings(1), completeErr: domain.New(domain.KindUnavailable, "DATABASE_UNAVAILABLE", "The database is unavailable; retry later.")}
+	svc := newService(t, store, &fakeProcessor{outcome: okOutcome()})
+
+	_, err := svc.Create(testContext(), actor(), validInput(store.job.PatientID))
+	if domainError(t, err).Code != "DATABASE_UNAVAILABLE" {
+		t.Errorf("code = %s, want the store's own failure", domainError(t, err).Code)
+	}
+	if !store.failed {
+		t.Fatal("the job was not failed after its results could not be stored")
+	}
+	if store.failure.Code != CodeResultsNotStored {
+		t.Errorf("the job carries %s, want %s", store.failure.Code, CodeResultsNotStored)
+	}
+	if store.failure.Message == "" || strings.Contains(store.failure.Message, "unavailable") {
+		t.Errorf("failure message = %q, want a stable message of its own", store.failure.Message)
+	}
+	// CompleteJob was attempted, then FailJob, and never the other way round.
+	seq := strings.Join(store.calls, ",")
+	if !strings.Contains(seq, "CompleteJob,FailJob") {
+		t.Errorf("calls = %s, want CompleteJob followed by FailJob", seq)
+	}
+}
+
 func TestAStoreFailureIsHiddenFromTheClient(t *testing.T) {
 	store := &fakeStore{createErr: errors.New("connection reset by peer")}
 	svc := newService(t, store, &fakeProcessor{})

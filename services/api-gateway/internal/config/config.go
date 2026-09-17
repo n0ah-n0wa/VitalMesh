@@ -154,6 +154,15 @@ type Processing struct {
 	// It is short and separate from the request's own deadline, because the
 	// record matters most exactly when that deadline has passed.
 	FailureRecordTimeout time.Duration
+	// JobLease is how long one dispatch may hold a job in PROCESSING. A job
+	// still PROCESSING when its lease has expired was interrupted: the
+	// gateway running it stopped before it finished. The lease sweep fails
+	// such a job so it does not stay in flight for ever. The lease must
+	// exceed the longest legitimate dispatch by a margin, which is the
+	// request timeout plus the failure record's own, twice over.
+	JobLease time.Duration
+	// LeaseSweepInterval is how often expired leases are swept.
+	LeaseSweepInterval time.Duration
 }
 
 // Processor configures the client for the Rust processing service
@@ -211,7 +220,7 @@ const DefaultAlgorithmVersion = "1.0.0"
 
 // InternalContractVersion is the version of
 // contracts/internal-api/processor-v1.json this gateway is built against.
-const InternalContractVersion = "1.1.1"
+const InternalContractVersion = "1.1.2"
 
 // DefaultHTTPAddr is where the server listens when HTTP_ADDR is not set.
 // It is exported so that the health-check command reaches the same port the
@@ -243,6 +252,12 @@ const (
 	// misconfiguration cannot turn one client request into a storm
 	// (SPECIFICATIONS.md section 93).
 	MaxProcessorAttempts = 5
+)
+
+// Bounds on how often expired job leases are swept.
+const (
+	MinLeaseSweepInterval = time.Second
+	MaxLeaseSweepInterval = time.Hour
 )
 
 const (
@@ -402,6 +417,8 @@ func Load(lookup Lookup) (Config, error) {
 			AlgorithmVersion:     p.string("PROCESSING_ALGORITHM_VERSION", DefaultAlgorithmVersion),
 			ServiceVersion:       p.string("PROCESSING_SERVICE_VERSION", "api-gateway"),
 			FailureRecordTimeout: p.duration("PROCESSING_FAILURE_RECORD_TIMEOUT", 5*time.Second),
+			JobLease:             p.duration("PROCESSING_JOB_LEASE", 15*time.Minute),
+			LeaseSweepInterval:   p.duration("PROCESSING_LEASE_SWEEP_INTERVAL", time.Minute),
 		},
 		Processor: Processor{
 			BaseURL:         p.string("PROCESSOR_URL", "http://127.0.0.1:8081"),
@@ -464,6 +481,13 @@ func Load(lookup Lookup) (Config, error) {
 	if cfg.HTTP.RequestTimeout >= cfg.HTTP.WriteTimeout {
 		p.fail("HTTP_REQUEST_TIMEOUT: must be shorter than HTTP_WRITE_TIMEOUT (%s >= %s)",
 			cfg.HTTP.RequestTimeout, cfg.HTTP.WriteTimeout)
+	}
+	// Shutdown drains what is in flight; a grace period shorter than a
+	// request's own bound would cut off every request a deployment
+	// interrupts (SPECIFICATIONS.md section 38).
+	if cfg.HTTP.ShutdownTimeout < cfg.HTTP.RequestTimeout {
+		p.fail("HTTP_SHUTDOWN_TIMEOUT: must be at least HTTP_REQUEST_TIMEOUT (%s < %s)",
+			cfg.HTTP.ShutdownTimeout, cfg.HTTP.RequestTimeout)
 	}
 	if cfg.Measurements.MaxBatchSize > MaxMeasurementBatchSize {
 		p.fail("MEASUREMENT_MAX_BATCH_SIZE: must be at most %d", MaxMeasurementBatchSize)
@@ -536,6 +560,15 @@ func Load(lookup Lookup) (Config, error) {
 	}
 	if cfg.Processing.MaxJobMeasurements < 1 || cfg.Processing.MaxJobMeasurements > MaxProcessingJobMeasurements {
 		p.fail("PROCESSING_MAX_JOB_MEASUREMENTS: must be between 1 and %d", MaxProcessingJobMeasurements)
+	}
+	// A lease shorter than a dispatch can legitimately last would let the
+	// sweep fail a job that is still being worked on.
+	if minLease := 2 * (cfg.HTTP.RequestTimeout + cfg.Processing.FailureRecordTimeout); cfg.Processing.JobLease < minLease {
+		p.fail("PROCESSING_JOB_LEASE: must be at least twice HTTP_REQUEST_TIMEOUT plus PROCESSING_FAILURE_RECORD_TIMEOUT (%s < %s)",
+			cfg.Processing.JobLease, minLease)
+	}
+	if cfg.Processing.LeaseSweepInterval < MinLeaseSweepInterval || cfg.Processing.LeaseSweepInterval > MaxLeaseSweepInterval {
+		p.fail("PROCESSING_LEASE_SWEEP_INTERVAL: must be between %s and %s", MinLeaseSweepInterval, MaxLeaseSweepInterval)
 	}
 	if cfg.Processing.AlgorithmVersion == "" {
 		p.fail("PROCESSING_ALGORITHM_VERSION: must not be empty")

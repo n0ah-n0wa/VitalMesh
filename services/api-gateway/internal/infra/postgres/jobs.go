@@ -121,6 +121,49 @@ func (r *Jobs) Fail(ctx context.Context, id uuid.UUID, now time.Time, code, mess
 	return r.transitioned(ctx, id, rows, err)
 }
 
+// ExpirePending moves PENDING jobs created before cutoff to PROCESSING with
+// a lease that expired at now, counting the attempt, so that FailExpired
+// can fail them: a job this old in PENDING was taken up by a request that
+// died before dispatching it. At most limit rows; rows locked by another
+// writer are skipped rather than waited for.
+func (r *Jobs) ExpirePending(ctx context.Context, cutoff, now time.Time, limit int) (int64, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE processing_jobs
+		SET status = 'PROCESSING', started_at = $2, lease_expires_at = $2, attempt_count = attempt_count + 1
+		WHERE id IN (
+			SELECT id FROM processing_jobs
+			WHERE status = 'PENDING' AND created_at < $1
+			ORDER BY created_at
+			LIMIT $3
+			FOR UPDATE SKIP LOCKED)`,
+		cutoff, now, limit)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
+// FailExpired moves PROCESSING jobs whose lease expired at or before now to
+// FAILED with a stable error code and a safe message, at most limit of
+// them, skipping rows another writer holds. A job whose lease is still
+// valid is never touched.
+func (r *Jobs) FailExpired(ctx context.Context, now time.Time, code, message string, limit int) (int64, error) {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE processing_jobs
+		SET status = 'FAILED', failed_at = $1, error_code = $2, error_message = $3, lease_expires_at = NULL
+		WHERE id IN (
+			SELECT id FROM processing_jobs
+			WHERE status = 'PROCESSING' AND lease_expires_at <= $1
+			ORDER BY lease_expires_at
+			LIMIT $4
+			FOR UPDATE SKIP LOCKED)`,
+		now, code, message, limit)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return tag.RowsAffected(), nil
+}
+
 // Cancel moves a PENDING or PROCESSING job to CANCELLED.
 func (r *Jobs) Cancel(ctx context.Context, id uuid.UUID, now time.Time) (domain.ProcessingJob, error) {
 	rows, err := r.db.Query(ctx, `

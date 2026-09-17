@@ -723,7 +723,9 @@ async fn the_same_job_id_cannot_run_twice_at_once() {
         .await;
     assert_eq!(duplicate.status, 409, "{}", duplicate.body);
     assert_eq!(duplicate.code(), "JOB_ALREADY_RUNNING");
-    assert_eq!(duplicate.error()["retryable"], false);
+    // The earlier attempt ends on its own and releases the id, so the same
+    // dispatch may be repeated after a short delay (contract 1.1.2).
+    assert_eq!(duplicate.error()["retryable"], true);
 
     // The refused duplicate must not have disturbed the running attempt.
     let view = Request::get("/internal/v1/jobs/job-dup")

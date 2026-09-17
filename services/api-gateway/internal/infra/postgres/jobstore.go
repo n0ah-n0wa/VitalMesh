@@ -21,12 +21,27 @@ import (
 // is ever open while the processor is being waited on (SPECIFICATIONS.md
 // section 22).
 type JobStore struct {
-	pool *pgxpool.Pool
+	pool  *pgxpool.Pool
+	lease time.Duration
 }
 
+// JobStoreOptions tune a JobStore. Zero fields take safe defaults.
+type JobStoreOptions struct {
+	// Lease is how long a dispatch may hold a job in PROCESSING before the
+	// lease sweep may fail it as interrupted. Zero means DefaultJobLease.
+	Lease time.Duration
+}
+
+// DefaultJobLease is the lease when none is configured.
+const DefaultJobLease = 15 * time.Minute
+
 // NewJobStore returns a store over pool.
-func NewJobStore(pool *pgxpool.Pool) *JobStore {
-	return &JobStore{pool: pool}
+func NewJobStore(pool *pgxpool.Pool, opts JobStoreOptions) *JobStore {
+	lease := opts.Lease
+	if lease <= 0 {
+		lease = DefaultJobLease
+	}
+	return &JobStore{pool: pool, lease: lease}
 }
 
 // CreateJob inserts a PENDING job and appends its audit record atomically,
@@ -91,15 +106,33 @@ type jobAuditMetadata struct {
 // StartJob moves a PENDING job to PROCESSING. It is a compare-and-set on
 // the status, so two gateways racing on the same job cannot both start it.
 func (s *JobStore) StartJob(ctx context.Context, id uuid.UUID, now time.Time, serviceVersion string) (domain.ProcessingJob, error) {
-	// The lease says how long this attempt may hold the job before another
-	// worker could take it over. It is the caller's own bound; nothing
-	// reclaims expired leases yet, and the column records the intent.
-	lease := now.Add(jobLease)
+	// The lease says how long this attempt may hold the job. A dispatch
+	// always ends well inside it; a job still PROCESSING after it expired
+	// was interrupted, and FailExpiredJobs is what reclaims it.
+	lease := now.Add(s.lease)
 	return NewJobs(s.pool).Start(ctx, id, now, lease, serviceVersion)
 }
 
-// jobLease is how long a dispatch may hold a job.
-const jobLease = 15 * time.Minute
+// FailExpiredJobs fails jobs left in flight by a gateway that stopped
+// (processing.LeaseExpirer). A PROCESSING job whose lease expired at or
+// before now is FAILED with the diagnosis. A PENDING job older than a lease
+// was created by a request that died before dispatching it; the state
+// machine allows FAILED only from PROCESSING, so it is started and then
+// failed, in the one transaction, the way an abandoned dispatch is. Both
+// steps take at most limit rows and skip rows another sweep holds.
+func (s *JobStore) FailExpiredJobs(ctx context.Context, now time.Time, failure processing.Failure, limit int) (int64, error) {
+	var failed int64
+	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
+		jobs := NewJobs(tx)
+		if _, err := jobs.ExpirePending(ctx, now.Add(-s.lease), now, limit); err != nil {
+			return err
+		}
+		var err error
+		failed, err = jobs.FailExpired(ctx, now, failure.Code, failure.Message, limit)
+		return err
+	})
+	return failed, err
+}
 
 // CompleteJob stores the results and moves the job to COMPLETED in one
 // transaction. Either both happen or neither does, so a COMPLETED job

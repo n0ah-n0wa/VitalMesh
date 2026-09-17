@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
@@ -30,6 +31,7 @@ import (
 // package.
 
 type stateFixture struct {
+	pool      *pgxpool.Pool
 	jobs      *postgres.Jobs
 	patientID uuid.UUID
 	userID    uuid.UUID
@@ -50,7 +52,7 @@ func newStateFixture(t *testing.T) *stateFixture {
 	if err != nil {
 		t.Fatalf("create patient: %v", err)
 	}
-	return &stateFixture{jobs: postgres.NewJobs(pool), patientID: patient.ID, userID: user.ID, ctx: ctx}
+	return &stateFixture{pool: pool, jobs: postgres.NewJobs(pool), patientID: patient.ID, userID: user.ID, ctx: ctx}
 }
 
 // pending inserts a fresh job in PENDING.

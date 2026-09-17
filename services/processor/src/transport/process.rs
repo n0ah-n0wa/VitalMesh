@@ -110,7 +110,7 @@ pub async fn process(
 fn admission_refused(error: &Error) -> bool {
     matches!(
         error.kind(),
-        Kind::Overloaded | Kind::Unavailable | Kind::Conflict
+        Kind::Overloaded | Kind::Unavailable | Kind::Busy
     )
 }
 
@@ -202,7 +202,7 @@ mod tests {
             "shutting down"
         )));
         assert!(admission_refused(&Error::new(
-            Kind::Conflict,
+            Kind::Busy,
             "JOB_ALREADY_RUNNING",
             "already running"
         )));

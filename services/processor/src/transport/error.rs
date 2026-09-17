@@ -65,7 +65,7 @@ pub(super) fn status_for(kind: Kind) -> StatusCode {
         Kind::Invalid => StatusCode::BAD_REQUEST,
         Kind::Validation => StatusCode::UNPROCESSABLE_ENTITY,
         Kind::NotFound => StatusCode::NOT_FOUND,
-        Kind::Conflict => StatusCode::CONFLICT,
+        Kind::Conflict | Kind::Busy => StatusCode::CONFLICT,
         Kind::Overloaded | Kind::Cancelled | Kind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
         Kind::Timeout => StatusCode::GATEWAY_TIMEOUT,
         Kind::Unauthenticated => StatusCode::UNAUTHORIZED,

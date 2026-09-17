@@ -41,6 +41,12 @@ export GATEWAY_PORT PROCESSOR_PORT POSTGRES_PORT REDIS_PORT
 # Deterministic on purpose: the suite never depends on these, but a run
 # should not pick up a developer's shell either.
 export ENVIRONMENT=local LOG_LEVEL=info
+# A short job lease and a frequent sweep, so the suite can watch a job left
+# in flight by a killed gateway being failed within the run rather than in
+# fifteen minutes. The lease must still be at least twice the request
+# timeout plus the failure record timeout (30 s at the defaults).
+export PROCESSING_JOB_LEASE="${PROCESSING_JOB_LEASE:-30s}"
+export PROCESSING_LEASE_SWEEP_INTERVAL="${PROCESSING_LEASE_SWEEP_INTERVAL:-5s}"
 
 compose() { $COMPOSE "$@"; }
 

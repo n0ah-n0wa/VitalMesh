@@ -33,6 +33,12 @@ func TestStack(t *testing.T) {
 		{"failure: timeout", s.testProcessorTimeout},
 		{"failure: database failure", s.testDatabaseFailure},
 		{"failure: Redis failure", s.testRedisFailure},
+		{"failure: transient processor recovery", s.testTransientProcessorRecovery},
+		{"failure: bounded retries, no duplicate", s.testBoundedRetries},
+		{"failure: database connections severed", s.testDatabaseConnectionsSevered},
+		{"failure: processor restart", s.testProcessorRestart},
+		{"failure: gateway restart", s.testGatewayRestart},
+		{"failure: gateway killed mid-job", s.testGatewayKilledMidJob},
 	}
 	for _, f := range flows {
 		if !t.Run(f.name, f.run) && t.Failed() {

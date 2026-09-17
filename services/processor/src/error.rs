@@ -15,6 +15,10 @@ pub enum Kind {
     Validation,
     NotFound,
     Conflict,
+    /// The same job is already running here: an earlier attempt, typically
+    /// one whose client gave up before this service did. It ends on its
+    /// own, so repeating the request after a short delay can succeed.
+    Busy,
     /// No processing capacity is available right now.
     Overloaded,
     /// The work exceeded its time bound.
@@ -38,7 +42,9 @@ impl Kind {
     /// asked it to, and repeating it would undo that.
     pub fn is_retryable(self) -> bool {
         match self {
-            Self::Internal | Self::Overloaded | Self::Timeout | Self::Unavailable => true,
+            Self::Internal | Self::Busy | Self::Overloaded | Self::Timeout | Self::Unavailable => {
+                true
+            }
             Self::Invalid
             | Self::Validation
             | Self::NotFound
@@ -219,6 +225,7 @@ mod tests {
     fn retry_classification_follows_the_specification() {
         for kind in [
             Kind::Internal,
+            Kind::Busy,
             Kind::Overloaded,
             Kind::Timeout,
             Kind::Unavailable,

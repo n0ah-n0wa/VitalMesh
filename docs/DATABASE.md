@@ -91,7 +91,7 @@ Access paths required by the specification: `(patient_id, recorded_at)` is `meas
 | `attempt_count` | integer | not null, ≥ 0 |
 | `created_by` | uuid | not null, references `users` |
 | `service_version`, `request_id`, `trace_id` | text | diagnostic metadata (section 94) |
-| `lease_expires_at` | timestamptz | processing lease, used by the dispatcher's reconciler |
+| `lease_expires_at` | timestamptz | the dispatch's lease (`PROCESSING_JOB_LEASE`); a job still `PROCESSING` after it expired was interrupted by a crash and is failed by the lease sweep with `PROCESSING_INTERRUPTED` (docs/RESILIENCE.md); cleared on every terminal transition |
 | `created_at`, `updated_at` | timestamptz | not null |
 
 Status invariants (check constraints): `PENDING` has no lifecycle timestamps; `PROCESSING` has `started_at` only; `COMPLETED` has `started_at` and `completed_at`; `FAILED` has `started_at`, `failed_at` and `error_code`; `CANCELLED` has `cancelled_at`. Timestamps are monotonic: `started_at ≥ requested_at`, `completed_at`/`failed_at ≥ started_at`, `cancelled_at ≥ requested_at`.

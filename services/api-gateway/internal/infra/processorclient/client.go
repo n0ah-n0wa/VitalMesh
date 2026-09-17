@@ -24,6 +24,7 @@ import (
 	"io"
 	"log/slog"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -59,6 +60,7 @@ type Client struct {
 	tracer   tracing.Tracer
 	sleep    func(context.Context, time.Duration) error
 	now      func() time.Time
+	rand     func() float64
 	contract string
 }
 
@@ -70,6 +72,9 @@ type Options struct {
 	HTTPClient *http.Client
 	Sleep      func(context.Context, time.Duration) error
 	Now        func() time.Time
+	// Rand returns a value in [0, 1) that jitters a backoff delay; nil uses
+	// the standard library's source. Tests fix it to make delays exact.
+	Rand func() float64
 	// Tracer opens one client span per attempt; nil records none.
 	Tracer tracing.Tracer
 }
@@ -88,6 +93,10 @@ func New(cfg config.Processor, logger *slog.Logger, opts Options) *Client {
 	if now == nil {
 		now = time.Now
 	}
+	random := opts.Rand
+	if random == nil {
+		random = rand.Float64
+	}
 	return &Client{
 		http:     httpClient,
 		baseURL:  strings.TrimSuffix(cfg.BaseURL, "/"),
@@ -97,6 +106,7 @@ func New(cfg config.Processor, logger *slog.Logger, opts Options) *Client {
 		logger:   logger,
 		sleep:    sleep,
 		now:      now,
+		rand:     random,
 		contract: cfg.ContractVersion,
 	}
 }
@@ -280,11 +290,13 @@ func (c *Client) setCorrelation(ctx context.Context, req *http.Request) {
 }
 
 // envelope is the processor's error body. Only the code is used: the
-// message is written for operators of that service.
+// message is written for operators of that service, and whether a failure
+// is worth repeating is decided here from the status and the code, as the
+// contract classifies them, rather than read from the body. The
+// classification is checked against the contract by a test.
 type envelope struct {
 	Error struct {
-		Code      string `json:"code"`
-		Retryable *bool  `json:"retryable"`
+		Code string `json:"code"`
 	} `json:"error"`
 }
 
@@ -447,16 +459,23 @@ func (c *Client) contextError(ctx context.Context, err error) error {
 }
 
 // backoff is the delay before `attempt`: exponential from the configured
-// base, capped, unless the processor asked for a specific delay.
+// base, capped and jittered, unless the processor asked for a specific
+// delay, which is honoured as given (capped).
 func (c *Client) backoff(attempt int, last error) time.Duration {
 	var e *Error
 	if errors.As(last, &e) && e.RetryAfter > 0 {
 		return min(e.RetryAfter, c.cfg.MaxBackoff)
 	}
-	// attempt is at least 2 here, so the first wait is the base delay.
+	// attempt is at least 2 here, so the first delay grows from the base.
 	factor := math.Pow(2, float64(attempt-2))
-	wait := time.Duration(float64(c.cfg.Backoff) * factor)
-	return min(wait, c.cfg.MaxBackoff)
+	wait := min(time.Duration(float64(c.cfg.Backoff)*factor), c.cfg.MaxBackoff)
+	// Equal jitter: half the delay is kept and the other half is random, so
+	// that gateway replicas which failed together against the same
+	// processor do not all retry at the same instant. The result never
+	// exceeds the exponential value, so the cap and the deadline check
+	// hold unchanged.
+	half := wait / 2
+	return half + time.Duration(c.rand()*float64(half))
 }
 
 // timeAllows reports whether there is time for a wait plus another attempt.

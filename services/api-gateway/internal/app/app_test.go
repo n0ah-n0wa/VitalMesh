@@ -32,6 +32,12 @@ func testConfig(t *testing.T) config.Config {
 			// Short, so a shutdown that waits on something reports an error
 			// instead of stalling the test.
 			return "1s", true
+		case "HTTP_REQUEST_TIMEOUT":
+			// No longer than the shutdown grace, as configuration requires,
+			// and the processor's attempt shorter still.
+			return "1s", true
+		case "PROCESSOR_TIMEOUT":
+			return "500ms", true
 		case "JWT_SECRET":
 			return "test-secret-test-secret-test-secret-32", true
 		case "PASSWORD_HASH_MEMORY_KIB":

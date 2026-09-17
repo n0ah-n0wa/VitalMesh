@@ -78,7 +78,7 @@ GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -242,6 +242,17 @@ k8s-local-test: k8s-validate ## Deploy the local overlay to a kind cluster and t
 # The script says so too, and refuses to run against nothing.
 k8s-failure-test: ## Break each dependency in turn and check the behaviour
 	sh scripts/k8s-failure-test.sh
+
+# The production-style resilience test: a three-node kind cluster, two
+# replicas of each service and a metrics-server, so a PodDisruptionBudget, a
+# node drain and an HPA all have something to act on. It owns its own
+# cluster (vitalmesh-ha) and creates and destroys it, so unlike
+# k8s-failure-test it needs no cluster deployed first. docs/OPERATIONS.md
+# records what it observes.
+#
+#   sh scripts/k8s-resilience-test.sh --keep   to leave the cluster up
+k8s-resilience-test: ## Production-style resilience test on a 3-node kind cluster (drain, PDB, HPA, outages)
+	sh scripts/k8s-resilience-test.sh
 
 # Static checks for the Terraform (fmt, validate, trivy, checkov), none of
 # which needs an AWS account. Planning against a real account is separate.

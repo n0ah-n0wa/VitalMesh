@@ -49,6 +49,9 @@ type App struct {
 	// retention removes expired idempotency records for as long as the
 	// gateway is running.
 	retention *idempotency.Collector
+	// sweeper fails jobs whose lease expired: jobs a gateway that stopped
+	// mid-dispatch left PROCESSING.
+	sweeper *processing.Sweeper
 }
 
 // New wires the application. The database pool connects lazily, so New
@@ -121,7 +124,8 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 	})
 	measurements := measurement.NewService(postgres.NewMeasurementStore(pool), cfg.Measurements, logger, measurement.Options{Metrics: rec, Tracer: tr})
 	processor := processorclient.New(cfg.Processor, logger, processorclient.Options{Tracer: tr})
-	jobs := processing.NewService(postgres.NewJobStore(pool), processor, cfg.Processing, logger, processing.Options{Metrics: rec, Tracer: tr})
+	jobStore := postgres.NewJobStore(pool, postgres.JobStoreOptions{Lease: cfg.Processing.JobLease})
+	jobs := processing.NewService(jobStore, processor, cfg.Processing, logger, processing.Options{Metrics: rec, Tracer: tr})
 
 	handlers := httpapi.Handlers{
 		Health:         handler.NewHealth(ServiceName, version, string(cfg.Environment), readiness, logger),
@@ -152,6 +156,7 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		handler:   root,
 		traces:    traces,
 		retention: idempotency.NewCollector(idempotencyStore, cfg.Idempotency.RetentionInterval, logger, idempotency.CollectorOptions{}),
+		sweeper:   processing.NewSweeper(jobStore, cfg.Processing.LeaseSweepInterval, logger, processing.SweeperOptions{}),
 	}, nil
 }
 
@@ -180,18 +185,23 @@ func (a *App) Run(ctx context.Context) error {
 		}
 	}()
 
-	// Retention runs alongside the server and stops with it. Its work is
-	// bounded per pass, so shutdown waits on at most one batch.
-	retention, stopRetention := context.WithCancel(ctx)
+	// Retention and the lease sweep run alongside the server and stop with
+	// it. Their work is bounded per pass, so shutdown waits on at most one
+	// batch of each.
+	background, stopBackground := context.WithCancel(ctx)
 	var sweeping sync.WaitGroup
-	sweeping.Add(1)
+	sweeping.Add(2)
 	go func() {
 		defer sweeping.Done()
-		a.retention.Run(retention)
+		a.retention.Run(background)
 	}()
-	// Deferred last-in-first-out: cancel, then wait for the sweep to stop.
+	go func() {
+		defer sweeping.Done()
+		a.sweeper.Run(background)
+	}()
+	// Deferred last-in-first-out: cancel, then wait for the sweeps to stop.
 	defer sweeping.Wait()
-	defer stopRetention()
+	defer stopBackground()
 
 	a.logger.Info("starting", "addr", a.cfg.HTTP.Addr)
 	if err := httpapi.Run(ctx, a.handler, a.cfg.HTTP); err != nil {

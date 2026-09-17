@@ -60,6 +60,17 @@ func (c *compose) stop(t *testing.T, service string)    { c.must(t, "stop", "-t"
 func (c *compose) start(t *testing.T, service string)   { c.must(t, "start", service) }
 func (c *compose) pause(t *testing.T, service string)   { c.must(t, "pause", service) }
 func (c *compose) unpause(t *testing.T, service string) { c.must(t, "unpause", service) }
+func (c *compose) restart(t *testing.T, service string) { c.must(t, "restart", "-t", "10", service) }
+
+// kill sends SIGKILL: no drain, no shutdown sequence, the way a crash, an
+// OOM kill or a lost node ends a process.
+func (c *compose) kill(t *testing.T, service string) { c.must(t, "kill", service) }
+
+// exec runs a command inside a service's container and returns its stdout.
+func (c *compose) exec(t *testing.T, service string, args ...string) string {
+	t.Helper()
+	return c.must(t, append([]string{"exec", "-T", service}, args...)...)
+}
 
 // containerID is the id of a service's container.
 func (c *compose) containerID(t *testing.T, service string) string {

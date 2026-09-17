@@ -1,0 +1,39 @@
+# A multi-node kind cluster for the production-style resilience test
+# (scripts/k8s-resilience-test.sh, docs/OPERATIONS.md).
+#
+# The local cluster (kind/cluster.yaml) is one node on purpose: it exercises
+# a real API server, its admission chain and its scheduler, which is what
+# validation needs. It cannot answer the questions this cluster is for,
+# because they are about more than one node and more than one replica:
+#
+#   - a PodDisruptionBudget only means something when a drain has to choose
+#     which pod to evict, which needs somewhere else for the pod to go;
+#   - topologySpreadConstraints only spread across nodes that exist;
+#   - a node drain is not a drain with nowhere to reschedule.
+#
+# So this is three nodes: one control-plane and two workers. The workers
+# carry the application at two replicas each (the production floor, section
+# 36); the control-plane carries the PostgreSQL and Redis fixtures, pinned
+# there by the test script so that draining a worker never destroys the
+# fixtures' emptyDir data. The control-plane is tainted by the script after
+# creation so no application pod lands on it.
+#
+# The node image is pinned by digest, the same one kind/cluster.yaml pins,
+# so the two clusters run the identical Kubernetes version.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: vitalmesh-ha
+networking:
+  # As in the single-node config: kind's own CNI does not implement
+  # NetworkPolicy, so the test installs Calico and the base's default-deny
+  # actually denies. Cross-node pod traffic (gateway to a fixture on the
+  # control-plane) also rides on Calico here.
+  disableDefaultCNI: true
+  podSubnet: "192.168.0.0/16"
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+  - role: worker
+    image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+  - role: worker
+    image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865

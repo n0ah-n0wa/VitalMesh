@@ -110,9 +110,14 @@ strings `docker-compose.yml` already carries and protect nothing.
 make k8s-validate      # no cluster needed
 make k8s-local-test    # deploys to kind and exercises it
 make k8s-failure-test  # breaks each dependency and checks the behaviour
+make k8s-resilience-test  # 3 nodes, 2 replicas: drain, PDB, HPA, outages
 ```
 
-`docs/FAILURE_MODES.md` records what the third one observes.
+`docs/FAILURE_MODES.md` records what `k8s-failure-test` observes, and
+`docs/OPERATIONS.md` what `k8s-resilience-test` does — the multi-node,
+multi-replica scenarios (rolling restart, pod deletion, a node drain gated
+by the PodDisruptionBudget, HPA scaling, and the Redis and database outages)
+that only mean something above one node and one replica.
 
 `k8s-validate` renders **every** overlay and checks each rendered result —
 not just the base, because an overlay can produce something the base never

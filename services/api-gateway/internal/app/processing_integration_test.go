@@ -162,6 +162,9 @@ func newProcessingHarness(t *testing.T, readings int, tune map[string]string) *p
 			return "2ms", true
 		case "HTTP_REQUEST_TIMEOUT":
 			return "20s", true
+		case "HTTP_SHUTDOWN_TIMEOUT":
+			// At least the request timeout, as configuration requires.
+			return "20s", true
 		case "HTTP_WRITE_TIMEOUT":
 			return "25s", true
 		}

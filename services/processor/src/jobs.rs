@@ -111,7 +111,7 @@ impl JobRegistry {
             .is_some_and(|job| job.status == JobStatus::Processing)
         {
             return Err(Error::new(
-                Kind::Conflict,
+                Kind::Busy,
                 "JOB_ALREADY_RUNNING",
                 "A job with this id is already running.",
             ));
@@ -323,7 +323,8 @@ mod tests {
         let error = registry
             .start(&id("dup"), version(), requested())
             .expect_err("the id is already running");
-        assert_eq!(error.kind(), Kind::Conflict);
+        assert_eq!(error.kind(), Kind::Busy);
+        assert!(error.is_retryable(), "the earlier run ends on its own");
         assert_eq!(error.code(), "JOB_ALREADY_RUNNING");
         assert_eq!(
             registry.get(&id("dup")).unwrap().status,

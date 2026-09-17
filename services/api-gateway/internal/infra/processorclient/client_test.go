@@ -53,6 +53,9 @@ func newClient(t *testing.T, baseURL string, tune ...func(*config.Processor)) (*
 			slept = append(slept, d)
 			return nil
 		},
+		// No jitter here, so a test can assert the exact delay; the jitter
+		// has a test of its own.
+		Rand: func() float64 { return 1 },
 	})
 	return c, &slept
 }
@@ -274,6 +277,49 @@ func TestProcessCapsTheDelayItWasAskedFor(t *testing.T) {
 		if d > 2*time.Millisecond {
 			t.Errorf("waited %v, longer than the configured cap", d)
 		}
+	}
+}
+
+// The delay before a retry is exponential and capped, and jittered so that
+// replicas which failed together do not retry together: the delay lies
+// between half the exponential value and the value itself, never above it.
+// A delay the processor asked for is honoured as given.
+func TestBackoffIsExponentialCappedAndJittered(t *testing.T) {
+	cfg := testConfig("http://processor")
+	cfg.Backoff, cfg.MaxBackoff = 100*time.Millisecond, 2*time.Second
+	full := map[int]time.Duration{2: 100 * time.Millisecond, 3: 200 * time.Millisecond, 4: 400 * time.Millisecond, 6: 1600 * time.Millisecond, 7: 2 * time.Second, 9: 2 * time.Second}
+
+	for _, r := range []float64{0, 0.25, 0.999} {
+		c := New(cfg, discardLogger(), Options{Rand: func() float64 { return r }})
+		for attempt, want := range full {
+			got := c.backoff(attempt, nil)
+			expect := want/2 + time.Duration(r*float64(want/2))
+			if got != expect {
+				t.Errorf("rand %.3f, attempt %d: backoff = %s, want %s", r, attempt, got, expect)
+			}
+			if got < want/2 || got > want {
+				t.Errorf("rand %.3f, attempt %d: backoff %s is outside [%s, %s]", r, attempt, got, want/2, want)
+			}
+		}
+	}
+
+	// The default source stays inside the same bounds.
+	c := New(cfg, discardLogger(), Options{})
+	for i := 0; i < 200; i++ {
+		if got := c.backoff(3, nil); got < 100*time.Millisecond || got > 200*time.Millisecond {
+			t.Fatalf("default jitter produced %s, outside [100ms, 200ms]", got)
+		}
+	}
+
+	// A Retry-After is not jittered: the processor named the delay.
+	c = New(cfg, discardLogger(), Options{Rand: func() float64 { return 0 }})
+	asked := &Error{ProcessorError: &processing.ProcessorError{}, RetryAfter: time.Second}
+	if got := c.backoff(2, asked); got != time.Second {
+		t.Errorf("backoff after Retry-After: 1 = %s, want exactly 1s", got)
+	}
+	asked.RetryAfter = time.Hour
+	if got := c.backoff(2, asked); got != cfg.MaxBackoff {
+		t.Errorf("backoff after an hour's Retry-After = %s, want the cap %s", got, cfg.MaxBackoff)
 	}
 }
 
@@ -617,7 +663,7 @@ func TestHealthReadsTheVersionsAndLimits(t *testing.T) {
 			t.Error("the health endpoint needs no credential")
 		}
 		_, _ = io.WriteString(w, `{"status":"ok","service":"processor","version":"dev",
-			"algorithm_version":"1.0.0","contract_version":"1.1.1",
+			"algorithm_version":"1.0.0","contract_version":"1.1.2",
 			"limits":{"max_job_measurements":100000,"max_request_bytes":1048576,
 			"processing_timeout_ms":300000,"max_concurrent_jobs":4,"job_retention_seconds":900}}`)
 	}))

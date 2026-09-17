@@ -2,7 +2,7 @@
   "openapi": "3.0.3",
   "info": {
     "title": "VitalMesh internal processing API",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "summary": "Contract between the Go API gateway (client) and the Rust processor (server).",
     "description": "The internal HTTP/JSON API served by the Rust processor under `/internal/v1` and consumed by the Go API gateway (SPECIFICATIONS.md section 8). It is versioned independently of the public `/api/v1` API. The path prefix carries the major version; `info.version` carries the full contract version and changes with every reviewed change to this document. See `contracts/internal-api/README.md` for the ownership, timeout, retry and compatibility rules that this document references but cannot express.\n\nThe gateway owns PostgreSQL and is the system of record for jobs, measurements and results. The processor holds no database connection: every measurement it processes arrives in the request body, and every job view it serves is its own bounded, in-memory view of work it was asked to do.",
     "contact": {
@@ -220,9 +220,9 @@
             "$ref": "#/components/responses/Unauthenticated"
           },
           "409": {
-            "description": "A job with this id is already running on this processor.",
+            "description": "A job with this id is already running on this processor: an earlier attempt at the same dispatch, typically one whose client gave up before the processor did. The earlier attempt ends on its own, either with its result or with its time bound, and releases the id, so the same dispatch may be repeated after a short delay (SPECIFICATIONS.md section 93). No `Retry-After` is sent because how long the earlier attempt has left is not known; the client's own backoff applies. Repeating is safe: the processor keeps no result of a finished job, so a repeat cannot duplicate anything.",
             "x-error-codes": ["JOB_ALREADY_RUNNING"],
-            "x-retryable": false,
+            "x-retryable": true,
             "headers": {
               "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
               "X-Correlation-ID": { "$ref": "#/components/headers/CorrelationId" }
@@ -236,7 +236,7 @@
                     "message": "A job with this id is already running.",
                     "request_id": "8f14e45fceea167a5a36dedd4bea2543",
                     "correlation_id": "c-9910",
-                    "retryable": false
+                    "retryable": true
                   }
                 }
               }
@@ -475,7 +475,7 @@
                   "service": "processor",
                   "version": "1a2b3c4",
                   "algorithm_version": "1.0.0",
-                  "contract_version": "1.1.1",
+                  "contract_version": "1.1.2",
                   "limits": {
                     "max_job_measurements": 100000,
                     "max_request_bytes": 16777216,
