@@ -155,15 +155,34 @@ type AuditEvent struct {
 	RequestID string
 }
 
-// Reading is one measurement in the shape the processor accepts. The
-// gateway builds these from stored measurements; the field names are the
-// contract's.
+// Reading is one measurement in the shape the processor accepts; the
+// field names are the contract's. The store produces these directly from
+// its rows, so a job's readings are scanned once into the shape that is
+// sent and never copied: for a 60,000-reading job the full domain rows and
+// their conversion cost more than the processor's work on them
+// (docs/PERFORMANCE_OPTIMIZATIONS.md).
 type Reading struct {
 	ID         string  `json:"id"`
 	Type       string  `json:"type"`
 	Value      float64 `json:"value"`
 	Unit       string  `json:"unit"`
 	RecordedAt string  `json:"recorded_at"`
+}
+
+// ReadingFromMeasurement is the wire shape of a stored measurement.
+func ReadingFromMeasurement(m domain.Measurement) Reading {
+	return Reading{
+		ID:         m.ID.String(),
+		Type:       string(m.Type),
+		Value:      m.Value,
+		Unit:       m.Unit,
+		RecordedAt: FormatRecordedAt(m.RecordedAt),
+	}
+}
+
+// FormatRecordedAt is how a recording time travels to the processor.
+func FormatRecordedAt(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
 }
 
 // Request is one dispatch to the processor, matching the contract's
@@ -266,7 +285,7 @@ type Store interface {
 	// ReadingsForJob returns up to limit readings of the patient in the
 	// range, in recording order. It returns limit+1 items when more exist,
 	// so the caller can detect an oversized job without a second query.
-	ReadingsForJob(ctx context.Context, patientID uuid.UUID, params Parameters, limit int) ([]domain.Measurement, error)
+	ReadingsForJob(ctx context.Context, patientID uuid.UUID, params Parameters, limit int) ([]Reading, error)
 	// ListResultsByPatient returns a page of a patient's results.
 	ListResultsByPatient(ctx context.Context, patientID uuid.UUID, after *ResultCursor, limit int) ([]domain.ProcessingResult, error)
 	// PatientStatus returns the status of a patient, or a not-found error.
@@ -511,20 +530,14 @@ func (s *Service) failQuietly(ctx context.Context, job domain.ProcessingJob, fai
 // request builds the dispatch. Job identity, parameters and the request
 // time come from the stored job, so what the processor sees is what was
 // recorded.
-func (s *Service) request(job domain.ProcessingJob, valid NewJob, readings []domain.Measurement) Request {
+func (s *Service) request(job domain.ProcessingJob, valid NewJob, readings []Reading) Request {
 	types := make([]string, len(valid.Parameters.MeasurementTypes))
 	for i, t := range valid.Parameters.MeasurementTypes {
 		types[i] = string(t)
 	}
-	items := make([]Reading, len(readings))
-	for i, m := range readings {
-		items[i] = Reading{
-			ID:         m.ID.String(),
-			Type:       string(m.Type),
-			Value:      m.Value,
-			Unit:       m.Unit,
-			RecordedAt: m.RecordedAt.UTC().Format(time.RFC3339Nano),
-		}
+	items := readings
+	if items == nil {
+		items = []Reading{}
 	}
 	return Request{
 		Job: RequestJob{

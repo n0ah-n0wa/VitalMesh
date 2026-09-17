@@ -19,7 +19,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres/postgrestest"
 )
 
-func ctx(t *testing.T) context.Context {
+func ctx(t testing.TB) context.Context {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	t.Cleanup(cancel)
@@ -147,8 +147,11 @@ func TestConstraintsRejectInvalidRows(t *testing.T) {
 		// PostgreSQL orders NaN and Infinity above every number, so the
 		// BEFORE trigger's range check rejects them first; the finite CHECK
 		// constraint stays as defence in depth behind it.
-		{"value NaN", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source) VALUES ($1, 'SPO2', 'NaN'::float8, '%', $2, 's')`, []any{patient.ID, now}, "23514", "measurements_value_range_check"},
-		{"value Infinity", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source) VALUES ($1, 'SPO2', 'Infinity'::float8, '%', $2, 's')`, []any{patient.ID, now}, "23514", "measurements_value_range_check"},
+		// A non-finite value fails the table's own CHECK before the
+		// validation trigger sees the row (the trigger runs after the
+		// statement since 000011); the API refuses such a value earlier still.
+		{"value NaN", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source) VALUES ($1, 'SPO2', 'NaN'::float8, '%', $2, 's')`, []any{patient.ID, now}, "23514", "measurements_value_finite_check"},
+		{"value Infinity", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source) VALUES ($1, 'SPO2', 'Infinity'::float8, '%', $2, 's')`, []any{patient.ID, now}, "23514", "measurements_value_finite_check"},
 		{"metadata not an object", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source, metadata) VALUES ($1, 'SPO2', 98, '%', $2, 's', '[1]'::jsonb)`, []any{patient.ID, now}, "23514", "measurements_metadata_object_check"},
 		{"empty source", `INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source) VALUES ($1, 'SPO2', 98, '%', $2, '')`, []any{patient.ID, now}, "23514", "measurements_source_check"},
 		{"invalid role", `INSERT INTO users (email, password_hash, role) VALUES ('r@example.com', 'h', 'ROOT')`, nil, "23514", "users_role_check"},
@@ -356,7 +359,7 @@ func TestConcurrentStartIsCompareAndSet(t *testing.T) {
 	}
 }
 
-func seedPatientAndUser(t *testing.T, pool *pgxpool.Pool) (domain.Patient, domain.User) {
+func seedPatientAndUser(t testing.TB, pool *pgxpool.Pool) (domain.Patient, domain.User) {
 	t.Helper()
 	c := ctx(t)
 	patient, err := postgres.NewPatients(pool).Create(c, "seed-"+uuid.NewString(), time.Date(1985, 6, 15, 0, 0, 0, 0, time.UTC), domain.SexUnknown)

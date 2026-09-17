@@ -51,10 +51,38 @@ func (s *MeasurementStore) CreateBatch(ctx context.Context, in []measurement.New
 	for i, m := range in {
 		items[i] = toNewMeasurement(m)
 	}
+	// The whole batch as one statement first. If a reading is refused the
+	// statement says which rule, not which reading, and the API promises the
+	// item; the transaction is rolled back and the batch is stored again one
+	// statement per reading, which stops at the offending one and names it.
+	// A batch that is refused is the rare case, so the second pass is a cost
+	// only failures pay.
+	created, err := s.storeBatch(ctx, items, event, false)
+	var domErr *domain.Error
+	if err != nil && errors.As(err, &domErr) && (domErr.Kind == domain.KindConflict || domErr.Kind == domain.KindValidation) {
+		created, err = s.storeBatch(ctx, items, event, true)
+	}
+	if err != nil {
+		var item *BatchItemError
+		if errors.As(err, &item) {
+			return nil, &measurement.ItemError{Index: item.Index, Err: item.Err}
+		}
+		return nil, err
+	}
+	return created, nil
+}
+
+// storeBatch stores the readings and their audit records in one
+// transaction, as one statement (each=false) or one per reading (each=true).
+func (s *MeasurementStore) storeBatch(ctx context.Context, items []NewMeasurement, event measurement.AuditEvent, each bool) ([]domain.Measurement, error) {
 	var created []domain.Measurement
 	err := WithTx(ctx, s.pool, func(tx pgx.Tx) error {
 		var err error
-		created, err = NewMeasurements(tx).CreateBatch(ctx, items)
+		if each {
+			created, err = NewMeasurements(tx).CreateBatchEach(ctx, items)
+		} else {
+			created, err = NewMeasurements(tx).CreateBatch(ctx, items)
+		}
 		if err != nil {
 			return err
 		}
@@ -65,14 +93,7 @@ func (s *MeasurementStore) CreateBatch(ctx context.Context, in []measurement.New
 		_, err = NewAudit(tx).AppendBatch(ctx, entries)
 		return err
 	})
-	if err != nil {
-		var item *BatchItemError
-		if errors.As(err, &item) {
-			return nil, &measurement.ItemError{Index: item.Index, Err: item.Err}
-		}
-		return nil, err
-	}
-	return created, nil
+	return created, err
 }
 
 // GetByID returns one reading.

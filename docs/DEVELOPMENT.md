@@ -53,6 +53,8 @@ Run `make help` for the list. Every CI job runs one of these targets and nothing
 | `make e2e-test` | cross-service tests: the real gateway against the real processor binary, which it builds first |
 | `make coverage-go` | merges the Go coverage profiles from every suite and checks the merged floor (`GO_COVERAGE_MIN_ALL`) |
 | `make stack-test` | starts a clean containerized stack as its own compose project, runs the end-to-end suite against it and removes it (`scripts/stack-test.sh`) |
+| `make perf-baseline` | the performance baseline ([PERFORMANCE.md](PERFORMANCE.md) is the entry point): sign-in cost, the k6 load run with container stats, the server-side view from Prometheus, batch and job size sweeps, database sizes and plans; `RESET=1` for an empty database first ([PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md)) |
+| `make load-test` | k6 in a pinned container against the local environment (`LOAD_PROFILE=smoke` or `standard`); the report lands in `tests/load/results/` ([LOAD_TESTING.md](LOAD_TESTING.md)) |
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make synth-generate` / `make synth-load` | write a synthetic fixture (`SYNTH_DIR`, flags in `SYNTH_ARGS`) and load it into the local environment: accounts, patients, readings and jobs; see [SYNTHETIC_DATA.md](SYNTHETIC_DATA.md) |
 | `make build` | builds `bin/api-gateway`, `bin/synth` and `services/processor/target/debug/processor` |

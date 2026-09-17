@@ -78,7 +78,7 @@ GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo synth-generate synth-load stack-test
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -275,6 +275,16 @@ demo: ## The twelve-step demonstration: starts the environment and runs the whol
 # failure cases, and the project is removed. Needs Docker and Go.
 stack-test: ## Start a clean containerized stack, run the end-to-end suite against it, remove it
 	COMPOSE="$(COMPOSE)" sh scripts/stack-test.sh
+
+# Load test with k6 in a pinned container against the local environment;
+# the report lands in tests/load/results/ (docs/LOAD_TESTING.md).
+LOAD_PROFILE ?= standard
+
+load-test: ## Run the k6 load test (LOAD_PROFILE=smoke|standard) and write the report to tests/load/results/
+	PROFILE=$(LOAD_PROFILE) sh scripts/load-test.sh
+
+perf-baseline: ## Measure the performance baseline (RESET=1 for an empty database first); report in tests/load/results/ (docs/PERFORMANCE_BASELINE.md)
+	sh scripts/perf-baseline.sh
 
 # Synthetic data (SPECIFICATIONS.md sections 106 and 107; docs/SYNTHETIC_DATA.md).
 # SYNTH_ARGS passes flags through: make synth-generate SYNTH_ARGS="--seed 7 --patients 50 --days 30"

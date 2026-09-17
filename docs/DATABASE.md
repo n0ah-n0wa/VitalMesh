@@ -70,7 +70,7 @@ The ranges reject values that cannot be a reading at all. They are data validati
 | `source` | text | not null, non-empty, ≤ 64 chars |
 | `metadata` | jsonb | not null object, ≤ 4096 bytes |
 
-The trigger `measurements_validate` runs before every insert and update and rejects a unit that does not match the type's canonical unit or a value outside the type's range. The errors carry the constraint names `measurements_unit_check` and `measurements_value_range_check` so they map to API errors like any declared constraint.
+The triggers `measurements_validate` (after each `INSERT` statement) and `measurements_validate_update` (after each `UPDATE` statement) check the statement's rows in one set-based query over the transition table and reject a unit that does not match the type's canonical unit or a value outside the type's range. The errors carry the constraint names `measurements_unit_check` and `measurements_value_range_check` so they map to API errors like any declared constraint. They were row-level before migration 000011; the per-statement form checks a 1,000-reading batch in under a millisecond where the row form took 35 to 50 ms ([PERFORMANCE_OPTIMIZATIONS.md](PERFORMANCE_OPTIMIZATIONS.md)). A non-finite value fails the table's `measurements_value_finite_check` before the trigger sees it.
 
 Unique `(patient_id, type, recorded_at, source)`: the same reading submitted twice is a conflict, independently of request idempotency.
 

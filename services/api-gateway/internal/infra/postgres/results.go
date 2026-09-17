@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,11 +84,62 @@ func (r *Results) CreateBatch(ctx context.Context, items []NewResult) ([]domain.
 	if len(items) == 0 {
 		return []domain.ProcessingResult{}, nil
 	}
-	batch := &pgx.Batch{}
-	for _, res := range items {
-		batch.Queue(insertResult, res.args()...)
+	// One statement for the whole batch (see insertMeasurementsMany). A job
+	// of 60,000 readings over every window produces about 1,200 rows; the
+	// baseline measured them as 1,200 statements.
+	n := len(items)
+	jobs := make([]string, n)
+	types := make([]string, n)
+	windows := make([]string, n)
+	starts := make([]time.Time, n)
+	statistics := make([]string, n)
+	anomalies := make([]string, n)
+	algorithms := make([]string, n)
+	services := make([]string, n)
+	for i, res := range items {
+		jobs[i] = res.JobID.String()
+		types[i] = string(res.MeasurementType)
+		windows[i] = res.Window
+		starts[i] = res.WindowStart
+		statistics[i] = jsonOrEmpty(res.Statistics)
+		anomalies[i] = jsonOrEmptyArray(res.Anomalies)
+		algorithms[i] = res.AlgorithmVersion
+		services[i] = res.ServiceVersion
 	}
-	return collectBatch[domain.ProcessingResult](r.db.SendBatch(ctx, batch), len(items))
+	rows, err := r.db.Query(ctx, `
+		INSERT INTO processing_results
+			(job_id, measurement_type, "window", window_start, statistics, anomalies, algorithm_version, service_version)
+		SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::timestamptz[], $5::jsonb[], $6::jsonb[], $7::text[], $8::text[])
+		RETURNING `+resultColumns,
+		jobs, types, windows, starts, statistics, anomalies, algorithms, services)
+	stored, err := collectAll[domain.ProcessingResult](rows, err)
+	if err != nil {
+		return nil, err
+	}
+	// Back into input order by the result's key, unique within a job.
+	type key struct {
+		typ   domain.MeasurementType
+		win   string
+		start time.Time
+	}
+	byKey := make(map[key]int, n)
+	for i, res := range items {
+		byKey[key{res.MeasurementType, res.Window, res.WindowStart.UTC().Truncate(time.Microsecond)}] = i
+	}
+	ordered := make([]domain.ProcessingResult, n)
+	placed := 0
+	for _, res := range stored {
+		i, ok := byKey[key{res.MeasurementType, res.Window, res.WindowStart.UTC().Truncate(time.Microsecond)}]
+		if !ok {
+			return nil, fmt.Errorf("stored result %s does not match any input", res.ID)
+		}
+		ordered[i] = res
+		placed++
+	}
+	if placed != n || len(stored) != n {
+		return nil, fmt.Errorf("stored %d results for %d inputs", len(stored), n)
+	}
+	return ordered, nil
 }
 
 // ListByJob returns up to limit results of a job ordered by type, window
@@ -129,4 +181,20 @@ func (r *Results) ListByPatient(ctx context.Context, patientID uuid.UUID, after 
 		ORDER BY measurement_type, "window", window_start, job_id
 		LIMIT $6`, patientID, after.MeasurementType, after.Window, after.WindowStart, after.JobID, limit)
 	return collectAll[domain.ProcessingResult](rows, err)
+}
+
+// jsonOrEmpty is raw as text, or an empty object when nothing was given.
+func jsonOrEmpty(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "{}"
+	}
+	return string(raw)
+}
+
+// jsonOrEmptyArray is raw as text, or an empty array when nothing was given.
+func jsonOrEmptyArray(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return "[]"
+	}
+	return string(raw)
 }

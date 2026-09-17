@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/processing"
 )
 
 const measurementColumns = `id, patient_id, type, value, unit, recorded_at, created_at, source, metadata`
@@ -70,11 +72,86 @@ func (r *Measurements) Create(ctx context.Context, m NewMeasurement) (domain.Mea
 	return collectOne[domain.Measurement](rows, err)
 }
 
-// CreateBatch inserts readings in one round trip and returns them in input
-// order. Either every reading is stored or none is: through a pool the batch
-// runs in an implicit transaction, and through a transaction it is part of
-// it. The first rejected reading's error is returned.
+// insertMeasurementsMany stores a whole batch as one statement: the rows
+// arrive as parallel arrays and unnest turns them into the row set. One
+// statement is planned and executed once for any number of readings, where
+// the per-row form below is planned once but executed, with its trigger,
+// as a separate statement per reading. The performance baseline measured
+// the per-row form at 0.33 ms a reading (docs/PERFORMANCE_OPTIMIZATIONS.md).
+const insertMeasurementsMany = `
+	INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source, metadata)
+	SELECT * FROM unnest($1::uuid[], $2::text[], $3::float8[], $4::text[], $5::timestamptz[], $6::text[], $7::jsonb[])
+	RETURNING ` + measurementColumns
+
+// CreateBatch stores several readings in one statement. Through a pool the
+// insert is atomic; through a transaction it is part of it. The readings
+// come back in input order. A rejected reading fails the whole statement
+// with the rule it broke but without its index; CreateBatchEach names the
+// index, at a cost per reading, and the store falls back to it on failure.
 func (r *Measurements) CreateBatch(ctx context.Context, items []NewMeasurement) ([]domain.Measurement, error) {
+	if len(items) == 0 {
+		return []domain.Measurement{}, nil
+	}
+	n := len(items)
+	patients := make([]string, n)
+	types := make([]string, n)
+	values := make([]float64, n)
+	units := make([]string, n)
+	recorded := make([]time.Time, n)
+	sources := make([]string, n)
+	metadata := make([]string, n)
+	for i, m := range items {
+		patients[i] = m.PatientID.String()
+		types[i] = string(m.Type)
+		values[i] = m.Value
+		units[i] = m.Unit
+		recorded[i] = m.RecordedAt
+		sources[i] = m.Source
+		if len(m.Metadata) == 0 {
+			metadata[i] = "{}"
+		} else {
+			metadata[i] = string(m.Metadata)
+		}
+	}
+	rows, err := r.db.Query(ctx, insertMeasurementsMany, patients, types, values, units, recorded, sources, metadata)
+	stored, err := collectAll[domain.Measurement](rows, err)
+	if err != nil {
+		return nil, err
+	}
+	// RETURNING follows insertion order in practice but not by contract;
+	// the reading's own key, unique within a batch, puts each row where its
+	// input was.
+	type key struct {
+		patient uuid.UUID
+		typ     domain.MeasurementType
+		at      time.Time
+		source  string
+	}
+	byKey := make(map[key]int, n)
+	for i, m := range items {
+		byKey[key{m.PatientID, m.Type, m.RecordedAt.UTC().Truncate(time.Microsecond), m.Source}] = i
+	}
+	ordered := make([]domain.Measurement, n)
+	placed := 0
+	for _, m := range stored {
+		i, ok := byKey[key{m.PatientID, m.Type, m.RecordedAt.UTC().Truncate(time.Microsecond), m.Source}]
+		if !ok {
+			return nil, fmt.Errorf("stored reading %s does not match any input", m.ID)
+		}
+		ordered[i] = m
+		placed++
+	}
+	if placed != n || len(stored) != n {
+		return nil, fmt.Errorf("stored %d readings for %d inputs", len(stored), n)
+	}
+	return ordered, nil
+}
+
+// CreateBatchEach stores several readings as one statement per reading in
+// one round trip. Through a pool the batch is atomic; through a transaction
+// it is part of it. A rejected item is reported as a *BatchItemError naming
+// its index, which is what this form is for.
+func (r *Measurements) CreateBatchEach(ctx context.Context, items []NewMeasurement) ([]domain.Measurement, error) {
 	if len(items) == 0 {
 		return []domain.Measurement{}, nil
 	}
@@ -83,6 +160,57 @@ func (r *Measurements) CreateBatch(ctx context.Context, items []NewMeasurement) 
 		batch.Queue(insertMeasurement, m.args()...)
 	}
 	return collectBatch[domain.Measurement](r.db.SendBatch(ctx, batch), len(items))
+}
+
+// ListForJob returns up to limit readings of one type in a time range,
+// ordered by recording time only. It is the read behind processing: the
+// (patient_id, type, recorded_at) prefix of the uniqueness index yields
+// this order directly, where the listing's order by (recorded_at, id) made
+// the planner sort the whole range, on disk past a few thousand rows. The
+// processor orders by time and identifier itself before it computes
+// anything, so the tiebreak is not needed here.
+//
+// Only what the processor is sent is read (id, type, value, unit and the
+// recording time), scanned by position: the full row with its jsonb
+// metadata through the reflective scan cost 200 to 300 ms and fifteen
+// allocations a row for 60,000 rows, three times the query itself.
+func (r *Measurements) ListForJob(ctx context.Context, patientID uuid.UUID, typ domain.MeasurementType, from, to *time.Time, limit int) ([]processing.Reading, error) {
+	var sb strings.Builder
+	sb.WriteString(`SELECT id, type, value, unit, recorded_at FROM measurements WHERE patient_id = $1 AND type = $2`)
+	args := []any{patientID, typ}
+	if from != nil {
+		args = append(args, *from)
+		sb.WriteString(` AND recorded_at >= $` + strconv.Itoa(len(args)))
+	}
+	if to != nil {
+		args = append(args, *to)
+		sb.WriteString(` AND recorded_at < $` + strconv.Itoa(len(args)))
+	}
+	args = append(args, limit)
+	sb.WriteString(` ORDER BY recorded_at LIMIT $` + strconv.Itoa(len(args)))
+	rows, err := r.db.Query(ctx, sb.String(), args...)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	defer rows.Close()
+	out := make([]processing.Reading, 0, min(limit, 4096))
+	var (
+		id uuid.UUID
+		at time.Time
+	)
+	for rows.Next() {
+		var m processing.Reading
+		if err := rows.Scan(&id, &m.Type, &m.Value, &m.Unit, &at); err != nil {
+			return nil, mapError(err)
+		}
+		m.ID = id.String()
+		m.RecordedAt = processing.FormatRecordedAt(at)
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapError(err)
+	}
+	return out, nil
 }
 
 // GetByID returns the reading or a not-found error.

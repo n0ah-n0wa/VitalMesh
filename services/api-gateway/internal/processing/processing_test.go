@@ -117,15 +117,23 @@ func (f *fakeStore) GetJob(context.Context, uuid.UUID) (domain.ProcessingJob, er
 	return f.job, nil
 }
 
-func (f *fakeStore) ReadingsForJob(_ context.Context, _ uuid.UUID, _ Parameters, limit int) ([]domain.Measurement, error) {
+func (f *fakeStore) ReadingsForJob(_ context.Context, _ uuid.UUID, _ Parameters, limit int) ([]Reading, error) {
 	f.record("ReadingsForJob")
 	if f.readingsErr != nil {
 		return nil, f.readingsErr
 	}
-	if len(f.readings) > limit {
-		return f.readings[:limit], nil
+	items := f.readings
+	if len(items) > limit {
+		items = items[:limit]
 	}
-	return f.readings, nil
+	if items == nil {
+		return nil, nil
+	}
+	out := make([]Reading, len(items))
+	for i, m := range items {
+		out[i] = ReadingFromMeasurement(m)
+	}
+	return out, nil
 }
 
 func (f *fakeStore) ListResultsByPatient(_ context.Context, _ uuid.UUID, _ *ResultCursor, limit int) ([]domain.ProcessingResult, error) {

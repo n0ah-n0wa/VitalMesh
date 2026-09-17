@@ -175,35 +175,41 @@ func (s *JobStore) GetJob(ctx context.Context, id uuid.UUID) (domain.ProcessingJ
 // instants and the same job run twice could see different data. The
 // snapshot takes no locks and holds no external call, so it does not
 // conflict with the rule that no transaction spans the processor call.
-func (s *JobStore) ReadingsForJob(ctx context.Context, patientID uuid.UUID, params processing.Parameters, limit int) ([]domain.Measurement, error) {
+func (s *JobStore) ReadingsForJob(ctx context.Context, patientID uuid.UUID, params processing.Parameters, limit int) ([]processing.Reading, error) {
 	if len(params.MeasurementTypes) == 0 {
 		return nil, nil
 	}
-	out := make([]domain.Measurement, 0, min(limit, 1024))
+	var pages [][]processing.Reading
+	total := 0
 	err := WithSnapshot(ctx, s.pool, func(tx pgx.Tx) error {
 		repo := NewMeasurements(tx)
 		// One query per requested type keeps every read on the
 		// (patient_id, type, recorded_at) index; the types are few and
 		// bounded by the catalogue.
 		for _, t := range params.MeasurementTypes {
-			if len(out) >= limit {
+			if total >= limit {
 				break
 			}
-			typ := t
-			page, err := repo.ListByPatient(ctx, patientID, MeasurementFilter{
-				Type: &typ,
-				From: params.From,
-				To:   params.To,
-			}, nil, limit-len(out))
+			page, err := repo.ListForJob(ctx, patientID, t, params.From, params.To, limit-total)
 			if err != nil {
 				return err
 			}
-			out = append(out, page...)
+			pages = append(pages, page)
+			total += len(page)
 		}
 		return nil
 	})
 	if err != nil {
 		return nil, err
+	}
+	// The common job asks for one type: its page is the answer, with no
+	// copy. Several types are joined once, at their exact size.
+	if len(pages) == 1 {
+		return pages[0], nil
+	}
+	out := make([]processing.Reading, 0, total)
+	for _, p := range pages {
+		out = append(out, p...)
 	}
 	return out, nil
 }

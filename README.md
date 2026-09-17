@@ -24,7 +24,8 @@ tests/                    Cross-service test suites (e2e, integration, load, cha
 observability/            Prometheus, Grafana and OpenTelemetry configuration
 scripts/                  Helper scripts used by the Makefile and CI
 docs/                     Architecture, development and operations documentation
-                          (docs/SYNTHETIC_DATA.md: the seeded data generator and loader)
+                          (docs/SYNTHETIC_DATA.md: the seeded data generator and loader;
+                           docs/PERFORMANCE.md: how performance is measured and what was found)
 .github/workflows/        GitHub Actions pipelines
 .devcontainer/            Reproducible toolchain image
 Makefile                  Unified developer interface (`make help`)

@@ -239,6 +239,15 @@ func newSystem(t *testing.T, readings int, processorURL string) *system {
 		Add(-2 * time.Hour).
 		Add(-time.Duration(readings) * time.Second).
 		Truncate(time.Second)
+	// And it must not straddle a clock hour: the windows the engine reports
+	// are epoch-aligned, so a series crossing an hour boundary lands in two
+	// hour windows, and a test that counts the hour window's readings would
+	// pass or fail with the time of day. When the series would cross, it is
+	// moved back to end just before the boundary, which keeps every reading
+	// inside one hour and still well inside the acceptance window.
+	if end := base.Add(time.Duration(readings) * time.Second); end.Truncate(time.Hour).After(base) {
+		base = end.Truncate(time.Hour).Add(-time.Duration(readings+1) * time.Second)
+	}
 	items := make([]postgres.NewMeasurement, readings)
 	for i := range items {
 		value := 60 + float64(i%7)

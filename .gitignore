@@ -36,6 +36,9 @@ override.tf.json
 # what is committed.
 terraform.tfvars
 
+# Load test reports and raw k6 summaries (make load-test).
+/tests/load/results/
+
 # Synthetic fixtures written by make synth-generate (regenerate them from a seed).
 /.synth/
 
@@ -43,3 +46,6 @@ terraform.tfvars
 # make e2e-test, merged by make coverage-go.
 services/api-gateway/coverage*.out
 services/api-gateway/coverage.txt
+
+# Go test binaries left behind by -cpuprofile/-memprofile runs.
+*.test

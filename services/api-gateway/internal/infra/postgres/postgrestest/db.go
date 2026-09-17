@@ -30,7 +30,7 @@ import (
 // NewSchema creates an empty schema and returns a connection URL whose
 // search_path is that schema, together with the schema name. It does not
 // run migrations.
-func NewSchema(t *testing.T) (dbURL, schema string) {
+func NewSchema(t testing.TB) (dbURL, schema string) {
 	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
@@ -81,7 +81,7 @@ func NewSchema(t *testing.T) (dbURL, schema string) {
 
 // New creates a schema, applies every migration into it and returns a pool
 // bound to it together with the URL and the schema name.
-func New(t *testing.T) (pool *pgxpool.Pool, dbURL, schema string) {
+func New(t testing.TB) (pool *pgxpool.Pool, dbURL, schema string) {
 	t.Helper()
 	dbURL, schema = NewSchema(t)
 

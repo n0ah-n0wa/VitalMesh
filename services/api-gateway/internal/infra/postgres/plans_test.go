@@ -75,7 +75,7 @@ func seedRealisticData(t *testing.T, pool *pgxpool.Pool) (domain.Patient, domain
 		 SELECT 'plan' || g || '@example.com', 'hash', 'OPERATOR' FROM generate_series(1, 5) g`,
 		`INSERT INTO patients (external_reference, date_of_birth, sex)
 		 SELECT 'plan-' || g, DATE '1980-01-01' + g, 'OTHER' FROM generate_series(1, 40) g`,
-		// The seed values are valid by construction; skipping the per-row
+		// The seed values are valid by construction; skipping the
 		// validation trigger keeps this test fast.
 		`ALTER TABLE measurements DISABLE TRIGGER measurements_validate`,
 		`INSERT INTO measurements (patient_id, type, value, unit, recorded_at, source)

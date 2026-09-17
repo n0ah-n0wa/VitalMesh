@@ -3,9 +3,9 @@ package postgres
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 )
@@ -62,17 +62,47 @@ func (r *Audit) AppendBatch(ctx context.Context, entries []NewAuditEntry) ([]dom
 	if len(entries) == 0 {
 		return []domain.AuditEntry{}, nil
 	}
-	batch := &pgx.Batch{}
-	for _, e := range entries {
-		metadata := e.Metadata
-		if len(metadata) == 0 {
-			metadata = json.RawMessage(`{}`)
+	// One statement for the whole batch (see insertMeasurementsMany): the
+	// entries travel as parallel arrays. Nullable identifiers travel as
+	// pointers, so an absent actor or resource stays NULL.
+	n := len(entries)
+	actors := make([]*string, n)
+	actorTypes := make([]string, n)
+	actions := make([]string, n)
+	resourceTypes := make([]string, n)
+	resources := make([]*string, n)
+	requests := make([]string, n)
+	metadata := make([]string, n)
+	for i, e := range entries {
+		if e.ActorID != nil {
+			s := e.ActorID.String()
+			actors[i] = &s
 		}
-		batch.Queue(`
-			INSERT INTO audit_logs (actor_id, actor_type, action, resource_type, resource_id, request_id, metadata)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
-			RETURNING `+auditColumns,
-			e.ActorID, e.ActorType, e.Action, e.ResourceType, e.ResourceID, e.RequestID, metadata)
+		actorTypes[i] = string(e.ActorType)
+		actions[i] = string(e.Action)
+		resourceTypes[i] = e.ResourceType
+		if e.ResourceID != nil {
+			s := e.ResourceID.String()
+			resources[i] = &s
+		}
+		requests[i] = e.RequestID
+		if len(e.Metadata) == 0 {
+			metadata[i] = "{}"
+		} else {
+			metadata[i] = string(e.Metadata)
+		}
 	}
-	return collectBatch[domain.AuditEntry](r.db.SendBatch(ctx, batch), len(entries))
+	rows, err := r.db.Query(ctx, `
+		INSERT INTO audit_logs (actor_id, actor_type, action, resource_type, resource_id, request_id, metadata)
+		SELECT * FROM unnest($1::uuid[], $2::text[], $3::text[], $4::text[], $5::uuid[], $6::text[], $7::jsonb[])
+		RETURNING `+auditColumns,
+		actors, actorTypes, actions, resourceTypes, resources, requests, metadata)
+	stored, err := collectAll[domain.AuditEntry](rows, err)
+	if err != nil {
+		return nil, err
+	}
+	if len(stored) != n {
+		return nil, fmt.Errorf("stored %d audit entries for %d inputs", len(stored), n)
+	}
+	return stored, nil
 }
