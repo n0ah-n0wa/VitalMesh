@@ -34,6 +34,9 @@ TEST_REDIS_URL ?= redis://localhost:6379
 # IMAGE_TAG to publish under a commit or a release instead; the binary is
 # stamped with VERSION either way.
 IMAGE_TAG       ?= dev
+# The two synthetic releases the rollback rehearsal rolls between; they
+# only have to be two builds that can be told apart (docs/ROLLBACK.md).
+ROLLBACK_RELEASES ?= a1b2c3d e4f5a6b
 GATEWAY_IMAGE   ?= vitalmesh/api-gateway:$(IMAGE_TAG)
 PROCESSOR_IMAGE ?= vitalmesh/processor:$(IMAGE_TAG)
 # Pinned: a scanner that changes under you turns a clean run into a failure
@@ -86,7 +89,7 @@ SBOM_DIR        ?= sbom
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan sbom sast policy-check db-restore-test deps-verify deps-verify-go deps-verify-rust deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build release-metadata line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan sbom sast policy-check db-restore-test deps-verify deps-verify-go deps-verify-rust deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test rollback-images rollback-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -324,6 +327,15 @@ k8s-failure-test: ## Break each dependency in turn and check the behaviour
 k8s-resilience-test: ## Production-style resilience test on a 3-node kind cluster (drain, PDB, HPA, outages)
 	sh scripts/k8s-resilience-test.sh
 
+# The rollback rehearsal. It deploys two releases by digest and rolls one
+# back, so it needs a registry beside the cluster (the kind config says why)
+# and two builds of each service, which the target below produces.
+rollback-images: ## Build the two releases the rollback rehearsal rolls between
+	for v in $(ROLLBACK_RELEASES); do for s in api-gateway processor; do docker build --build-arg VERSION=$$v -t vitalmesh/$$s:sha-$$v services/$$s; done; done
+
+rollback-test: ## Rehearse the production rollback on a kind cluster and verify every part of it (docs/ROLLBACK.md)
+	sh scripts/rollback-test.sh
+
 # Static checks for the Terraform (fmt, validate, trivy, checkov), none of
 # which needs an AWS account. Planning against a real account is separate.
 tf-validate: ## Validate the Terraform without touching AWS (fmt, validate, trivy, checkov)
@@ -393,10 +405,13 @@ build: ## Build both services and the synth tool (Go binaries in bin/, Rust bina
 	cd $(GO_DIR) && go build -ldflags "$(GO_LDFLAGS)" -o ../../$(BIN_DIR)/synth ./cmd/synth
 	cd $(RUST_DIR) && VITALMESH_VERSION=$(VERSION) cargo build --locked
 
+release-metadata: build ## Check that this build identifies itself: commit, toolchains, lockfiles, migration and algorithm versions (docs/RELEASE.md)
+	sh scripts/release-metadata-check.sh
+
 line-endings: ## Fail if any tracked file is stored with CRLF line endings
 	sh scripts/check-line-endings.sh
 
-verify: format-check lint deps-verify test contracts-check integration-test e2e-test coverage-go build line-endings ## Run every code quality gate (needs PostgreSQL and Redis: make dev-db dev-redis)
+verify: format-check lint deps-verify test contracts-check integration-test e2e-test coverage-go build release-metadata line-endings ## Run every code quality gate (needs PostgreSQL and Redis: make dev-db dev-redis)
 	@echo "verify: all gates passed"
 
 # Everything CI runs, in the order CI's dependency graph would settle on if

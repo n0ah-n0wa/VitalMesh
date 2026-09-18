@@ -122,6 +122,19 @@ type Recorder interface {
 	InFlight(name string, delta int)
 }
 
+// Build is the build metadata a recorder publishes. Every field is a
+// version or a digest that is safe to expose: none of them names a path, a
+// host, a credential or anything else about where the process is running
+// (SPECIFICATIONS.md section 41). An empty ImageDigest means the process is
+// not running from a registry image.
+type Build struct {
+	Version          string
+	GoVersion        string
+	Modules          string
+	AlgorithmVersion string
+	ImageDigest      string
+}
+
 // Statement normalises a SQL statement to the bounded verb used as a label.
 // It reads only the leading keyword, so no value in the statement can reach
 // a label.

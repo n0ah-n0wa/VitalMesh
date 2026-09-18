@@ -30,7 +30,9 @@ docs/                     Architecture, development and operations documentation
                            docs/OPERATIONS.md: how the system behaves on Kubernetes under disruption, and the runbooks;
                            docs/SECURITY.md: the security posture, the scans, and every justified exception;
                            docs/DISASTER_RECOVERY.md: backups, the tested restore procedure, RPO and RTO;
-                           docs/PRODUCTION_READINESS.md: the launch review and the ranked remaining risks)
+                           docs/PRODUCTION_READINESS.md: the launch review and the ranked remaining risks;
+                           docs/RELEASE.md: what every build identifies about itself, and what enforces it;
+                           docs/ROLLBACK.md: how to go back a release, what it restores, and what it cannot)
 .github/workflows/        GitHub Actions pipelines
 .devcontainer/            Reproducible toolchain image
 Makefile                  Unified developer interface (`make help`)

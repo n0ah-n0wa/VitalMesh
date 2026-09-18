@@ -136,6 +136,21 @@ jobs:
           for d in "$gateway" "$processor"; do
             echo "$d" | grep -Eq '^sha256:[0-9a-f]{64}$' || { echo "::error::digest '$d' is not sha256:<64 hex>"; exit 1; }
           done
+          # Both images have to have come from this release's commit and
+          # to agree on the processing algorithm. A record assembled from
+          # mismatched halves would deploy two services that cannot work
+          # together: the processor refuses a job whose algorithm version
+          # it does not implement (docs/RELEASE.md).
+          for service in api-gateway processor; do
+            built="$(jq -r --arg s "$service" '.builds[$s].version // ""' "$record")"
+            [ -n "$built" ] || { echo "::error::the record has no build record for $service"; exit 1; }
+            [ "$built" = "$version" ] || { echo "::error::the $service image reports version '$built', not the release's '$version'"; exit 1; }
+          done
+          gateway_algorithm="$(jq -r '.builds["api-gateway"].algorithm_version // ""' "$record")"
+          processor_algorithm="$(jq -r '.builds["processor"].algorithm_version // ""' "$record")"
+          [ -n "$gateway_algorithm" ] && [ "$gateway_algorithm" = "$processor_algorithm" ] || {
+            echo "::error::the images disagree on the algorithm version: gateway '$gateway_algorithm', processor '$processor_algorithm'"; exit 1; }
+
           # On main: an image built from a commit that was merged, not one
           # that was pushed and later removed.
           git merge-base --is-ancestor "$commit" origin/main || { echo "::error::commit $commit is not on main"; exit 1; }

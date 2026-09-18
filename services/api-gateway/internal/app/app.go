@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/auth"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/authz"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/buildinfo"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/cache"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/config"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
@@ -63,6 +65,17 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 	prom := metrics.NewPrometheus()
 	var rec metrics.Recorder = prom
 
+	// What this build is, published once. Every value is a version or a
+	// digest; nothing here describes the machine or the deployment.
+	build := buildinfo.Current()
+	prom.SetBuildInfo(metrics.Build{
+		Version:          build.Version,
+		GoVersion:        build.GoVersion,
+		Modules:          build.Modules,
+		AlgorithmVersion: cfg.Processing.AlgorithmVersion,
+		ImageDigest:      build.ImageDigest,
+	})
+
 	// Tracing is built before anything that reports to it. It installs the
 	// W3C propagator whether or not spans are exported, so trace context
 	// crosses this service even with no collector configured.
@@ -80,6 +93,28 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 	if err != nil {
 		return nil, fmt.Errorf("database: %w", err)
 	}
+
+	// The migration version this process starts against, published so that
+	// two replicas disagreeing mid-rollout is visible. Best effort: the
+	// pool connects lazily, so a database that is down at start-up leaves
+	// the metric absent rather than delaying the start or reporting zero.
+	func() {
+		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
+		defer cancel()
+		switch version, dirty, found, err := postgres.SchemaVersion(probe, pool); {
+		case err != nil:
+			logger.WarnContext(ctx, "schema version not read at start-up", "error", err)
+		case !found:
+			logger.WarnContext(ctx, "no migration has been applied to this database")
+		default:
+			prom.SetSchemaVersion(version)
+			// Not "version": the logger already puts the service's own
+			// version on every record, and two keys of that name in one
+			// JSON object is a collision a log consumer resolves by
+			// guessing.
+			logger.InfoContext(ctx, "schema version", "schema_version", version, "dirty", dirty)
+		}
+	}()
 
 	// Redis is optional by design (SPECIFICATIONS.md sections 23 and 90).
 	// It connects lazily, so start-up succeeds while it is down and picks

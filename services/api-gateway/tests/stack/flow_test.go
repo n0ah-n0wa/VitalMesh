@@ -553,8 +553,18 @@ func (s *stack) testAuditLogging(t *testing.T) {
 	if n := s.count(t, "SELECT count(*) FROM audit_logs WHERE metadata::text LIKE $1", "%"+password+"%"); n != 0 {
 		t.Error("a password is in the audit log")
 	}
-	if n := s.count(t, "SELECT count(*) FROM audit_logs WHERE action = 'MEASUREMENT_CREATED' AND request_id = $1 AND metadata::text LIKE '%185%'", batch.requestID()); n != 0 {
-		t.Error("a reading value is in the audit log")
+	// A reading value must never be audited. Asserting that by searching
+	// the metadata for a number is not safe: the metadata carries the
+	// patient id, and a random UUID contains any given three hex digits
+	// about once in every hundred and forty rows. So this asserts the
+	// shape instead -- the metadata carries these two keys and nothing
+	// else -- which is stronger as well as stable, because it also
+	// catches a field added later.
+	if n := s.count(t, `SELECT count(*) FROM audit_logs
+		WHERE action = 'MEASUREMENT_CREATED' AND request_id = $1
+		  AND NOT (ARRAY(SELECT jsonb_object_keys(metadata)) <@ ARRAY['type', 'patient_id'])`,
+		batch.requestID()); n != 0 {
+		t.Errorf("%d MEASUREMENT_CREATED records carry a field beyond the patient and the type; a reading value must never be audited", n)
 	}
 
 	// Append-only at the database: no role can rewrite history.

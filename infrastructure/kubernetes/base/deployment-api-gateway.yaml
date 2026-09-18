@@ -108,6 +108,16 @@ spec:
           # hold?" A bulk reference would silently pick up any key added to
           # the Secret later.
           env:
+            # The digest of the image this pod runs. A process cannot
+            # read its own image digest, and the Downward API does not
+            # expose it, so the deployment stamps it here: deploy.yml
+            # replaces set-by-ci with the digest it is deploying, exactly
+            # as it replaces the image tag, and refuses to apply a manifest
+            # where either is left unset. The service reports it in its
+            # release record and as a build_info label, which is how a pod
+            # says which image it is (docs/RELEASE.md).
+            - name: IMAGE_DIGEST
+              value: set-by-ci
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

@@ -6,6 +6,8 @@
 //!   processor healthcheck    probe this process's own /health and exit 0
 //!                            when it answers; the container image has no
 //!                            shell to probe it with
+//!   processor version        print this build's release record as JSON
+//!                            (docs/RELEASE.md)
 //!
 //! Exit codes: 0 on clean shutdown, 1 on a runtime failure, 2 on invalid
 //! configuration.
@@ -21,11 +23,13 @@ use processor::{SERVICE_NAME, VERSION, lifecycle};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // The one argument this binary takes. The runtime image has no shell to
-    // probe the server with, so the binary probes itself; see
-    // `processor::healthcheck`.
-    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
-        return ExitCode::from(processor::healthcheck::run().await);
+    // The two arguments this binary takes. The runtime image has no shell,
+    // so the binary probes itself (see `processor::healthcheck`) and prints
+    // its own release record.
+    match std::env::args().nth(1).as_deref() {
+        Some("healthcheck") => return ExitCode::from(processor::healthcheck::run().await),
+        Some("version") => return print_version(),
+        _ => {}
     }
 
     let config = match Config::from_env() {
@@ -86,4 +90,25 @@ async fn main() -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+/// Prints the release record: what identifies this build. It reads no
+/// configuration and opens no connection, so it answers inside a container
+/// whose dependencies are unreachable, which is when it is most often
+/// asked. Nothing it prints is a secret: versions and digests only.
+fn print_version() -> ExitCode {
+    let build = processor::build();
+    match serde_json::to_string_pretty(&build) {
+        Ok(json) => println!("{json}"),
+        Err(error) => {
+            eprintln!("writing the release record: {error}");
+            return ExitCode::from(1);
+        }
+    }
+    let missing = build.incomplete();
+    if !missing.is_empty() {
+        eprintln!("release record does not identify: {}", missing.join(", "));
+        return ExitCode::from(1);
+    }
+    ExitCode::SUCCESS
 }

@@ -266,6 +266,14 @@ jobs:
       - name: Build both services
         run: make build
 
+      # Every build has to be able to say what it is. This runs the two
+      # binaries just built and checks their release records identify the
+      # commit, both toolchains, both lockfiles, the schema version, the
+      # algorithm version and the image digest they are given -- and that
+      # the records disclose nothing else (docs/RELEASE.md).
+      - name: This build identifies itself
+        run: make release-metadata
+
       - name: Line endings in the index
         run: make line-endings
 

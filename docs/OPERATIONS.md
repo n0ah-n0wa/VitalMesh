@@ -274,8 +274,10 @@ three-node cluster and fails if any check fails; it is the source of the
 results table. It complements the two cluster tests that came before it:
 `make k8s-local-test` (the manifests apply, admission and NetworkPolicies are
 enforced, one rollout is clean) and `make k8s-failure-test` (each dependency
-outage at single-replica scale). `make k8s-validate` checks every overlay
+outage at single-replica scale) and `make rollback-test` (a release deployed,
+replaced, and rolled back by digest, with every part of the result verified;
+docs/ROLLBACK.md). `make k8s-validate` checks every overlay
 against the API schema and four linters without a cluster, and runs in CI;
-the three cluster tests need `kind` and `kubectl` and are run on demand,
+the four cluster tests need `kind` and `kubectl` and are run on demand,
 because kind builds its nodes as containers on the host's Docker and so
 cannot itself run inside CI's container.

@@ -58,8 +58,10 @@ Run `make help` for the list. Every CI job runs one of these targets and nothing
 | `make migrate` | apply migrations to `DATABASE_URL` (default: the local PostgreSQL) |
 | `make synth-generate` / `make synth-load` | write a synthetic fixture (`SYNTH_DIR`, flags in `SYNTH_ARGS`) and load it into the local environment: accounts, patients, readings and jobs; see [SYNTHETIC_DATA.md](SYNTHETIC_DATA.md) |
 | `make build` | builds `bin/api-gateway`, `bin/synth` and `services/processor/target/debug/processor` |
+| `make release-metadata` | runs both built binaries and checks their release records identify the commit, both toolchains, both lockfiles, the schema version, the algorithm version and the image digest, and disclose nothing else ([RELEASE.md](RELEASE.md)) |
+| `make rollback-images` / `make rollback-test` | builds two releases and rehearses the production rollback on a kind cluster: deploy one, deploy the other, roll back by digest, and verify the images, the versions, the configuration and that the schema was left alone ([ROLLBACK.md](ROLLBACK.md)). Needs `kind` |
 | `make line-endings` | fails if any tracked file is stored with CRLF |
-| `make verify` | `format-check lint test contracts-check integration-test e2e-test coverage-go build line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
+| `make verify` | `format-check lint deps-verify test contracts-check integration-test e2e-test coverage-go build release-metadata line-endings`; needs the local PostgreSQL and Redis (`make dev-db`, `make dev-redis`) |
 | `make ci-local` | `verify`, then `deps-scan secret-scan docker-build docker-verify docker-scan stack-test k8s-validate tf-validate`: every check CI runs; needs Docker as well |
 | `make clean` | removes build outputs |
 
@@ -79,7 +81,7 @@ service containers, and caches. Nothing it checks is CI-only.
 | `rust` | `make setup-rust format-check-rust lint-rust test-rust` | Rust |
 | `contracts` | `make contracts-check` | Go and Rust |
 | `integration` | `make test-go integration-test-postgres integration-test-redis e2e-test coverage-go` | Go, Rust, PostgreSQL and Redis (`make dev-db dev-redis`) |
-| `build` | `make build line-endings` | Go, Rust, git |
+| `build` | `make build release-metadata line-endings` | Go, Rust, git |
 | `containers` | `make docker-build docker-verify docker-scan` | Docker |
 | `stack end-to-end` | `make stack-test` | Docker and Go (see [The stack suite](#the-stack-suite)) |
 | `dependency scan` | `make deps-scan` | Docker (trivy) and Go (govulncheck) |

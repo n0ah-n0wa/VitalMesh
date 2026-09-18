@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	migratepgx "github.com/golang-migrate/migrate/v4/database/pgx/v5"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/migrations"
@@ -150,4 +153,33 @@ func pgxConnConfig(databaseURL string) (*pgxConfig, error) {
 	// pg_stat_activity as a migration, rather than as the application.
 	cfg.RuntimeParams["application_name"] = "vitalmesh-migrate"
 	return cfg, nil
+}
+
+// SchemaVersion reads the applied migration version and whether the last
+// run left it dirty. It is a plain query rather than a migrator, so a
+// process that only wants to report the version does not open a second
+// connection pool or take the advisory lock.
+//
+// A database with no schema_migrations table has had no migration applied;
+// that is reported as not found rather than as version zero, because zero
+// is a version a real database can be at.
+func SchemaVersion(ctx context.Context, db DB) (version uint, dirty bool, found bool, err error) {
+	var v int64
+	row := db.QueryRow(ctx, `SELECT version, dirty FROM schema_migrations LIMIT 1`)
+	switch err := row.Scan(&v, &dirty); {
+	case err == nil:
+		if v < 0 {
+			return 0, dirty, false, fmt.Errorf("schema version %d is negative", v)
+		}
+		return uint(v), dirty, true, nil
+	case errors.Is(err, pgx.ErrNoRows):
+		return 0, false, false, nil
+	default:
+		var pgErr *pgconn.PgError
+		// 42P01 undefined_table: nothing has been migrated here yet.
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			return 0, false, false, nil
+		}
+		return 0, false, false, err
+	}
 }

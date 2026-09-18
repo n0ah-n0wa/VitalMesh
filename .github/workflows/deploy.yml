@@ -262,6 +262,33 @@ jobs:
           # Belt and braces: nothing rendered may reference a tag.
           if grep -E '^\s+image: .*:(latest|dev|set-by-ci)$' apply.yaml; then echo "::error::a rendered image reference is a tag, not a digest"; exit 1; fi
 
+      # A process cannot read its own image digest and the Downward API does
+      # not expose it, so the digest being deployed is stamped into each
+      # pod's environment here. The service reports it in its release record
+      # and publishes it as a build_info label, which is how a running pod
+      # answers "which image are you?" (docs/RELEASE.md). The base manifests
+      # carry `set-by-ci`, replaced per container with the digest of the
+      # image that container actually runs.
+      - name: Stamp each pod with the digest of the image it runs
+        env:
+          GATEWAY_DIGEST: ${{ inputs.api_gateway_digest }}
+          PROCESSOR_DIGEST: ${{ inputs.processor_digest }}
+        run: |
+          set -euo pipefail
+          for pair in "api-gateway=$GATEWAY_DIGEST" "processor=$PROCESSOR_DIGEST"; do
+            container="${pair%%=*}"
+            digest="${pair#*=}"
+            expr="(.. | select(has(\"containers\")).containers[] | select(.name == \"$container\").env[] | select(.name == \"IMAGE_DIGEST\")).value = \"$digest\""
+            docker run --rm -i "$YQ_IMAGE" "$expr" < apply.yaml > stamped.yaml
+            mv stamped.yaml apply.yaml
+          done
+          grep -A1 'name: IMAGE_DIGEST' apply.yaml | grep 'value:' | sort -u
+          # An unstamped pod would report an image digest of "set-by-ci",
+          # which is worse than reporting none: it looks like an answer.
+          if grep -q 'set-by-ci' apply.yaml; then
+            echo "::error::a rendered manifest still contains set-by-ci"; exit 1
+          fi
+
       # A Job's spec is immutable, so last release's migration Job goes
       # before this one is applied (infrastructure/kubernetes/README.md).
       - name: Apply
@@ -291,6 +318,17 @@ jobs:
       # rollback_on_failure, both Deployments go back to their previous
       # revision (the previous digests), and the step still fails: a
       # rollback is a recovery, not a success.
+      #
+      # `rollout undo` restores the pod template and nothing else. The
+      # ConfigMaps applied a few steps above are this release's and stay
+      # this release's, and the pods that come back read them by name, so
+      # the environment is left running the previous image against the new
+      # configuration -- a pairing neither release produced. It is the
+      # right thing to do here, because the alternative is leaving a
+      # release that cannot start, but it is a stop rather than a rollback
+      # and the warning below says so. Finishing the job means redeploying
+      # the previous release, which re-applies its manifests in full
+      # (docs/ROLLBACK.md).
       - name: Rollout (up to 10 minutes each)
         env:
           NAMESPACE: ${{ steps.facts.outputs.namespace }}
@@ -313,7 +351,7 @@ jobs:
               for d in vitalmesh-api-gateway vitalmesh-processor; do
                 kubectl -n "$NAMESPACE" rollout status "deployment/$d" --timeout=5m || echo "::error::rollback of $d did not complete either"
               done
-              echo "::warning::rolled back; the environment runs the previous revision. Note that migrations are not rolled back (docs/DEPLOYMENT.md)."
+              echo "::warning::rolled back; the environment runs the previous revision's pods. This is a stop, not a rollback: the ConfigMaps and every other applied object are still this release's, because rollout undo restores only the pod template. Pods that restart later will pick the new configuration up. Redeploy the previous release properly (docs/ROLLBACK.md), and note that migrations are never rolled back."
             fi
             exit 1
           fi

@@ -3,6 +3,7 @@ package metrics
 import (
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -42,6 +43,10 @@ type Prometheus struct {
 	batchSize  *prometheus.HistogramVec
 	cacheReads *prometheus.CounterVec
 	rateLimit  *prometheus.CounterVec
+
+	buildInfo     *prometheus.GaugeVec
+	schemaVersion prometheus.Gauge
+	schemaOnce    sync.Once
 }
 
 // Buckets are chosen for what each measurement is used for rather than
@@ -108,6 +113,27 @@ func NewPrometheus() *Prometheus {
 			Namespace: Namespace, Subsystem: "cache", Name: "reads_total",
 			Help: "Cache lookups, by the read they serve and whether they hit.",
 		}, []string{"operation", "result"}),
+		// Build metadata as labels on a gauge that is always 1, which is
+		// the conventional way to publish it: the value carries nothing and
+		// the labels carry everything. Cardinality is one series per
+		// process, because every label is fixed for the life of the build.
+		//
+		// Every label here is a version or a digest. None of them names a
+		// path, a host or anything about the infrastructure, which is what
+		// makes this safe on an endpoint the monitoring namespace scrapes.
+		buildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: Namespace, Subsystem: "build", Name: "info",
+			Help: "Always 1. The labels identify the build: commit, Go toolchain, dependency digest, algorithm version and image digest. The same labels appear on the processor's build_info, so one query spans both services.",
+		}, []string{"version", "go_version", "dependencies", "algorithm_version", "image_digest"}),
+
+		// The schema version this process found when it started. Two
+		// replicas reporting different versions mid-rollout is the signal
+		// that a migration landed between their starts.
+		schemaVersion: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: Namespace, Subsystem: "database", Name: "schema_version",
+			Help: "The applied migration version read at start-up. Absent when it could not be read.",
+		}),
+
 		rateLimit: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: Namespace, Subsystem: "rate_limit", Name: "decisions_total",
 			Help: "Rate-limit decisions, by outcome and by which counter decided. The caller is never a label.",
@@ -119,7 +145,7 @@ func NewPrometheus() *Prometheus {
 		p.httpRequests, p.httpErrors, p.httpLatency,
 		p.operations, p.operationLatency, p.inFlight,
 		p.databaseLatency, p.redisLatency,
-		p.batchSize, p.cacheReads, p.rateLimit,
+		p.batchSize, p.cacheReads, p.rateLimit, p.buildInfo,
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 		collectors.NewGoCollector(),
 	)
@@ -210,4 +236,29 @@ func (p *Prometheus) RateLimit(decision, backend string) {
 
 func (p *Prometheus) InFlight(name string, delta int) {
 	p.inFlight.WithLabelValues(name).Add(float64(delta))
+}
+
+// SetBuildInfo publishes the build metadata of this process. It is called
+// once at wiring time; the series it creates lives for the life of the
+// process and never changes.
+//
+// The image digest is empty for a build that is not running from a
+// registry, which is the truth rather than a gap: a local binary has no
+// image. Prometheus keeps the empty label, so a series with an empty
+// image_digest is a process that was not deployed from an image.
+func (p *Prometheus) SetBuildInfo(b Build) {
+	p.buildInfo.WithLabelValues(b.Version, b.GoVersion, b.Modules, b.AlgorithmVersion, b.ImageDigest).Set(1)
+}
+
+// SetSchemaVersion publishes the migration version the process read at
+// start-up. It is registered only once a version is known, so the metric is
+// absent rather than zero when the database could not be reached: zero is a
+// schema version a fresh database really has.
+func (p *Prometheus) SetSchemaVersion(version uint) {
+	p.registerSchemaVersionOnce()
+	p.schemaVersion.Set(float64(version))
+}
+
+func (p *Prometheus) registerSchemaVersionOnce() {
+	p.schemaOnce.Do(func() { p.registry.MustRegister(p.schemaVersion) })
 }

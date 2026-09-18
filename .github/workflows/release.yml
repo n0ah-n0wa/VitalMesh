@@ -139,6 +139,8 @@ jobs:
       image_tag: sha-${{ env.RELEASE_SHA }}
       api_gateway_digest: ${{ steps.push.outputs.api_gateway_digest }}
       processor_digest: ${{ steps.push.outputs.processor_digest }}
+      api_gateway_record: ${{ steps.records.outputs.api_gateway_record }}
+      processor_record: ${{ steps.records.outputs.processor_record }}
     steps:
       # The whole history, so the commit can be shown to be on main below.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -179,6 +181,27 @@ jobs:
         run: make docker-build
       - name: Verify the containers
         run: make docker-verify
+
+      # What each image says it is, read out of the image itself rather
+      # than reconstructed from this workflow's variables. `version` reads
+      # no configuration and opens no connection, so it answers in a bare
+      # container; it exits non-zero if the build cannot identify itself,
+      # which stops the release here rather than after the push
+      # (docs/RELEASE.md).
+      - name: Each image's release record
+        id: records
+        run: |
+          set -euo pipefail
+          for image in api-gateway processor; do
+            # Each image's entrypoint is its own binary, so this is the
+            # binary answering about itself.
+            record="$(docker run --rm "vitalmesh/$image:$IMAGE_TAG" version)"
+            echo "$record"
+            key="$(printf '%s' "$image" | tr '-' '_')_record"
+            echo "$key<<RECORD_EOF" >> "$GITHUB_OUTPUT"
+            echo "$record" >> "$GITHUB_OUTPUT"
+            echo "RECORD_EOF" >> "$GITHUB_OUTPUT"
+          done
       - name: Scan the images and the Dockerfiles (a finding stops the job here)
         run: make docker-scan
 
@@ -361,16 +384,28 @@ jobs:
           PROCESSOR_DIGEST: ${{ needs.images.outputs.processor_digest }}
           VERSION: ${{ needs.deploy-staging.outputs.version }}
           STAGING_HOST: ${{ needs.deploy-staging.outputs.ingress_host }}
+          GATEWAY_RECORD: ${{ needs.images.outputs.api_gateway_record }}
+          PROCESSOR_RECORD: ${{ needs.images.outputs.processor_record }}
         run: |
           set -euo pipefail
-          jq -n             --arg commit "$COMMIT" --arg image_tag "$IMAGE_TAG" --arg version "$VERSION"             --arg gateway "$GATEWAY_DIGEST" --arg processor "$PROCESSOR_DIGEST"             --arg host "$STAGING_HOST" --arg run_id "${{ github.run_id }}" --arg repo "${{ github.repository }}"             '{
-              schema: 1,
+          # The two records are what the binaries themselves said, read out
+          # of the images in the images job. Folding them in here rather
+          # than restating this workflow's variables is the point: the
+          # record describes what shipped, not what was intended.
+          printf '%s' "$GATEWAY_RECORD" | jq -e . > gateway-record.json
+          printf '%s' "$PROCESSOR_RECORD" | jq -e . > processor-record.json
+          jq -n --arg commit "$COMMIT" --arg image_tag "$IMAGE_TAG" --arg version "$VERSION" --arg gateway "$GATEWAY_DIGEST" --arg processor "$PROCESSOR_DIGEST" --arg host "$STAGING_HOST" --arg run_id "${{ github.run_id }}" --arg repo "${{ github.repository }}" --slurpfile gateway_record gateway-record.json --slurpfile processor_record processor-record.json '{
+              schema: 2,
               repository: $repo,
               release_run_id: ($run_id | tonumber),
               commit: $commit,
               version: $version,
               image_tag: $image_tag,
               images: { "vitalmesh/api-gateway": $gateway, "vitalmesh/processor": $processor },
+              builds: {
+                "api-gateway": ($gateway_record[0] + { image_digest: $gateway }),
+                "processor": ($processor_record[0] + { image_digest: $processor })
+              },
               staging: { deployed: true, smoke: "passed", e2e: "passed", host: $host },
               recorded_at: (now | todate)
             }' > release.json

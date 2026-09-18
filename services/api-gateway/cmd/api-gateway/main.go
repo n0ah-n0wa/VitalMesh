@@ -10,6 +10,8 @@
 //	api-gateway users create <email> <role>
 //	                                    create an account; the password is read
 //	                                    from standard input
+//	api-gateway version                 print this build's release record as
+//	                                    JSON (docs/RELEASE.md)
 //	api-gateway healthcheck             probe this process's own /health and
 //	                                    exit 0 when it answers; the container
 //	                                    image has no shell to probe it with
@@ -20,6 +22,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -39,6 +42,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/domain"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/infra/postgres"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/observability/logging"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/migrations"
 )
 
 func main() {
@@ -56,6 +60,8 @@ func run(args []string, stdin io.Reader) int {
 		return migrate(args[1:])
 	case "users":
 		return users(args[1:], stdin)
+	case "version":
+		return version(os.Stdout)
 	case "healthcheck":
 		return healthcheck()
 	default:
@@ -89,6 +95,30 @@ func serve() int {
 	}
 	if err := a.Run(ctx); err != nil {
 		logger.Error("gateway exited", "error", err)
+		return 1
+	}
+	return 0
+}
+
+// version prints the release record: what identifies this build. It reads
+// no configuration and opens no connection, so it answers inside a
+// container whose database is unreachable, which is when it is most often
+// asked. Nothing it prints is a secret: versions and digests only.
+func version(stdout io.Writer) int {
+	migration, err := migrations.Latest()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "release record is incomplete: %v\n", err)
+		return 1
+	}
+	record := buildinfo.NewRecord(app.ServiceName, config.DefaultAlgorithmVersion, migration)
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(record); err != nil {
+		fmt.Fprintf(os.Stderr, "writing the release record: %v\n", err)
+		return 1
+	}
+	if missing := record.Incomplete(); len(missing) > 0 {
+		fmt.Fprintf(os.Stderr, "release record does not identify: %s\n", strings.Join(missing, ", "))
 		return 1
 	}
 	return 0

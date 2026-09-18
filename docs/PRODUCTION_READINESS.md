@@ -150,7 +150,8 @@ make sast deps-scan secret-scan docker-scan sbom k8s-validate tf-validate
 make db-restore-test     # point-in-time recovery, verified
 make stack-test          # 21 flows including every failure injection
 make k8s-resilience-test # 3 nodes, 2 replicas: drain, PDB, HPA, outages
+make rollback-images rollback-test # the rollback procedure, rehearsed and verified
 ```
 
-The first three run in CI on every change. The last three need Docker, and
-the Kubernetes one needs `kind`.
+The first three run in CI on every change. The rest need Docker, and the two
+Kubernetes ones need `kind`.

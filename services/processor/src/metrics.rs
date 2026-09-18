@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use prometheus::core::{AtomicU64, GenericGauge};
 use prometheus::{
-    Encoder, HistogramOpts, HistogramVec, IntCounterVec, Opts, Registry, TextEncoder,
+    Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts, Registry, TextEncoder,
 };
 
 use crate::engine::Engine;
@@ -80,6 +80,7 @@ pub struct Metrics {
     http_duration: HistogramVec,
     jobs: IntCounterVec,
     job_duration: HistogramVec,
+    build_info: IntGaugeVec,
 }
 
 impl Metrics {
@@ -133,6 +134,23 @@ impl Metrics {
         )
         .expect("valid metric");
 
+        let build_info = IntGaugeVec::new(
+            Opts::new(
+                "build_info",
+                "Identifies the build this process came from. The value is always 1; the build is in the labels.",
+            )
+            .namespace(NAMESPACE),
+            &[
+                "version",
+                "rust_version",
+                "dependencies",
+                "algorithm_version",
+                "contract_version",
+                "image_digest",
+            ],
+        )
+        .expect("valid metric");
+
         for collector in [&http_requests, &http_errors, &jobs] {
             registry
                 .register(Box::new(collector.clone()))
@@ -143,6 +161,9 @@ impl Metrics {
                 .register(Box::new(collector.clone()))
                 .expect("no duplicate metric");
         }
+        registry
+            .register(Box::new(build_info.clone()))
+            .expect("no duplicate metric");
 
         let metrics = Self {
             registry,
@@ -151,6 +172,7 @@ impl Metrics {
             http_duration,
             jobs,
             job_duration,
+            build_info,
         };
         metrics.initialise();
         metrics
@@ -168,6 +190,35 @@ impl Metrics {
         ] {
             self.jobs.with_label_values(&[outcome]);
         }
+        self.publish_build();
+    }
+
+    /// Publishes the build this process came from, as the conventional
+    /// `build_info` gauge: the value is always 1 and the labels carry the
+    /// facts, so `count by (version)` answers which builds are running
+    /// during a rollout. Every label is a compile-time constant or the
+    /// image digest the deployment passed in, so this is exactly one
+    /// series per process however long it runs.
+    ///
+    /// It is published here rather than through `/health`, deliberately.
+    /// `/health` is unauthenticated and its shape for the internal
+    /// endpoint is fixed by `contracts/internal-api/processor-v1.json`;
+    /// `/metrics` is the conventional home for build metadata and is
+    /// restricted to the monitoring namespace by NetworkPolicy. Nothing
+    /// here reads configuration, so no credential or endpoint can reach a
+    /// label.
+    fn publish_build(&self) {
+        let build = crate::build();
+        self.build_info
+            .with_label_values(&[
+                build.version,
+                build.rust_version,
+                build.dependencies,
+                &build.algorithm_version,
+                build.contract_version,
+                &build.image_digest,
+            ])
+            .set(1);
     }
 
     /// Publishes the engine's live saturation. The gauges read the engine
@@ -450,5 +501,73 @@ mod tests {
             )),
             "{body}"
         );
+    }
+
+    #[test]
+    fn the_build_is_published_as_one_series_with_every_label_filled() {
+        let metrics = Metrics::new();
+        let body = metrics.encode();
+
+        let lines: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("vitalmesh_processor_build_info{"))
+            .collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "build_info must be one series:
+{body}"
+        );
+        let line = lines[0];
+        assert!(
+            line.ends_with(" 1"),
+            "build_info carries its facts in labels and its value is always 1: {line}"
+        );
+
+        let build = crate::build();
+        for (label, value) in [
+            ("version", build.version.to_owned()),
+            ("rust_version", build.rust_version.to_owned()),
+            ("dependencies", build.dependencies.to_owned()),
+            ("algorithm_version", build.algorithm_version.clone()),
+            ("contract_version", build.contract_version.to_owned()),
+        ] {
+            assert!(!value.is_empty(), "{label} is empty");
+            assert!(
+                line.contains(&format!("{label}=\"{value}\"")),
+                "{label}={value:?} missing from: {line}"
+            );
+        }
+        // The image digest is the one field a local build cannot know, so
+        // the label must exist even when it is empty.
+        assert!(line.contains("image_digest=\""), "{line}");
+    }
+
+    // Build metadata is served to whatever scrapes /metrics. An accident
+    // that put a configuration value in a label would publish it, so the
+    // whole exposition is checked for the shapes a leak takes.
+    #[test]
+    fn the_exposition_discloses_no_secret_or_infrastructure_detail() {
+        let metrics = Metrics::new();
+        metrics.http_request("GET", "/internal/v1/health", 200, 0.001);
+        let body = metrics.encode().to_lowercase();
+        for forbidden in [
+            "password",
+            "secret",
+            "token",
+            "postgres://",
+            "redis://",
+            "amazonaws.com",
+            "bearer ",
+            "/home/",
+            "/root/",
+            ".svc.cluster.local",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "the exposition mentions {forbidden:?}:
+{body}"
+            );
+        }
     }
 }

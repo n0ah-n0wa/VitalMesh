@@ -1,0 +1,62 @@
+# The cluster the rollback rehearsal runs on (scripts/rollback-test.sh,
+# docs/ROLLBACK.md).
+#
+# It differs from kind/cluster.yaml in exactly one way, and the difference
+# is the point: containerd is told about a registry running on the host, so
+# the test can push two releases to it and deploy them **by digest**.
+#
+# That matters because the rollback procedure this cluster rehearses is
+# defined in terms of immutable references (SPECIFICATIONS.md section 32).
+# A rehearsal that rolled back between two local `:dev` tags would prove
+# nothing about it: a tag is a name that can be moved, so rolling "back" to
+# one is rolling back to whatever it points at now. A digest is the image.
+# The registry is what makes a digest exist at all -- a locally built image
+# has no repository digest until something pushes it.
+#
+# One node, as in kind/cluster.yaml. The questions here are about which
+# bytes are running and which configuration they were started with, and
+# none of them needs a second node; the multi-node cluster is
+# kind/cluster-ha.yaml, for the disruption tests that do.
+#
+# The registry itself is created and removed by the test script. It holds
+# nothing but two builds of this repository's own images and is deleted
+# with the cluster.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: vitalmesh-rollback
+networking:
+  # As in the other two configs: kind's own CNI accepts NetworkPolicy
+  # objects and ignores them, so Calico is installed by the script and the
+  # base's default-deny actually denies. A rollback that only worked
+  # because nothing was enforcing the policies would be a false pass.
+  disableDefaultCNI: true
+  podSubnet: "192.168.0.0/16"
+nodes:
+  - role: control-plane
+    # The same digest the other two configs pin, so all three clusters run
+    # the identical Kubernetes version.
+    image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+
+# Where the digests come from.
+#
+# containerd resolves `localhost:5001` inside the node, which is the node
+# container's own loopback and not the host's. The mirror below sends it to
+# the registry container by its name on the kind network instead, which the
+# script connects. `localhost:5001` is then the same registry from the host
+# and from inside the cluster, so a digest pushed from one is pullable by
+# the other -- and the manifests can name images exactly as a real
+# deployment does.
+#
+# Plain HTTP: this registry exists for the length of one test, on a network
+# that is local to this machine, and holds only images built from this
+# repository. TLS here would be a certificate to generate and trust for no
+# gain. Nothing about it resembles how images reach a real cluster, where
+# ECR is private, authenticated and scanned on push.
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = ""
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+      endpoint = ["http://vitalmesh-rollback-registry:5000"]
+    [plugins."io.containerd.grpc.v1.cri".registry.configs."vitalmesh-rollback-registry:5000".tls]
+      insecure_skip_verify = true

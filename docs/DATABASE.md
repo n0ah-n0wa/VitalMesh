@@ -165,8 +165,95 @@ api-gateway migrate version   # print the current version and dirty flag
 - **Locking.** golang-migrate takes a PostgreSQL advisory lock for the duration of a run, so concurrent deployments cannot apply migrations twice.
 - **Transactions.** Each file is sent as one multi-statement command, which PostgreSQL executes in an implicit transaction: a failing statement rolls back the whole file. Files must therefore not contain their own `BEGIN`/`COMMIT`, and must avoid statements that cannot run inside a transaction (such as `CREATE INDEX CONCURRENTLY`).
 - **Failure state.** If a migration fails, golang-migrate records the version as *dirty* and refuses further runs. Recovery is: inspect the database (the failed file has been rolled back), fix the file, then `api-gateway migrate force <previous version>` and re-run `up`.
-- **Rollback strategy.** Every migration ships a `down` file that restores the previous schema. Rolling back destroys the data the migration introduced, so it is a development and staging tool; in production, forward-fix. Destructive changes (dropping or renaming columns) follow expand/contract across two releases so that the running application version and the next one both work against the schema during a rolling upgrade.
+- **Rollback strategy.** Every migration ships a `down` file that restores the previous schema. Rolling back destroys the data the migration introduced, so it is a development and staging tool; in production, forward-fix. Destructive changes follow expand and contract, below, which is enforced by a test rather than by review alone.
 - **Execution in deployment.** Migrations run as a separate step before the new application version is rolled out (a Kubernetes `Job` in the deployment pipeline), never at application start-up.
+
+### Expand and contract
+
+Migrations run as a Job **before** the new version is rolled out, and the
+rollout replaces pods one at a time while traffic continues. For the length
+of that rollout the **previous** application version is serving against the
+**new** schema. Every migration therefore has to satisfy a rule that is
+easy to forget in review: the code that is already running must keep working
+after it is applied.
+
+Four changes break that rule, and each looks harmless on its own:
+
+| Change | Why the running version breaks |
+|---|---|
+| A table or column removed or renamed | It still selects and inserts by that name |
+| A column's type changed | It scans the column into the type it had |
+| An existing nullable column made `NOT NULL` | It writes rows that leave the column out |
+| A `NOT NULL` column with no default added to an existing table | Its `INSERT` does not name the column, so every write it makes fails |
+
+`TestEveryMigrationKeepsThePreviousVersionWorking` applies each migration in
+turn against a real database, compares the schema before and after, and
+fails on any of the four. It is an integration test, so it runs in CI.
+
+**Any of the four is still allowed** — they are how a column finally goes
+away — but only as the second half of a pair, and only said out loud. A
+migration that makes one carries a note naming the reason:
+
+```sql
+-- rolling-deployment: the contract half of an expand/contract pair; no
+-- running version has read patients.status since release N-1.
+ALTER TABLE patients DROP COLUMN status;
+```
+
+The test then records the change as declared rather than failing. A note on
+a migration that breaks nothing also fails, so the notes cannot accumulate
+as decoration.
+
+#### The recipe
+
+Renaming `patients.status` to `patients.state`, across three releases:
+
+1. **Expand.** Add `state` as nullable, or `NOT NULL` with a default.
+   Nothing reads it yet. The old version is unaffected because it never
+   names the column.
+2. **Backfill and dual-write.** The new version writes both columns and
+   reads `status`. Backfill `state` for existing rows in a migration or a
+   one-off job, in batches if the table is large. Deploy. Now every running
+   version writes both.
+3. **Switch the read.** The next version reads `state` and still writes
+   both. Deploy. Now nothing reads `status`.
+4. **Contract.** Once no running version reads `status` — which is a fact
+   about what is deployed, not about what is merged — drop it, with the
+   note above.
+
+Steps 1 and 4 are migrations; 2 and 3 are application releases. The pair
+cannot be collapsed into one release, because between the migration and the
+last pod being replaced both versions are live.
+
+#### Locks, on a table that is serving
+
+A migration that needs `ACCESS EXCLUSIVE` on a busy table queues behind the
+queries already running on it, and PostgreSQL's lock queue is ordered, so
+every query arriving afterwards queues behind the migration. The migrator
+connects with `lock_timeout` (`postgres.MigrationLockTimeout`, 5s) so it
+gives up instead, having changed nothing; see
+docs/PRODUCTION_READINESS.md for what the deployment then needs.
+
+Two consequences worth knowing before writing the SQL:
+
+- `ADD COLUMN ... DEFAULT <constant>` does **not** rewrite the table on
+  PostgreSQL 11 and later: it is a catalogue change and takes its lock
+  briefly. `000010_idempotency_response_headers` is one of these.
+- A `CREATE INDEX` holds a lock against writes for the length of the build.
+  `CREATE INDEX CONCURRENTLY` does not, but cannot run inside a
+  transaction, and every migration file here runs in one — so an index on a
+  large, hot table is the one case that needs a migration of its own, run
+  deliberately, rather than being bundled with other statements.
+
+#### Ordering
+
+Files are applied in filename order and each is one transaction, so a file
+may depend on anything in a lower-numbered file and nothing in a higher one.
+Two changes that must both apply or neither belong in the same file;
+`000011_measurements_validate_per_statement` drops a trigger and its
+function and creates their replacements in one file for exactly that reason,
+so there is never an instant where readings are unvalidated.
+
 
 ## Go access layer
 

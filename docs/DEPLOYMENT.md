@@ -120,7 +120,7 @@ a recovery, not a success, and the run must be red for someone to look.
 |---|---|---|
 | `deploy-staging-<run>-<attempt>` | `rendered.yaml` and `apply.yaml`: the manifests exactly as applied, with the digests; on failure also `diagnostics/`: pods, deployments, the last 200 events, `describe` of every pod that is not Running, and the last 300 lines of every container's logs (current and previous) | 14 days |
 | `e2e-staging-<run>-<attempt>` | `e2e.log`: every request the demo made and every response, with the access token never printed | 14 days |
-| `release` | `release.json`: the commit, version, tag, digests and what staging ran; exists only if every staging stage passed; what a promotion deploys from | 90 days |
+| `release` | `release.json`: the commit, version, tag, digests, each image's own release record (toolchains, lockfile digests, schema and algorithm versions; docs/RELEASE.md) and what staging ran; exists only if every staging stage passed; what a promotion deploys from | 90 days |
 | `deploy-production-<run>-<attempt>` | as the staging one, for a promotion | 14 days |
 | the run summary | the digests, the version, the hostname, the load balancer address; for the images job, the digest table | with the run |
 | CloudWatch | Container Insights ships the pods' logs in production; in staging, `kubectl logs` through the cluster (the platform README) | `log_retention_days` |
@@ -132,12 +132,17 @@ the services never log credentials.
 
 ## Rollback
 
+The full procedure, the verification commands and the limits on how far
+back you can go are in **[ROLLBACK.md](ROLLBACK.md)**, which is also where
+the rehearsal that exercises them is recorded. What follows is the summary.
+
 There are three ways back, from fastest to most correct. All of them
 leave the database as it is: **migrations are not rolled back** (they are
 forward-only and, by the migration policy, additive), so a rollback runs
 the previous code against the current schema. That is safe as long as
 each migration keeps the previous version working, which the migration
-policy requires and the E2E run after each deployment exercises.
+policy requires, an integration test enforces migration by migration, and
+the E2E run after each deployment exercises.
 
 **1. Automatic, in staging.** If a rollout does not complete within its
 timeout, `deploy.yml` rolls both Deployments back to their previous
@@ -171,11 +176,17 @@ the way for anything that has to stay rolled back.
 
 What a hand rollback does **not** do: it does not change the Kubernetes
 Secrets (a rotated secret stays rotated), the migration Job (already
-complete), or the ConfigMaps (rolled back with the Deployment, since they
-are part of the applied set and the previous ReplicaSet keeps its
-references). A configuration change alone can be rolled back with a
-revert; there is nothing to undo in the cluster for it beyond the next
-apply.
+complete), **or the ConfigMaps**. That last one is the trap. The
+ConfigMaps are named objects rather than generated ones with a content
+hash in the name, and the pods read them with `envFrom`, so a restored pod
+template points at the same ConfigMap *name* and picks up whatever it
+holds now -- the configuration of the release being rolled back from. A
+`rollout undo` therefore leaves the previous image running against the new
+configuration, which is a combination neither release produced and nothing
+has tested. The rollback rehearsal measures this
+(docs/ROLLBACK.md, "The emergency stop"); way 3 below, and a promotion,
+do not have the problem, because they re-apply the earlier commit's
+manifests in full.
 
 ## Production
 
@@ -223,7 +234,9 @@ gh run watch                                                    # then approve o
 
 The same three ways as staging, in the same order of speed, with the same
 caveat: migrations are forward-only and additive, so a rollback runs the
-previous code against the current schema.
+previous code against the current schema. [ROLLBACK.md](ROLLBACK.md) has
+the exact commands, including how to read the release record before
+promoting it and how to verify the result.
 
 **1. Automatic, on a failed rollout.** `deploy.yml` rolls both
 Deployments back to their previous revision and fails the run. With
