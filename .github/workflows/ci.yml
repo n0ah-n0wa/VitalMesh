@@ -55,11 +55,17 @@ jobs:
       - name: Dependencies
         run: make setup-go
 
+      - name: Lockfile integrity (go.sum hashes, go.mod tidy)
+        run: make deps-verify-go
+
       - name: Formatting (gofmt)
         run: make format-check-go
 
       - name: Static analysis (go vet, every build tag)
         run: make lint-go
+
+      - name: Security static analysis (gosec)
+        run: make sast
 
       - name: Unit tests (race detector)
         run: make test-go
@@ -92,6 +98,9 @@ jobs:
 
       - name: Dependencies
         run: make setup-rust
+
+      - name: Lockfile integrity (Cargo.lock needs no change)
+        run: make deps-verify-rust
 
       - name: Formatting (rustfmt)
         run: make format-check-rust
@@ -317,6 +326,28 @@ jobs:
       - name: Scan the images and the Dockerfiles
         run: make docker-scan
 
+      # Generated after the gate, from the images that passed it, so an
+      # SBOM always describes an image that was allowed to exist
+      # (SPECIFICATIONS.md section 99). Reporting, not a gate.
+      - name: Software bill of materials for both images
+        run: make sbom
+
+      - name: SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ github.run_id }}-${{ github.run_attempt }}
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 14
+
+      # Point-in-time recovery of the real schema, verified row by row
+      # (SPECIFICATIONS.md sections 79 and 80). It needs the api-gateway
+      # image built above, because the schema comes from the real migrator.
+      # docs/DISASTER_RECOVERY.md records what it proves and what it does
+      # not: the procedure, not RDS's provisioning time.
+      - name: Point-in-time restore test
+        run: make db-restore-test
+
   # --------------------------------------------------------------- stack
   # The end-to-end suite against the real containerized stack: the images
   # built from this commit, PostgreSQL and Redis, as a clean compose project
@@ -398,6 +429,12 @@ jobs:
 
       - name: Git history and working tree (gitleaks)
         run: make secret-scan
+
+      # Needs no toolchain: it reads the Makefile, the workflows, the
+      # Terraform and the Dependabot configuration and checks the gates
+      # still block what docs/SECURITY.md says they block.
+      - name: The gates match the documented policy
+        run: make policy-check
 
   # ---------------------------------------------------------- Kubernetes
 

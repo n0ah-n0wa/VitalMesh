@@ -712,7 +712,7 @@ func (p *parser) passwordHash() PasswordHash {
 		p.fail("PASSWORD_HASH_PARALLELISM: must be at most %d", MaxPasswordHashThreads)
 		parallelism = 1
 	}
-	cfg.Parallelism = uint8(parallelism)
+	cfg.Parallelism = uint8(parallelism) // #nosec G115 -- parallelism is bounded to MaxPasswordHashThreads (64) immediately above, well inside uint8
 	if cfg.MemoryKiB < MinPasswordHashMemoryKiB || cfg.MemoryKiB > MaxPasswordHashMemoryKiB {
 		p.fail("PASSWORD_HASH_MEMORY_KIB: must be between %d and %d", MinPasswordHashMemoryKiB, MaxPasswordHashMemoryKiB)
 	}

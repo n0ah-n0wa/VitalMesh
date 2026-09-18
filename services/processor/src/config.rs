@@ -321,6 +321,20 @@ impl Config {
                     .to_owned(),
             );
         }
+        // Redaction lives in the JSON event formatter (telemetry::JsonFormat),
+        // so the plain-text layer -- the stock one -- writes fields exactly as
+        // they were recorded. That is tolerable on a developer's machine,
+        // where the data is synthetic, and is not tolerable anywhere holding
+        // real records. Section 42 asks for structured JSON in any case, so a
+        // deployment that asked for text is refused rather than quietly
+        // logging unredacted.
+        if config.environment.is_deployed() && config.log.format == LogFormat::Text {
+            p.problems.push(
+                "LOG_FORMAT: must be json in staging and production; the text format \
+                 bypasses log redaction (SPECIFICATIONS.md section 42)"
+                    .to_owned(),
+            );
+        }
 
         if p.problems.is_empty() {
             Ok(config)
@@ -495,7 +509,7 @@ mod tests {
             // A small body limit only makes sense with a small job ceiling.
             ("MAX_JOB_MEASUREMENTS", "32"),
             ("LOG_LEVEL", "debug"),
-            ("LOG_FORMAT", "text"),
+            ("LOG_FORMAT", "json"),
             ("MAX_CONCURRENT_JOBS", "16"),
             ("MAX_BATCH_SIZE", "250"),
             ("PROCESSING_TIMEOUT", "5m"),
@@ -511,7 +525,7 @@ mod tests {
         assert_eq!(cfg.http.max_body_bytes, 4096);
         assert_eq!(cfg.processing.max_job_measurements.get(), 32);
         assert_eq!(cfg.log.level, Level::DEBUG);
-        assert_eq!(cfg.log.format, LogFormat::Text);
+        assert_eq!(cfg.log.format, LogFormat::Json);
         assert_eq!(cfg.processing.job_retention, Duration::from_secs(120));
         assert_eq!(
             cfg.http.internal_token.as_ref().map(Secret::reveal),
@@ -616,6 +630,35 @@ mod tests {
             let cfg =
                 load(&[("ENVIRONMENT", environment)]).expect("a developer may run without a token");
             assert!(cfg.http.internal_token.is_none());
+        }
+    }
+
+    /// Log redaction is applied by the JSON formatter only, so a deployment
+    /// that asked for the plain-text format would log fields exactly as
+    /// recorded. It is refused rather than silently logged unredacted.
+    #[test]
+    fn a_deployment_refuses_the_text_log_format() {
+        for environment in ["staging", "production"] {
+            let error = load(&[
+                ("ENVIRONMENT", environment),
+                ("INTERNAL_TOKEN", "example-token-not-a-secret"),
+                ("LOG_FORMAT", "text"),
+            ])
+            .expect_err("text logging must not start in a deployment");
+            assert!(
+                error
+                    .problems()
+                    .iter()
+                    .any(|p| p.starts_with("LOG_FORMAT:")),
+                "{environment}: {:?}",
+                error.problems()
+            );
+        }
+        // A developer's machine keeps it: the data there is synthetic.
+        for environment in ["local", "test"] {
+            let cfg = load(&[("ENVIRONMENT", environment), ("LOG_FORMAT", "text")])
+                .expect("text logging is allowed outside a deployment");
+            assert_eq!(cfg.log.format, LogFormat::Text);
         }
     }
 

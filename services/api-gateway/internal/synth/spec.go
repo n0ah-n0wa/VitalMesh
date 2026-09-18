@@ -253,7 +253,7 @@ func DefaultSpec(seed int64, from, to time.Time) Spec {
 // LoadSpec reads a spec from a JSON file. Unknown fields are an error, so a
 // misspelt key cannot be silently ignored.
 func LoadSpec(path string) (Spec, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- a spec path from the command line, never request input
 	if err != nil {
 		return Spec{}, fmt.Errorf("read spec: %w", err)
 	}

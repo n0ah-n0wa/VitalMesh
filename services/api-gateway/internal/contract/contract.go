@@ -43,7 +43,7 @@ type Document struct {
 
 // Load reads and decodes an OpenAPI document.
 func Load(path string) (*Document, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- a repository path from this project's tooling and tests, never request input
 	if err != nil {
 		return nil, fmt.Errorf("read contract: %w", err)
 	}
@@ -312,7 +312,7 @@ type Lock struct {
 
 // LoadLock reads a lock file.
 func LoadLock(path string) (*Lock, error) {
-	raw, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path) // #nosec G304 -- a repository path from this project's tooling and tests, never request input
 	if err != nil {
 		return nil, fmt.Errorf("read lock: %w", err)
 	}
@@ -329,7 +329,10 @@ func (l *Lock) Write(path string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(encoded, '\n'), 0o644)
+	// 0o600: the lock is regenerated locally by `make contracts-lock` and
+	// committed; git records only the executable bit, so a tighter mode on
+	// disk costs nothing and shares nothing by default.
+	return os.WriteFile(path, append(encoded, '\n'), 0o600)
 }
 
 func sortedKeys[V any](m map[string]V) []string {

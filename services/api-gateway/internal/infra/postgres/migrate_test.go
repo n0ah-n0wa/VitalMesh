@@ -185,3 +185,96 @@ func TestFailingMigrationIsRolledBackAtomically(t *testing.T) {
 		t.Fatalf("after Force(1): version=%d dirty=%v", version, dirty)
 	}
 }
+
+// A migration that cannot take the lock it needs must fail quickly rather
+// than queue for it. PostgreSQL's lock queue is ordered, so a migration
+// waiting for ACCESS EXCLUSIVE on a busy table puts every query that
+// arrives after it behind itself: the table stops serving for as long as
+// the migration waits. postgres.MigrationLockTimeout is what turns that
+// outage into a failed deployment that the Job retries.
+func TestAMigrationThatCannotTakeItsLockFailsFastInsteadOfBlocking(t *testing.T) {
+	t.Parallel()
+	dbURL, _ := postgrestest.NewSchema(t)
+
+	first := fstest.MapFS{
+		"000001_table.up.sql":   {Data: []byte(`CREATE TABLE lockme (id int PRIMARY KEY);`)},
+		"000001_table.down.sql": {Data: []byte(`DROP TABLE lockme;`)},
+	}
+	m1, err := postgres.NewMigratorFromFS(first, dbURL)
+	if err != nil {
+		t.Fatalf("NewMigratorFromFS: %v", err)
+	}
+	if err := m1.Up(); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+	m1.Close()
+
+	// Another session holds the lock the next migration needs, the way a
+	// long-running query on a hot table would.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	holder, err := pgx.Connect(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("connect the lock holder: %v", err)
+	}
+	defer holder.Close(ctx)
+	tx, err := holder.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `LOCK TABLE lockme IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatalf("take the conflicting lock: %v", err)
+	}
+
+	second := fstest.MapFS{
+		"000001_table.up.sql":   {Data: []byte(`CREATE TABLE lockme (id int PRIMARY KEY);`)},
+		"000001_table.down.sql": {Data: []byte(`DROP TABLE lockme;`)},
+		"000002_alter.up.sql":   {Data: []byte(`ALTER TABLE lockme ADD COLUMN extra int;`)},
+		"000002_alter.down.sql": {Data: []byte(`ALTER TABLE lockme DROP COLUMN extra;`)},
+	}
+	m2, err := postgres.NewMigratorFromFS(second, dbURL)
+	if err != nil {
+		t.Fatalf("NewMigratorFromFS: %v", err)
+	}
+	defer m2.Close()
+
+	started := time.Now()
+	err = m2.Up()
+	elapsed := time.Since(started)
+
+	if err == nil {
+		t.Fatal("the migration should have failed: another session holds the lock it needs")
+	}
+	// The point of the timeout: it gave up rather than waiting for the
+	// holder, which is still holding.
+	if elapsed > 30*time.Second {
+		t.Errorf("the migration waited %s for its lock; the lock timeout did not apply", elapsed)
+	}
+	if !strings.Contains(err.Error(), "lock timeout") && !strings.Contains(err.Error(), "55P03") {
+		t.Errorf("failure was not a lock timeout: %v", err)
+	}
+	t.Logf("gave up after %s: %v", elapsed.Round(time.Millisecond), err)
+
+	// The schema was not changed: the statement never ran.
+	if err := tx.Rollback(ctx); err != nil {
+		t.Fatalf("release the conflicting lock: %v", err)
+	}
+
+	// Recovery is not automatic, and a deployment runbook has to say so:
+	// golang-migrate marks the version dirty on any failure, so retrying
+	// refuses until the marker is cleared -- even though nothing was
+	// applied and the lock is now free.
+	version, dirty, err := m2.Version()
+	if err != nil || version != 2 || !dirty {
+		t.Fatalf("after the lock timeout: version=%d dirty=%v err=%v, want 2/dirty", version, dirty, err)
+	}
+	if err := m2.Up(); err == nil || !strings.Contains(err.Error(), "Dirty") {
+		t.Errorf("a retry over a dirty version should refuse, got %v", err)
+	}
+	if err := m2.Force(1); err != nil {
+		t.Fatalf("Force(1) to clear the marker: %v", err)
+	}
+	if err := m2.Up(); err != nil {
+		t.Errorf("after clearing the marker the migration should apply: %v", err)
+	}
+}

@@ -34,8 +34,14 @@ destroyed and rebuilt.
 | Region unavailable | not covered | not covered | see the gap at the end |
 
 The RTO figures assume a person is present with administrator credentials
-and the procedures below to hand. They are estimates until the restore test
-has been run once and timed; that run replaces them.
+and the procedures below to hand. **They are estimates.** A restore test has
+been run and is recorded at the end of this document, but it exercised
+PostgreSQL's own recovery against a local server rather than RDS, so it
+validates the procedure and the verification without measuring how long AWS
+takes to provision a replacement instance. The RPO figures are RDS's
+documented log-shipping cadence, not a measurement. Nothing in this document
+claims a recovery guarantee that has been tested unless it says so
+explicitly.
 
 ## Backups
 
@@ -206,21 +212,89 @@ repointing anything:
 
 ## The restore test (section 80, OQ-32)
 
-To be run once against **staging** before production carries anything,
-and recorded here with date, duration and cost:
+`make db-restore-test` performs one against a real PostgreSQL 16 server and
+verifies it row by row. It runs on a developer's machine rather than against
+staging, because this project has no AWS account to spend; what that buys,
+and what it does not, is stated plainly below.
 
-1. Load a known dataset (`make demo` against staging).
-2. Note the time. Insert a marker row.
-3. Restore staging to the moment before the marker (procedure A, with
-   staging's tfvars).
-4. Verify: the marker is absent, everything before it is present.
-5. Time the whole thing; that number replaces the RTO estimate above.
-6. Revert: staging is destroyed and recreated, so the suffix does not
-   accumulate.
+**Run 2026-09-18** — `scripts/db-restore-test.sh`, PostgreSQL 16.15, schema
+version 11:
 
-| Date | Restore type | Data size | Time to usable | Cost | Notes |
-|---|---|---|---|---|---|
-| not yet run | | | | | |
+| Phase | Measured |
+|---|---|
+| Base backup (`pg_basebackup -Xstream -c fast`) | 1.1 s, 46.3 MB |
+| Write-ahead log archived | 5 segments, the archiver reported no failures |
+| Point-in-time recovery, to **promotion** (writable) | 4.4 s, 2 segments replayed |
+| Logical dump (`pg_dump -Fc`) | 0.4 s, 36 KB |
+| Logical restore into a fresh database (`pg_restore`) | 0.5 s |
+
+Recovery is timed to **promotion**, not to the first connection that
+succeeds: a server replaying WAL accepts connections while it is still
+read-only, so "accepting connections" is the wrong milestone to measure or
+to wait on. The base backup timing varies with what else the machine is
+doing — 1.1 s idle, 6.6 s while a container suite ran beside it — which is
+one more reason these numbers are not an RTO.
+
+The shape of the test: create the schema with the real migrator, seed a
+known dataset, take a base backup, commit more data, record that instant as
+the recovery target, then commit the change that has to be undone. Destroy
+the server **and its storage** — only the base backup and the WAL archive
+survive, as they would in S3. Restore to the target, and check.
+
+Every item below is an assertion that fails the run if it does not hold:
+
+- the change committed after the target is **absent** — the property a
+  point-in-time restore exists for;
+- the 4 patients and 80 readings committed before the target are **all
+  present**, to the row;
+- the schema version is what it was, and not dirty;
+- no reading lost its patient;
+- the completed processing job and the operator account survived, and no job
+  is left in a non-terminal state;
+- an out-of-range reading is **still rejected**, and a duplicate external
+  reference is **still rejected** — so the constraints, the validation
+  trigger and the unique indexes came back with the data. A restore that
+  silently dropped them would satisfy every count above, which is why these
+  two negative checks are in the test;
+- the application itself connects to the restored database and agrees on the
+  schema version;
+- the logical copy holds the same rows as the restored instance.
+
+### What this does not establish
+
+The timings are PostgreSQL's own, for a 46 MB database on one machine.
+**They are not an RTO for production**, and the RTO column above is
+unchanged by them. An RDS point-in-time restore adds everything this test
+cannot exercise: the restore API, provisioning a new instance — the
+dominant term, and the reason the estimate is tens of minutes rather than
+seconds — applying the parameter group, and the deployment that repoints the
+application at the new endpoint.
+
+The five-minute RPO is likewise a property of RDS, which ships transaction
+logs on that cadence. It is AWS's documented behaviour, not something
+measured here.
+
+So: the **procedure and its verification are tested**, and the **duration
+and the RPO remain assumptions**. A restore run in staging with a real
+account should record its numbers in the table above and replace the RTO
+column; until then the RTO figures are estimates and are labelled as such.
+
+### What running it taught
+
+Two failure modes surfaced only by doing it, both of which an operator
+following the procedure by hand can hit:
+
+- **A recovery target must be an exact, parseable timestamp.** A target
+  whose space between the date and the time is lost — easy when copying a
+  value through a shell — makes the server refuse to start at all:
+  `invalid value for parameter "recovery_target_time"` followed by a FATAL
+  configuration error, with no database. Quote the target, and read it back
+  from `postgresql.auto.conf` before starting the instance.
+- **The write-ahead log segment holding the target has to reach the archive
+  before the source is gone.** The test forces a segment switch and waits
+  for the archiver to confirm. RDS manages this, but the self-managed and
+  logical paths do not: destroying a source whose last segment is still
+  unarchived silently costs every transaction in it.
 
 ## Failure scenarios not covered
 

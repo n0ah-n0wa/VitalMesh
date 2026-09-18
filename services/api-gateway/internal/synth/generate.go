@@ -143,7 +143,7 @@ func Users(spec Spec) []User {
 // environments and are never a secret. The loader refuses production.
 func Password(seed int64, email string) string {
 	var key [8]byte
-	binary.BigEndian.PutUint64(key[:], uint64(seed))
+	binary.BigEndian.PutUint64(key[:], uint64(seed)) // #nosec G115 -- a bit-pattern conversion of the fixture seed into HMAC key material; every int64 maps to a distinct uint64
 	mac := hmac.New(sha256.New, key[:])
 	mac.Write([]byte("vitalmesh-synth-password\n"))
 	mac.Write([]byte(strings.ToLower(strings.TrimSpace(email))))
@@ -232,7 +232,7 @@ func newRNG(seed int64, kind string, index int, code string) *rand.Rand {
 	h := sha256.New()
 	fmt.Fprintf(h, "vitalmesh-synth:%d:%s:%d:%s", seed, kind, index, code)
 	sum := h.Sum(nil)
-	return rand.New(rand.NewPCG(binary.BigEndian.Uint64(sum[:8]), binary.BigEndian.Uint64(sum[8:16])))
+	return rand.New(rand.NewPCG(binary.BigEndian.Uint64(sum[:8]), binary.BigEndian.Uint64(sum[8:16]))) // #nosec G404 -- deliberately deterministic: a fixture must be reproducible from its seed, and nothing generated here is a secret
 }
 
 // episode is an anomaly in progress.

@@ -75,10 +75,18 @@ GITLEAKS_IMAGE  ?= ghcr.io/gitleaks/gitleaks:v8.30.1
 # the pinned toolchain (go.mod): v1.8.0 requires Go 1.26 and fails under
 # GOTOOLCHAIN=local. Check the directive before bumping this pin.
 GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
+# gosec reads this repository's own code rather than its dependencies, which
+# is the half govulncheck does not cover. Pinned for the same reason and with
+# the same caveat: the release must build under the toolchain in go.mod.
+GOSEC           ?= github.com/securego/gosec/v2/cmd/gosec@v2.22.9
+# Where `make sbom` writes. Git-ignored: an SBOM describes one build of one
+# image, so it is an artifact of a run rather than a file to keep in the
+# tree. CI uploads it; the release attaches it to the images it describes.
+SBOM_DIR        ?= sbom
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan sbom sast policy-check db-restore-test deps-verify deps-verify-go deps-verify-rust deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -190,6 +198,60 @@ docker-scan: ## Scan the built images and the service Dockerfiles, failing on HI
 	$(TRIVY_FS) -v "$(CURDIR)/$(GO_DIR):/scan" $(TRIVY_IMAGE) config $(TRIVY_SEVERITY) /scan
 	$(TRIVY_FS) -v "$(CURDIR)/$(RUST_DIR):/scan" $(TRIVY_IMAGE) config $(TRIVY_SEVERITY) /scan
 
+# A software bill of materials per image, in CycloneDX (SPECIFICATIONS.md
+# section 99). It is generated from the built image rather than from the
+# lock files, so it lists what actually shipped: the operating system
+# packages of the base layer as well as the Go modules the binary carries.
+# The Rust binary carries no module list, which is why the image is the only
+# place the processor's dependencies are visible at all.
+#
+# Written per image and named by the tag, so two tags do not overwrite each
+# other. Generating an SBOM is not a gate: it reports, and the gate that
+# blocks is docker-scan.
+sbom: ## Generate a CycloneDX SBOM for each built image into $(SBOM_DIR)
+	@mkdir -p $(SBOM_DIR)
+	$(TRIVY) image --quiet --format cyclonedx --output /dev/stdout $(GATEWAY_IMAGE) > $(SBOM_DIR)/api-gateway-$(IMAGE_TAG).cdx.json
+	$(TRIVY) image --quiet --format cyclonedx --output /dev/stdout $(PROCESSOR_IMAGE) > $(SBOM_DIR)/processor-$(IMAGE_TAG).cdx.json
+	@for f in $(SBOM_DIR)/*.cdx.json; do 		components=$$(grep -o '"bom-ref"' "$$f" | wc -l); 		echo "$$f: $$components components"; 		[ "$$components" -gt 0 ] || { echo "$$f lists no components"; exit 1; }; 	done
+
+# Lockfile integrity, which is a different question from whether the locked
+# versions are vulnerable (deps-scan) or current (Dependabot).
+#
+#   go mod verify      every module in the cache still hashes to what
+#                      go.sum records, so a tampered or swapped module is
+#                      refused rather than built
+#   go mod tidy -diff  go.mod and go.sum describe exactly what the code
+#                      imports: no stale requirement that a scanner would
+#                      keep reporting, and nothing missing that a build
+#                      would resolve at random
+#   cargo fetch        --locked refuses to proceed if Cargo.lock would have
+#                      to change, which is the same guarantee for Rust and
+#                      is already how every cargo target here runs
+# The gates enforce the policy; this checks the gates still say what the
+# policy says. Every threshold here is one flag away from passing
+# everything, so a weakened flag is itself a finding. Needs no toolchain.
+policy-check: ## Check the security gates still match the documented policy (docs/SECURITY.md)
+	sh scripts/security-policy-check.sh
+
+# The restore test of sections 79 and 80: a base backup, archived
+# write-ahead log, and point-in-time recovery of the real schema, verified
+# row by row. It drives PostgreSQL's own machinery, which is what RDS wraps,
+# so it proves the procedure and the verification queries -- not RDS's
+# provisioning time. docs/DISASTER_RECOVERY.md records what it measured and
+# what remains an assumption. Needs the api-gateway image (make
+# docker-build) because the schema comes from the real migrator.
+db-restore-test: ## Point-in-time restore test against a real PostgreSQL, verified and timed
+	sh scripts/db-restore-test.sh
+
+deps-verify: deps-verify-go deps-verify-rust ## Check both lockfiles are intact and describe exactly what is imported
+
+deps-verify-go: ## go.sum hashes match the module cache, and go.mod is tidy
+	cd $(GO_DIR) && go mod verify
+	cd $(GO_DIR) && go mod tidy -diff
+
+deps-verify-rust: ## Cargo.lock needs no change to build what is locked
+	cd $(RUST_DIR) && cargo fetch --locked
+
 # Two views of the dependencies, because they answer different questions.
 #
 #   trivy        every crate in Cargo.lock and every module in go.sum
@@ -200,6 +262,14 @@ docker-scan: ## Scan the built images and the service Dockerfiles, failing on HI
 #                reported only where the vulnerable function is actually
 #                reachable from this code, so a finding here is one to act
 #                on rather than one to argue about
+# Static application security testing of this repository's own Go code:
+# hard-coded credentials, weak randomness, unsafe integer conversions, file
+# permissions, path handling. Findings that are deliberate carry an inline
+# `#nosec <rule> -- <reason>`; docs/SECURITY.md lists them and argues each.
+# Medium severity and above, which is what a reviewer can act on.
+sast: ## Static application security analysis of the Go service (gosec)
+	cd $(GO_DIR) && go run $(GOSEC) -severity=medium -confidence=medium -quiet ./...
+
 deps-scan: ## Scan the dependency lock files (trivy) and the reachable Go call graph (govulncheck) for known vulnerabilities
 	@echo "== lock files: Cargo.lock and go.sum =="
 	$(TRIVY_FS) -v "$(CURDIR):/repo" $(TRIVY_IMAGE) fs --scanners vuln $(TRIVY_SEVERITY) /repo
@@ -326,13 +396,13 @@ build: ## Build both services and the synth tool (Go binaries in bin/, Rust bina
 line-endings: ## Fail if any tracked file is stored with CRLF line endings
 	sh scripts/check-line-endings.sh
 
-verify: format-check lint test contracts-check integration-test e2e-test coverage-go build line-endings ## Run every code quality gate (needs PostgreSQL and Redis: make dev-db dev-redis)
+verify: format-check lint deps-verify test contracts-check integration-test e2e-test coverage-go build line-endings ## Run every code quality gate (needs PostgreSQL and Redis: make dev-db dev-redis)
 	@echo "verify: all gates passed"
 
 # Everything CI runs, in the order CI's dependency graph would settle on if
 # it ran serially. Needs Docker as well as the toolchains; see
 # docs/DEVELOPMENT.md, "Reproducing CI locally".
-ci-local: verify deps-scan secret-scan docker-build docker-verify docker-scan stack-test k8s-validate tf-validate ## Run every check CI runs, locally
+ci-local: verify policy-check sast deps-scan secret-scan docker-build docker-verify docker-scan sbom db-restore-test stack-test k8s-validate tf-validate ## Run every check CI runs, locally
 	@echo "ci-local: every CI check passed"
 
 clean: ## Remove build outputs

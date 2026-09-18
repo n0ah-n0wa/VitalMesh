@@ -9,9 +9,35 @@ manifests assume is there. Nothing here is applied to the kind cluster;
 | AWS Load Balancer Controller v3.5.0 | `eks/aws-load-balancer-controller` 3.5.0 | Turns the `Ingress` in `components/deployed` into an Application Load Balancer with pods as targets, finds the ACM certificate for its host, and injects readiness gates in labelled namespaces | `load_balancer_controller_role_arn` |
 | Cluster Autoscaler 1.34.5 | `autoscaler/cluster-autoscaler` 9.59.0 | Resizes the managed node group between the Terraform minimum and maximum as pods go Pending or nodes sit empty | `cluster_autoscaler_role_arn` |
 
-Both are installed, and upgraded, by one script, as a cluster admin, after
-the environment's Terraform has been applied and before the application is
-deployed:
+## Missing, and required before launch: metrics collection and alerting
+
+The application manifests assume a third component that this directory does
+not yet install, and saying so here is the point of this section.
+
+Both services serve `/metrics`, `observability/prometheus/rules/alerts.yml`
+defines nine alerts, and `networkpolicy-baseline.yaml` already admits
+scraping from a namespace called `monitoring`. The staging and production
+ConfigMaps point `OTEL_EXPORTER_OTLP_ENDPOINT` at
+`otel-collector.monitoring.svc.cluster.local:4318`. Nothing in this
+repository creates that namespace, a collector, a Prometheus or an
+Alertmanager.
+
+Until one is installed, a deployed environment serves metrics nobody reads
+and evaluates no alerts: the database and the cache are watched by
+CloudWatch alarms and RDS events, and the application is not watched at all.
+It is the one gap that blocks a production launch
+(docs/PRODUCTION_READINESS.md). What it needs, in order: a collector and a
+Prometheus (or Amazon Managed Prometheus behind the OTLP endpoint already
+named) scraping both services; `alerts.yml` and `recording.yml` loaded by
+whatever evaluates them; and an Alertmanager routed to the same SNS topic
+the infrastructure alarms use, so alerts arrive in one place. No application
+change is needed for any of it.
+
+## Installing
+
+Both components above are installed, and upgraded, by one script, as a
+cluster admin, after the environment's Terraform has been applied and before
+the application is deployed:
 
 ```sh
 aws eks update-kubeconfig --name vitalmesh-staging --region eu-central-1

@@ -51,7 +51,9 @@ func Write(spec Spec, dir string, overwrite bool) (Manifest, error) {
 	if err := spec.Validate(); err != nil {
 		return Manifest{}, err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 0o750: a fixture directory holds generated records and is read back
+	// by the same account that wrote it; nothing else needs to traverse it.
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return Manifest{}, fmt.Errorf("create %s: %w", dir, err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ManifestFile)); err == nil && !overwrite {
@@ -81,7 +83,10 @@ func Write(spec Spec, dir string, overwrite bool) (Manifest, error) {
 	if err != nil {
 		return Manifest{}, err
 	}
-	if err := os.WriteFile(filepath.Join(dir, ManifestFile), append(raw, '\n'), 0o644); err != nil {
+	// 0o600 for the same reason as the directory above: written and read
+	// by one account, and not shared by default even though the data it
+	// describes is synthetic.
+	if err := os.WriteFile(filepath.Join(dir, ManifestFile), append(raw, '\n'), 0o600); err != nil {
 		return Manifest{}, fmt.Errorf("write manifest: %w", err)
 	}
 	return m, nil
@@ -106,7 +111,7 @@ func (w *fileSink) open() error {
 	w.writers = map[string]*bufio.Writer{}
 	w.hashes = map[string]hashWriter{}
 	for _, name := range []string{UsersFile, PatientsFile, MeasurementsFile} {
-		f, err := os.Create(filepath.Join(w.dir, name))
+		f, err := os.Create(filepath.Join(w.dir, name)) // #nosec G304 -- a fixture directory named on the command line, joined with a fixed file name; never request input
 		if err != nil {
 			return fmt.Errorf("create %s: %w", name, err)
 		}
@@ -150,7 +155,7 @@ func (w *fileSink) close() error {
 // must be this package's, the spec must be valid, and every data file must
 // exist with the recorded digest.
 func ReadManifest(dir string) (Manifest, error) {
-	raw, err := os.ReadFile(filepath.Join(dir, ManifestFile))
+	raw, err := os.ReadFile(filepath.Join(dir, ManifestFile)) // #nosec G304 -- a fixture directory named on the command line, joined with a fixed file name; never request input
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%s is not a fixture directory: %w", dir, err)
 	}
@@ -181,7 +186,7 @@ func ReadManifest(dir string) (Manifest, error) {
 }
 
 func digestFile(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- a fixture path from the command line, never request input
 	if err != nil {
 		return "", fmt.Errorf("open %s: %w", filepath.Base(path), err)
 	}
@@ -233,7 +238,7 @@ func EachMeasurement(dir string, fn func(Measurement) error) error {
 }
 
 func readLines(path string, fn func([]byte) error) error {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- a fixture path from the command line, never request input
 	if err != nil {
 		return fmt.Errorf("open %s: %w", filepath.Base(path), err)
 	}

@@ -27,7 +27,10 @@ docs/                     Architecture, development and operations documentation
                           (docs/SYNTHETIC_DATA.md: the seeded data generator and loader;
                            docs/PERFORMANCE.md: how performance is measured and what was found;
                            docs/RESILIENCE.md: every retry, timeout and lease, classified and verified;
-                           docs/OPERATIONS.md: how the system behaves on Kubernetes under disruption, and the runbooks)
+                           docs/OPERATIONS.md: how the system behaves on Kubernetes under disruption, and the runbooks;
+                           docs/SECURITY.md: the security posture, the scans, and every justified exception;
+                           docs/DISASTER_RECOVERY.md: backups, the tested restore procedure, RPO and RTO;
+                           docs/PRODUCTION_READINESS.md: the launch review and the ranked remaining risks)
 .github/workflows/        GitHub Actions pipelines
 .devcontainer/            Reproducible toolchain image
 Makefile                  Unified developer interface (`make help`)

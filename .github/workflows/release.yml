@@ -94,7 +94,32 @@ jobs:
 
   images:
     name: images
-    if: vars.AWS_ACCOUNT_ID != '' && ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || github.event.workflow_run.conclusion == 'success')
+    # Three things must hold before this job may touch the registry, and
+    # the second and third are not optional.
+    #
+    # `branches: [main]` on the workflow_run trigger filters
+    # workflow_run.head_branch, which for a CI run started by a *pull
+    # request* is the head branch of that pull request -- including a
+    # fork's, and a fork's default branch is called main. CI runs on bare
+    # `pull_request:`, so a fork's pull request produces a completed CI run
+    # whose head_branch is main. A workflow_run workflow then runs in the
+    # default-branch context, so its OIDC subject is
+    # `repo:<owner>/<repo>:ref:refs/heads/main` -- the subject the ecr-push
+    # role trusts -- while the code checked out at head_sha is the fork's.
+    # That is a fork pull request executing its own Makefile and Dockerfiles
+    # in a job that then assumes the push role and feeds the staging deploy.
+    #
+    # `workflow_run.event == 'push'` excludes every pull-request-triggered
+    # run, and `head_repository.full_name == github.repository` excludes
+    # every run whose code came from a fork. Requiring the run to have
+    # succeeded is about correctness; these two are about who wrote the code.
+    if: >-
+      vars.AWS_ACCOUNT_ID != '' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.event == 'push' &&
+         github.event.workflow_run.head_repository.full_name == github.repository)
+      )
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -115,13 +140,21 @@ jobs:
       api_gateway_digest: ${{ steps.push.outputs.api_gateway_digest }}
       processor_digest: ${{ steps.push.outputs.processor_digest }}
     steps:
+      # The whole history, so the commit can be shown to be on main below.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
           ref: ${{ env.RELEASE_SHA }}
+          fetch-depth: 0
 
       - name: The commit being released
         run: |
+          # Defence in depth behind the job's own condition: whatever
+          # triggered this, the commit being built has to be one that is
+          # actually on main, which a fork's commit never is. promote.yml
+          # makes the same assertion before production.
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main             || { echo "::error::$RELEASE_SHA is not on main"; exit 1; }
           echo "IMAGE_TAG=sha-$RELEASE_SHA" >> "$GITHUB_ENV"
           echo "VERSION=$(git rev-parse --short "$RELEASE_SHA")" >> "$GITHUB_ENV"
           git log -1 --format='%H %s' "$RELEASE_SHA"
@@ -148,6 +181,23 @@ jobs:
         run: make docker-verify
       - name: Scan the images and the Dockerfiles (a finding stops the job here)
         run: make docker-scan
+
+      # A bill of materials for the exact images about to be pushed
+      # (SPECIFICATIONS.md section 99). IMAGE_TAG is sha-<commit> by this
+      # point, so each file is named for the commit it describes and the
+      # artifact is the record of what that release contained. Generated
+      # after the scan, so an SBOM only ever describes an image that passed
+      # the gate, and before the push, so it describes what is pushed.
+      - name: Software bill of materials for both images
+        run: make sbom
+
+      - name: SBOM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sbom-${{ env.IMAGE_TAG }}
+          path: sbom/*.cdx.json
+          if-no-files-found: error
+          retention-days: 90
 
       # Only reached when every step above succeeded.
       - name: Assume the image-push role through OIDC

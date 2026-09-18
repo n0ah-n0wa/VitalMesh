@@ -99,8 +99,17 @@ jobs:
         env:
           GATEWAY_DIGEST: ${{ inputs.api_gateway_digest }}
           PROCESSOR_DIGEST: ${{ inputs.processor_digest }}
+          COMMIT: ${{ inputs.commit }}
         run: |
           set -euo pipefail
+          # commit is checked here for the same reason as the rest, and
+          # because it is the one input that reaches a shell: every use of it
+          # below goes through $COMMIT rather than an expression, so a value
+          # that is not a bare commit id can never become shell syntax.
+          if ! echo "$COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::commit must be a 40 hex commit id, got '$COMMIT'"
+            exit 1
+          fi
           if ! echo "$IMAGE_TAG" | grep -Eq '^sha-[0-9a-f]{40}$'; then
             echo "::error::image_tag must be sha-<40 hex commit>, got '$IMAGE_TAG'; 'latest' or a branch name is never deployed"
             exit 1
@@ -117,7 +126,9 @@ jobs:
       # running service says the same.
       - name: The released version
         id: version
-        run: echo "version=$(git rev-parse --short "${{ inputs.commit }}")" >> "$GITHUB_OUTPUT"
+        env:
+          COMMIT: ${{ inputs.commit }}
+        run: echo "version=$(git rev-parse --short "$COMMIT")" >> "$GITHUB_OUTPUT"
 
       - name: Assume the ${{ inputs.environment }} deploy role through OIDC
         uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
@@ -375,9 +386,11 @@ jobs:
         if: always()
         env:
           NAMESPACE: ${{ steps.facts.outputs.namespace }}
+          ENVIRONMENT: ${{ inputs.environment }}
+          COMMIT: ${{ inputs.commit }}
         run: |
           {
-            echo "## ${{ inputs.environment }}: ${{ inputs.commit }}"
+            echo "## $ENVIRONMENT: $COMMIT"
             echo
             echo "| | |"
             echo "|---|---|"

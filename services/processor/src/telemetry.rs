@@ -64,6 +64,11 @@ pub fn init(
                     .with_filter(filter),
             )
             .try_init(),
+        // The stock text layer, which does NOT run `redact::record`: that
+        // lives in `JsonFormat::format_event` below. Configuration refuses
+        // this format in staging and production for exactly that reason
+        // (see `Config::load`), so it is reachable only where the data is
+        // synthetic.
         LogFormat::Text => tracing_subscriber::registry()
             .with(traces)
             .with(fmt::layer().with_target(false).with_filter(filter))

@@ -49,3 +49,8 @@ services/api-gateway/coverage.txt
 
 # Go test binaries left behind by -cpuprofile/-memprofile runs.
 *.test
+
+# Software bills of materials, written by make sbom. An SBOM describes one
+# build of one image, so it is an artifact of a run: CI uploads it and the
+# release attaches it, rather than it living in the tree.
+/sbom/
