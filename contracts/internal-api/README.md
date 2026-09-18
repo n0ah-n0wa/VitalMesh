@@ -116,8 +116,8 @@ make contracts-lock   # re-record the fingerprint
 ## Implementation status
 
 - **The processor serves all three endpoints.** Authentication, strict parsing, the body limit, the timeout budget, admission control, the job registry, cancellation and the error envelope are implemented and covered by `services/processor/tests/internal_api.rs`, which drives the production router over a real socket. `services/processor/tests/contract.rs` additionally asserts that every route in this document is served, that nothing outside it is, and that the version the service reports is this document's own.
-- **The gateway has no client yet.** Nothing in the Go service calls these endpoints; that arrives with the vertical slice, along with the live contract test that runs a real client against a real server.
-- **Not yet built:** cancellation (deliberately out of v1, see above), and Prometheus metrics for the processing set, which belong to the observability phase.
+- **The gateway's client is `internal/infra/processorclient`.** It calls `POST /internal/v1/process` on the job path, with bounded retries and the remaining request budget in `X-Request-Timeout-Ms`; `client_contract_test.go` holds it to this document.
+- **Not built:** cancellation, deliberately out of v1 (see above). The processing set *is* instrumented: the processor publishes `vitalmesh_processor_jobs_total`, `job_duration_seconds` and its saturation gauges.
 
 ## Version history
 

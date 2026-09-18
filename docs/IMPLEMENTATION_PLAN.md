@@ -5,6 +5,27 @@
 **Status:** Proposed — awaiting resolution of the blocking items in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md)
 **Authority:** `SPECIFICATIONS.md` v1.0 is authoritative (§114). This plan never overrides it; where the specification is silent or inconsistent the item is recorded in `OPEN_QUESTIONS.md` and resolved by an ADR before implementation.
 
+> ### Read this as history, not as current state
+>
+> This is the **planning pass**, kept as the record of what was intended. The
+> system has since been built through Phase 12, and the delivery diverged from
+> the plan in ways this document does not reflect. For the system as it is:
+> [ARCHITECTURE.md](ARCHITECTURE.md), [DEVELOPMENT.md](DEVELOPMENT.md) and the
+> top-level [README.md](../README.md).
+>
+> Known divergences, so nothing here is read as a description of the tree:
+>
+> | The plan says | What was built |
+> |---|---|
+> | one `cd.yml` | four workflows: `ci.yml`, `release.yml`, `deploy.yml`, `promote.yml` (plus `terraform-plan.yml`) |
+> | `deployments/docker/*.Dockerfile` | `services/*/Dockerfile`, with Compose at the repository root |
+> | `tests/e2e`, `tests/integration`, `tests/chaos` | `services/api-gateway/tests/{e2e,stack}`; `tests/load/` holds k6 only |
+> | `contracts/openapi/vitalmesh-public-v1.yaml` | never written; [API.md](API.md) is the public reference |
+> | `contracts/internal-api/processor-v1.yaml` | `processor-v1.json`, with a fingerprint lock |
+> | `observability/prometheus/alerts.yml` | `observability/prometheus/rules/alerts.yml` |
+> | ADRs under `docs/adr/` resolving each open question first | **no ADR was ever written**; all 38 questions in [OPEN_QUESTIONS.md](OPEN_QUESTIONS.md) are still `OPEN`, and the decisions were taken in code and in the documents that explain it |
+> | `docs/AUDIT.md`, `.github/PULL_REQUEST_TEMPLATE.md`, `nightly.yml`, `security.yml`, `infra.yml` | not created |
+
 Section references of the form `§nn` point to `SPECIFICATIONS.md`.
 
 ---

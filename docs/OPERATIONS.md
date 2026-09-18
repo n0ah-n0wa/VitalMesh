@@ -20,11 +20,11 @@ kept honest" at the end says exactly what that covers.
 Three overlays, each a real target with its own `kustomize` base
 (`infrastructure/kubernetes/overlays/`):
 
-| Overlay | PostgreSQL / Redis | Ingress | Secrets | Replicas (HPA floor) |
+| Overlay | PostgreSQL / Redis | Ingress | Secrets | HPA floor / ceiling |
 |---|---|---|---|---|
-| `local` | in-cluster fixtures (emptyDir) | none | generated, non-secret | 1 |
-| `staging` | managed | TLS ingress | external secret store | 2 |
-| `production` | managed | TLS ingress | external secret store | 2 |
+| `local` | in-cluster fixtures (emptyDir) | none | generated, non-secret | 1 / 2 |
+| `staging` | managed (RDS, ElastiCache) | TLS ingress (ALB) | AWS Secrets Manager | 1 / 3 |
+| `production` | managed (RDS, ElastiCache) | TLS ingress (ALB) | AWS Secrets Manager | 2 / 20 gateway, 2 / 12 processor |
 
 `staging` and `production` reach for managed data services and a secret
 manager, so they cannot be stood up on a developer's machine. The resilience
@@ -170,7 +170,16 @@ repeat re-runs rather than duplicates.
 
 ### Deploy a new version
 
-A deploy is a rolling update; the manifests are applied server-side.
+**In staging and production, do not deploy by hand.** `main` releases itself:
+CI, then `release.yml` builds and scans the images, pushes them to ECR by
+digest, deploys staging, and runs smoke and end-to-end against it. Production
+is a separate manually dispatched promotion of a release that already passed
+staging, gated on a reviewer. The commands and the gates are in
+[DEPLOYMENT.md](DEPLOYMENT.md); nothing below replaces them.
+
+The manual sequence here is for a **local or test cluster**, and for the case
+where the pipeline itself is broken. A deploy is a rolling update; the
+manifests are applied server-side.
 
 ```sh
 kubectl -n <ns> apply --server-side --force-conflicts -f <rendered overlay>
@@ -189,14 +198,122 @@ unpullable placeholder tag that an overlay must override).
 
 ### Roll back
 
+**The rollback is a deployment of an earlier release, not an undo.** The full
+procedure, the verification commands and the limits on how far back you can
+go are in [ROLLBACK.md](ROLLBACK.md), which also records the rehearsal that
+exercises them. In production it is a promotion of the last good release; the
+commit and both image digests come from that release's record, so the
+Kubernetes manifests are restored along with the images.
+
+`kubectl rollout undo` is the **emergency stop**, for when the pipeline
+itself is the problem:
+
 ```sh
 kubectl -n <ns> rollout undo deployment/vitalmesh-api-gateway
+kubectl -n <ns> rollout undo deployment/vitalmesh-processor
 kubectl -n <ns> rollout status deployment/vitalmesh-api-gateway --timeout=180s
+kubectl -n <ns> rollout status deployment/vitalmesh-processor  --timeout=180s
 ```
 
-The database is the system of record and migrations are expand/contract
-across two releases (see DATABASE.md), so a code rollback does not need a
-schema rollback: the previous version runs against the current schema.
+Roll both services back together: they are released together, and a gateway
+from one commit against a processor from another is a combination nothing has
+tested.
+
+**What `rollout undo` does not restore, and this is the trap.** It restores
+the pod template and nothing else. The ConfigMaps here are named objects
+rather than generated ones with a content hash, and the pods read them with
+`envFrom`, so a restored pod template points at the same ConfigMap *name* and
+picks up whatever it holds now — the configuration of the release you are
+rolling back *from*. The rehearsal measures this: after an undo, the gateway
+ran the previous image while using the new release's configuration, a pairing
+neither release produced. It also reaches back only five revisions
+(`revisionHistoryLimit`), and what it reaches back to is ReplicaSet history in
+the cluster rather than an artifact, so a rebuilt cluster has none of it.
+
+Use it to stop the bleeding, then redeploy a release properly so the
+environment's state is one a run explains.
+
+**The database is not rolled back either.** It is the system of record and
+migrations are forward-only; each one must keep the previous version working,
+which an integration test enforces migration by migration (see
+[DATABASE.md](DATABASE.md)). So the previous code runs against the current
+schema, which is safe for as long as no migration has declared a breaking
+change — today none has.
+
+### Inspect what a service is doing
+
+Three signals, and one honest gap.
+
+**Logs.** Structured JSON, one line per event, on stdout. Every request line
+carries `request_id`, `trace_id`, `method`, `route`, `status` and
+`duration_ms`; `route` is the matched pattern, never the path.
+
+```sh
+kubectl -n <ns> logs -l app.kubernetes.io/name=api-gateway --tail=200 -f
+kubectl -n <ns> logs -l app.kubernetes.io/name=api-gateway --tail=500 |
+  jq -r 'select(.status >= 500) | "\(.timestamp) \(.route) \(.status) \(.request_id)"'
+kubectl -n <ns> logs -l app.kubernetes.io/name=processor --tail=200 |
+  jq -r 'select(.trace_id == "<trace id>")'
+```
+
+Take a `trace_id` from a gateway line and grep the processor's logs for the
+same value to follow one request across both services. Credentials, tokens,
+hashes and reading values never appear; redaction is applied where logs exit,
+so it cannot be forgotten at a call site.
+
+**Metrics.** Both services expose Prometheus at `/metrics`, unauthenticated
+but restricted at the network to a `monitoring` namespace. A port-forward
+reaches it from a workstation:
+
+```sh
+kubectl -n <ns> port-forward deploy/vitalmesh-api-gateway 8080:8080
+curl -s localhost:8080/metrics | grep -E '^vitalmesh_(build_info|database_schema_version)'
+curl -s localhost:8080/metrics | grep '^vitalmesh_http_errors_total'
+```
+
+`vitalmesh_build_info` says which build is answering, and
+`vitalmesh_database_schema_version` which migration version it read at
+start-up. During a rollout, two replicas reporting different values is the
+signal that a migration landed between their starts.
+
+**Traces.** Both services propagate W3C trace context and export OTLP when
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. **Nothing collects them in a deployed
+environment today** — there is no collector, Prometheus or Alertmanager in the
+manifests or in Terraform (see PRODUCTION_READINESS.md, the P1 blocker). So in
+staging and production the trace id in the logs is what you have; a browsable
+trace exists only in the local compose stack, where a collector runs. Export
+to an unreachable endpoint degrades silently and never affects a request.
+
+### Troubleshoot a failing rollout
+
+`maxUnavailable: 0` means a rollout that cannot bring a pod to Ready stalls
+rather than dropping capacity: the old pods keep serving, so this is safe but
+must be investigated.
+
+```sh
+kubectl -n <ns> rollout status deployment/vitalmesh-api-gateway --timeout=60s
+kubectl -n <ns> get pods -l app.kubernetes.io/name=api-gateway
+kubectl -n <ns> describe pod <pod> | tail -30        # Events say why
+kubectl -n <ns> logs <pod> --previous --tail=100      # the crashed container
+```
+
+| Symptom | Usual cause |
+|---|---|
+| `ImagePullBackOff` | the overlay did not override the base's unpullable placeholder tag, or the digest is not in the registry |
+| `CreateContainerConfigError` | a `secretKeyRef` names a key the Secret does not have |
+| Ready never true, no restarts | readiness is 503: the gateway cannot reach PostgreSQL. Check the database, not the pod |
+| `CrashLoopBackOff` on start | configuration rejected at start-up; the first log line says which variable |
+| Rollout stalls with the old pods healthy | the new ReplicaSet cannot schedule: check quota, `describe` the pending pod |
+
+The migration Job is a separate failure: it runs before the rollout, and a
+failure leaves the schema version marked **dirty**, so later attempts refuse
+rather than retry. Clearing it is a manual step against a schema that was
+never modified:
+
+```sh
+kubectl -n <ns> logs job/vitalmesh-migrate --tail=50
+kubectl -n <ns> exec deploy/vitalmesh-api-gateway -- api-gateway migrate force <previous version>
+```
 
 ### Drain a node for maintenance
 

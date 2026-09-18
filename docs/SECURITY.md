@@ -19,12 +19,14 @@ make deps-scan     # trivy on the lock files + govulncheck on the Go call graph
 make secret-scan   # gitleaks over the whole git history and the working tree
 make docker-scan   # trivy on both images and both service Dockerfiles
 make sbom          # a CycloneDX bill of materials per image
-make k8s-validate  # kubeconform, kube-linter, trivy, checkov over every overlay
-make tf-validate   # terraform fmt/validate, trivy, checkov over every root
+make k8s-validate  # kustomize, kubeconform, kube-linter, trivy, checkov over the base and every overlay
+make tf-validate   # terraform fmt, validate, test (against a mocked AWS), trivy, checkov over every root
 make policy-check  # the gates still block what this document says they block
 ```
 
-All nine run in CI. `make ci-local` runs them together with the test suites.
+All nine run in CI, `deps-verify` as its two per-language halves
+(`deps-verify-go` in the `go` job, `deps-verify-rust` in the `rust` job).
+`make ci-local` runs them together with the test suites.
 
 ## What was reviewed, and the verdict
 
@@ -38,15 +40,15 @@ All nine run in CI. `make ci-local` runs them together with the test suites.
 | **Request size limits** | sound | A declared `Content-Length` over the limit is refused before a byte is read, and the body is wrapped in `MaxBytesReader` so a lying header is caught too. The processor applies its own body limit and refuses an oversized job before parsing |
 | **Rate limiting** | sound | Authenticated callers are counted by user id, so changing address does not buy a fresh budget. Anonymous callers are counted by address, and `X-Forwarded-For` is consulted **only** for as many hops as are configured to be trusted, counting from the right — the default is zero, which ignores the header entirely. A caller that writes their own header entries cannot shift the index onto one of them |
 | **Idempotency** | sound | The claim is a unique insert in PostgreSQL, so two identical requests serialise there whether or not Redis is reachable; Redis only adds a fast in-progress refusal. The key is scoped to account, method and path; a different body under the same key is refused; a 5xx or a panic releases the claim so a legitimate retry can run |
-| **SQL** | sound | Every query is parameterised. The only string concatenation in the data layer is a package-level constant column list; no user-controlled value is ever formatted into a statement. Verified by scanning every `Query`/`QueryRow`/`Exec` call site |
+| **SQL** | sound | Every query is parameterised. Column lists are package-level constants, and the one statement assembled at run time (`ListByPatient`) appends fixed predicate fragments with generated `$n` placeholders; no user-controlled value is ever formatted into a statement. Verified by scanning every `Query`/`QueryRow`/`Exec` call site |
 | **Redis** | sound | TLS (`rediss://`) is required in staging and production, refused at startup otherwise; one attempt per call with a short timeout; every dependent feature degrades rather than failing the request; commands are metered by name, never by key |
 | **Service-to-service** | sound | The processor requires a bearer credential, compares it in **constant time**, and answers identically whether the credential was absent, malformed or wrong. A deployment without the credential refuses to start. The gateway never repeats the processor's own error text to a client |
 | **Logs** | **one fix** | Redaction is applied at the exit — a `ReplaceAttr` hook in Go, the event formatter in Rust — so it cannot be forgotten at a call site. Names and suffixes are matched, JWT shapes scrubbed and values bounded. See the fix below |
-| **Metrics** | sound | Cardinality is a property of the port, not of its callers: no metric method accepts a free-form value. HTTP methods are folded to a closed set, routes are patterns rather than paths, SQL becomes a leading verb. No patient id, user id, request id or trace id can reach a label |
+| **Metrics** | sound | The HTTP method is folded to a closed set inside the recorder; routes are the patterns the router matched rather than paths, and SQL is reduced to its leading verb at the call site. No port takes a key or an identifier, and the remaining labels are bounded by a convention documented on the interface. No patient id, user id, request id or trace id can reach a label |
 | **Traces** | sound | Span attributes carry the route pattern, not the path; the processor's address without a path; database system and operation, never the statement. The Go attribute setter renders an unrecognised type as `<type>` rather than serialising it, so a struct holding a payload structurally cannot reach a span |
 | **Secrets** | sound | A `Secret` type in both services refuses to render itself through every common path (`String`, `GoString`, `LogValue`, `MarshalText` in Go; `Debug`/`Display` in Rust). No secret is a Terraform variable or in state — they are ephemeral resources with write-only arguments. Kubernetes ships shape-only placeholders that the deployed component deletes, so an empty object cannot overwrite a live credential |
 | **Docker** | sound | Both service images pin their bases **by digest** at every stage, run as an explicit non-root uid, are distroless with no shell and no package manager, carry no build secret, and are checked as *running containers* by `make docker-verify` rather than by reading the Dockerfile |
-| **Kubernetes** | sound | Pod Security `restricted` enforced at the namespace, so the pod-level security contexts are backed by admission rather than being a promise; `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `drop: [ALL]`, `seccompProfile` on every container; `automountServiceAccountToken: false` in three places including the namespace's `default` account; RBAC is `rules: []` for both services; NetworkPolicy default-deny with link-local excluded from every egress rule, blocking instance-metadata access |
+| **Kubernetes** | sound | Pod Security `restricted` enforced at the namespace, so the pod-level security contexts are backed by admission rather than being a promise; `runAsNonRoot`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `drop: [ALL]`, `seccompProfile` on every container; `automountServiceAccountToken: false` on both ServiceAccounts, on every pod spec and on the namespace's `default` account; RBAC is `rules: []` for both services; NetworkPolicy default-deny with link-local excluded from every egress rule, blocking instance-metadata access |
 | **Terraform** | sound | Verified directly: RDS is `publicly_accessible = false`, `storage_encrypted = true`, with `rds.force_ssl` and a TLS 1.2 floor; every S3 bucket has the full public-access block; no security group admits `0.0.0.0/0`; IMDSv2 is `required` with a hop limit of 1, so a pod cannot read node credentials |
 | **GitHub Actions** | **one fix** | Every third-party action is pinned to a full commit SHA; top-level `permissions: {}` in all five workflows with each job raising only what it needs; `persist-credentials: false` on every checkout; no `pull_request_target`. See the fix below |
 
@@ -147,10 +149,10 @@ flag away from passing everything.
 
 | Finding | Scanner | Threshold | Blocks |
 |---|---|---|---|
-| Vulnerability in an image (OS package or the Go binary's modules) | trivy image | HIGH, CRITICAL | yes |
+| Vulnerability, embedded secret or misconfiguration in an image | trivy image (`--scanners vuln,secret,misconfig`) | HIGH, CRITICAL | yes |
 | Vulnerability in a lockfile (`go.sum`, `Cargo.lock`) | trivy fs | HIGH, CRITICAL | yes |
 | **Reachable** vulnerability in Go code | govulncheck | any severity | yes |
-| Weakness in this repository's own Go code | gosec | MEDIUM and above | yes |
+| Weakness in this repository's own Go code | gosec | MEDIUM severity and above, at MEDIUM confidence and above | yes |
 | Secret, in the working tree or anywhere in history | gitleaks | any | yes |
 | Dockerfile, Kubernetes or Terraform misconfiguration | trivy config, checkov, kube-linter | HIGH and CRITICAL for trivy; any failed check for checkov and kube-linter | yes |
 | Lockfile drift, or a module that no longer hashes to `go.sum` | `go mod verify`, `go mod tidy -diff`, `cargo --locked` | any | yes |
@@ -164,12 +166,17 @@ Two thresholds are deliberately stricter than a severity number:
   code. Reachable is the useful signal: a reachable LOW is more actionable
   than an unreachable CRITICAL.
 - **gosec blocks at MEDIUM**, because this is code we wrote and can fix,
-  rather than a transitive dependency we can only upgrade.
+  rather than a transitive dependency we can only upgrade. It is also
+  filtered to MEDIUM confidence and above (`-confidence=medium`), so a
+  high-severity guess does not block; that filter is a deliberate trade and
+  `make policy-check` asserts only the severity half of it.
 
 ### An unfixed vulnerability still blocks
 
-There is no `--ignore-unfixed` anywhere, and `make policy-check` fails if
-one appears. A HIGH with no patch available stops a release, which is the
+There is no `--ignore-unfixed` anywhere. `make policy-check` fails if one
+appears **in the Makefile**; trivy is also invoked from
+`scripts/k8s-validate.sh` and `scripts/tf-validate.sh`, which that check
+does not read. A HIGH with no patch available stops a release, which is the
 intended behaviour: shipping anyway is a decision someone should have to
 make and record, not one a flag makes silently for every finding at once.
 
@@ -198,7 +205,7 @@ rejected by the gate rather than noticed in production.
 What Dependabot cannot see is recorded in `.github/dependabot.yml` and in
 docs/DEVELOPMENT.md: the tool images named by tag in the Makefile and the
 validation scripts (trivy, checkov, gitleaks, kustomize, kubeconform,
-kube-linter, terraform, yq) and the pinned Go tools (gosec, govulncheck),
+kube-linter, terraform, yq). The pinned Go tools (gosec, govulncheck) are Makefile variables that Dependabot does not see and are recorded in docs/DEVELOPMENT.md,
 plus the Helm charts under `infrastructure/kubernetes/platform`. These are
 reviewed by hand each quarter: bump the pin, run `make ci-local`, and triage
 what the newer scanner finds. A scanner update that surfaces a real finding
@@ -252,10 +259,29 @@ Each of these is a finding that is wrong about this repository, or right in
 general and deliberately not acted on here. None is silenced to make a gate
 pass.
 
+Suppressions live in four configuration files plus inline annotations:
+
+| File | Holds |
+|---|---|
+| `infrastructure/kubernetes/.trivyignore.yaml` | trivy rule ignores, scoped per rendered file, each with a `statement:` |
+| `infrastructure/kubernetes/.checkov.yaml` | checkov `skip-check` for the manifests |
+| `infrastructure/kubernetes/.kube-linter.yaml` | kube-linter `exclude` list |
+| `infrastructure/terraform/.checkov.yaml` | one framework-wide checkov skip |
+| inline | `#nosec` in Go, `#checkov:skip` and `#trivy:ignore` in Terraform |
+
+**What `make policy-check` actually enforces**, so the rest is understood to
+be reviewed by hand rather than by a gate: every `#nosec` under
+`services/api-gateway` carries a reason; every `- id:` in the Kubernetes
+`.trivyignore.yaml` has a matching `statement:`; every `#checkov:skip` under
+`infrastructure/terraform` carries a reason. It does **not** check the
+inline `#trivy:ignore` annotations, the `skip-check` lists in either
+`.checkov.yaml`, or the `exclude` list in `.kube-linter.yaml`.
+
 ### gosec — 12 inline annotations, each with its reason
 
-Every one is in developer tooling or is intentional by design; none is on a
-request-serving path.
+Ten are in developer tooling. Two are on the authentication path and are
+intentional by design: a bounded integer conversion inside the Argon2id hash
+parser, which runs on every sign-in, and an error-code constant.
 
 | Rule | Where | Why |
 |---|---|---|
@@ -264,7 +290,8 @@ request-serving path.
 | G115 (integer conversion) | `config.go` `uint8(parallelism)` | The value is bounded to `MaxPasswordHashThreads` (64) on the line above, well inside `uint8`. Verified, not assumed |
 | G115 | `generate.go` `uint64(seed)` | A bit-pattern conversion of the fixture seed into HMAC key material; every `int64` maps to a distinct `uint64` |
 | G404 (weak randomness) | `generate.go` `rand.NewPCG` | Deliberately deterministic: a synthetic fixture must be reproducible from its seed. Nothing it generates is a secret, and the loader refuses to run against production |
-| G101 | the `INVALID_CREDENTIALS` error-code constant | An error code, not a credential. Matched on the word in the name |
+| G115 | `password.go` `parseHash` `uint32(len(p.key))` | The key length is bounded to `[minKeyLength, maxKeyLength]` on the line above. On the sign-in path |
+| G101 | the `INVALID_CREDENTIALS` error-code constant | An error code, not a credential. Matched on the word in the name. In the auth package, though it is only a constant |
 
 ### Kubernetes scanners
 
@@ -285,6 +312,13 @@ request-serving path.
   application change, not a manifest one: neither service can read a secret
   from a file today. Recorded as owed work against the services'
   configuration layers.
+- **kube-linter** additionally excludes six checks in
+  `.kube-linter.yaml`, each with its reason in that file:
+  `minimum-three-replicas` and `hpa-minimum-three-replicas` (the floor is
+  two in production and one in staging, which is a sizing decision),
+  `required-label-owner` and `required-annotation-email` (this repository
+  has no owner registry), `no-node-affinity` (spreading is done with
+  `topologySpreadConstraints`) and `dnsconfig-options`.
 - **checkov CKV_K8S_43** (use a digest) — the stricter identifier, and
   SPECIFICATIONS.md section 32 is the authority, asking for an immutable
   identifier and recommending `service:<git-sha>`, which the pipeline sets.
@@ -294,12 +328,31 @@ request-serving path.
 ### Terraform
 
 Every `#checkov:skip` sits inside the resource it applies to with its reason
-attached. They fall into three groups: KMS **key** policies, where a
-resource wildcard means "this key" and the statement is AWS's own default
-delegation to IAM; the S3 access-log bucket, which AWS will only deliver
-into when it is encrypted with S3-managed keys and which should not log its
-own log deliveries; and absent cross-region replication, which is a
-compliance need this project does not have.
+attached, and there are about forty of them across a dozen rule families.
+[infrastructure/terraform/README.md](../infrastructure/terraform/README.md)
+carries the authoritative group-by-group account; the summary is:
+
+| Group | Example | Why |
+|---|---|---|
+| KMS **key** policies | `CKV_AWS_109`, `CKV_AWS_111` | a resource wildcard means "this key"; the statement is AWS's own default delegation to IAM |
+| S3 access-log bucket | `CKV_AWS_145` | AWS delivers logs only into a bucket encrypted with S3-managed keys, and it should not log its own deliveries |
+| Cross-region replication | `CKV_AWS_144` | a compliance need this project does not have; the recovery target is stated as none |
+| EKS public endpoint | `CKV_AWS_38`, `CKV_AWS_39` | the API endpoint is reachable, restricted to a validated CIDR list that refuses `0.0.0.0/0` and refuses to be empty |
+| Per-environment durability | `CKV_AWS_157`, `CKV_AWS_293`, `CKV_AWS_118`, `CKV_AWS_353` | Multi-AZ, deletion protection, enhanced monitoring and Performance Insights are set in production and deliberately not in staging |
+| Secret rotation | `CKV2_AWS_57` | secrets are rotated by Terraform rather than on a Secrets Manager timer |
+| IAM wildcards scoped by condition | `CKV_AWS_356` | the cluster autoscaler's `Resource: "*"` is narrowed by a tag condition |
+| Graph blind spots | `CKV2_AWS_5`, `CKV2_AWS_62`, `CKV2_AWS_10` | attachments and deliveries checkov's graph does not follow |
+
+One skip is **framework-wide** rather than inline:
+`infrastructure/terraform/.checkov.yaml` skips `CKV_AWS_338` (one year of log
+retention) because retention is set per environment (14 days staging, 365
+production); `CKV_AWS_66` stays on.
+
+**trivy inline ignores.** Six `#trivy:ignore` annotations exist, in
+`bootstrap/logging.tf`, `modules/eks/main.tf` and `modules/rds/main.tf`.
+Each has its argument in a comment above it rather than on the annotation
+line, and unlike the checkov skips, **nothing machine-checks that they carry
+a reason.**
 
 ### Accepted LOW risks, not changed
 

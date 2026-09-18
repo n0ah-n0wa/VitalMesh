@@ -254,7 +254,7 @@ string in the build history or the image environment.
 
 ## Observability hooks
 
-- **Metrics** (`observability/metrics.Recorder`): `middleware.Metrics` records every request as method, matched route pattern, status and duration; services record each operation with a closed outcome vocabulary (`ok`, `invalid`, `not_found`, `conflict`, `denied`, `error`, `cancelled`). Route patterns come from the router, never from request paths, so labels stay bounded and identifiers never become labels (SPECIFICATIONS.md section 41). `Noop` is wired until the observability phase binds Prometheus.
+- **Metrics** (`observability/metrics.Recorder`): `middleware.Metrics` records every request as method, matched route pattern, status and duration; services record each operation with a closed outcome vocabulary (`ok`, `invalid`, `not_found`, `conflict`, `denied`, `error`, `cancelled`). Route patterns come from the router, never from request paths, so labels stay bounded and identifiers never become labels (SPECIFICATIONS.md section 41). `app.New` wires the Prometheus recorder and serves the exposition at `/metrics`; `Noop` remains for tests that record nothing.
 - **Metrics endpoint**: `GET /metrics` serves the Prometheus exposition, unversioned and unauthenticated like the health probes, because it serves the platform's scraper rather than clients. It carries no identifiers by construction; deployments restrict it at the network.
 - **Tracing** (`observability/tracing`): OpenTelemetry, with W3C trace context in and out. A request's trace covers the gateway's own span, every PostgreSQL statement, every Redis command, each service operation, and the call to the processor, which continues the same trace on its side.
 

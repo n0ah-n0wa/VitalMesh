@@ -68,8 +68,8 @@ and `make tf-validate` asserts the properties below on every change
 |---|---|---|---|
 | `vitalmesh-terraform-plan` | pull requests; `main` | `ReadOnlyAccess`; read Terraform state; write the state lock (`*.tflock`); use the state key | read log contents, secret values, S3 objects outside the state bucket, image layers, private SSM parameters, or decrypt with any other key (explicit denies); change anything |
 | `vitalmesh-ecr-push` | `main` only | push to the two `vitalmesh/*` repositories | delete images, change repositories, push anywhere else |
-| `vitalmesh-staging-deploy` | the `staging` environment only | describe its cluster; read `/vitalmesh/staging/deploy` (SSM) and staging's three secrets; resolve image digests; administer the `vitalmesh-staging` namespace | read state; push images; anything in production; any write to AWS |
-| `vitalmesh-production-deploy` | the `production` environment only | the same, for production | the same, plus anything in staging |
+| `vitalmesh-staging-deploy` | the `staging` environment only | describe its cluster; read `/vitalmesh/staging/deploy` (SSM) and staging's four secrets (the application secret, the Redis auth token, the RDS master credential, and the end-to-end account's, the last only because staging sets `create_e2e_account`); resolve image digests; administer the `vitalmesh-staging` namespace | read state; push images; anything in production; any write to AWS |
+| `vitalmesh-production-deploy` | the `production` environment only | the same, for production, with three secrets: production creates no end-to-end account | the same, plus anything in staging |
 
 The deploy roles' Kubernetes rights are EKS access entries scoped to one
 namespace (`modules/eks/access.tf`). The Namespace itself, its
@@ -81,16 +81,18 @@ Where the roles are used:
 
 | Workflow | Role | When |
 |---|---|---|
-| `terraform-plan.yml` | plan | pull requests and pushes to `main` touching `infrastructure/terraform/` |
-| `release.yml`, job `images` | ecr-push | every CI run that succeeds on `main`, for the commit that run tested; or a manual dispatch from `main` |
+| `terraform-plan.yml` | plan | pull requests and pushes to `main` touching `infrastructure/terraform/` or the workflow file itself; also a manual dispatch, refused off `main` |
+| `release.yml`, job `images` | ecr-push | every CI run **started by a push** to `main` **in this repository** that succeeded, for the commit that run tested; or a manual dispatch from `main`. The `push` and same-repository conditions are what exclude a fork's pull request, whose CI run also reports a head branch called `main` |
 | `release.yml` → `deploy.yml`, staging | staging-deploy | after the images, automatically; the E2E job uses the same role to read the test account's secret |
 | `promote.yml` → `deploy.yml`, production | production-deploy | a manual dispatch with a Release run ID, after the production reviewers approve; docs/DEPLOYMENT.md, "Production" |
 
 ## Repository variables
 
 Settings → Secrets and variables → Actions → **Variables** (not Secrets:
-none of these is one). Until `AWS_ACCOUNT_ID` is set, the AWS workflows
-skip themselves with a notice; CI (`ci.yml`) never needs AWS.
+none of these is one). Until `AWS_ACCOUNT_ID` is set, `release.yml` and
+`terraform-plan.yml` skip themselves with a notice; CI (`ci.yml`) never
+needs AWS. `promote.yml` has no such guard: dispatched without the
+variable it runs its verification and then fails at the role assumption.
 
 | Variable | Value | From |
 |---|---|---|
@@ -135,9 +137,11 @@ production role accepts.
 | Environment secrets / variables | none | none |
 
 Required reviewers on `production` are what "production protection"
-means here: the `deploy-production` job of `promote.yml` declares
-`environment: production` and pauses until someone other than the person
-who dispatched it approves it on the run's page, and the OIDC token for
+means here: the `deploy-production` job of `promote.yml` calls `deploy.yml`
+with `environment: production`, and the called `deploy` job declares
+`environment: ${{ inputs.environment }}`. That declaration is what pauses
+the run until someone other than the person who dispatched it approves it
+on the run's page, and the OIDC token for
 the production role is not issued until then. Rejecting the review
 cancels the run. The run summary the reviewer sees names the commit and
 the digests that would be deployed and what staging ran on them. The
@@ -178,7 +182,7 @@ authentication design.
 | Setting | Value |
 |---|---|
 | Require a pull request before merging | on, 1 approving review, dismiss stale approvals |
-| Require status checks to pass | on; required check: **`ci`** (the verdict job in `ci.yml`, which fails unless all ten jobs passed); require branches to be up to date |
+| Require status checks to pass | on; required check: **`ci`** (the verdict job in `ci.yml`, which fails unless all eleven jobs passed); require branches to be up to date |
 | Require conversation resolution | on |
 | Require linear history | on |
 | Do not allow bypassing the above settings | on (applies to administrators) |
@@ -241,7 +245,7 @@ Settings → Actions → General:
    second account. Try it wrong, once: dispatch with the ID of a run that
    failed staging, and watch `verify` refuse it for want of a release
    record.
-4. Try it wrong, once: dispatch **Terraform plan** from a branch other
+5. Try it wrong, once: dispatch **Terraform plan** from a branch other
    than `main`. STS refuses with `Not authorized to perform
    sts:AssumeRoleWithWebIdentity`, which is the trust policy working.
 

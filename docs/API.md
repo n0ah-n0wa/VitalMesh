@@ -1,6 +1,14 @@
-# API conventions
+# API reference
 
-This document describes the conventions every VitalMesh public endpoint follows. The endpoint catalogue itself lives in the OpenAPI contract under `contracts/openapi/` (not yet written; see `IMPLEMENTATION_PLAN.md`, Phase 1). Nothing here is medical: all data is synthetic and all results are technical data-processing outputs (SPECIFICATIONS.md sections 1 and 3).
+**This document is the API reference.** It describes the conventions every
+public endpoint follows and then each endpoint in turn. There is no OpenAPI
+document for the public API: `contracts/openapi/` holds a placeholder README
+and nothing else, so this file is the catalogue rather than a companion to
+one. (The *internal* gateway-to-processor API does have a contract, with a
+fingerprint lock and tests on both sides: `contracts/internal-api/`.)
+
+Nothing here is medical: all data is synthetic and all results are technical
+data-processing outputs (SPECIFICATIONS.md sections 1 and 3).
 
 ## Versioning
 
@@ -93,19 +101,30 @@ Content-Type: application/json
 
 Every account has exactly one role: `ADMIN`, `OPERATOR` or `USER` (SPECIFICATIONS.md section 9.1). The role is carried in the access token and decides which operations the account may perform. Decisions are made by the server on every request from the verified token alone; nothing a client sends besides the token (headers, body fields, query parameters) can widen them.
 
-| Capability | Operations | ADMIN | OPERATOR | USER |
-|---|---|---|---|---|
-| Manage users and roles | `POST /users`, `GET /users`, `GET /users/{user_id}`, `PATCH /users/{user_id}/role` | yes | no | no |
-| Create and delete patients | `POST /patients`, `DELETE /patients/{patient_id}` | yes | yes | no |
-| Read patients | `GET /patients`, `GET /patients/{patient_id}` | yes | yes | yes |
-| Create and delete measurements | `POST /measurements`, `POST /measurements/batch`, `DELETE /measurements/{measurement_id}` | yes | yes | no |
-| Read measurements | `GET /measurements/{measurement_id}`, `GET /patients/{patient_id}/measurements` | yes | yes | yes |
-| Create and cancel processing jobs | `POST /processing/jobs`, `POST /processing/jobs/{job_id}/cancel` | yes | yes | no |
-| Read jobs and results | `GET /processing/jobs/{job_id}`, `GET /patients/{patient_id}/processing-results` | yes | yes | yes |
-| Own session | `GET /auth/me` | yes | yes | yes |
-| Log in | `POST /auth/login` | anyone | anyone | anyone |
+The **Served** column is the one to read first: a rule may exist for an operation that has no handler yet, and such an operation answers `404` for everyone regardless of role.
 
-Roles nest: every operation an `OPERATOR` may perform is available to an `ADMIN`, and every `USER` operation to an `OPERATOR`. Operations are listed here before they are implemented; an unimplemented operation answers `404` for everyone.
+| Capability | Operations | Served | ADMIN | OPERATOR | USER |
+|---|---|---|---|---|---|
+| Create and delete patients | `POST /patients`, `DELETE /patients/{patient_id}` | yes | yes | yes | no |
+| Read patients | `GET /patients`, `GET /patients/{patient_id}` | yes | yes | yes | yes |
+| Create and delete measurements | `POST /measurements`, `POST /measurements/batch`, `DELETE /measurements/{measurement_id}` | yes | yes | yes | no |
+| Read measurements | `GET /measurements/{measurement_id}`, `GET /patients/{patient_id}/measurements` | yes | yes | yes | yes |
+| Create processing jobs | `POST /processing/jobs` | yes | yes | yes | no |
+| Read jobs and results | `GET /processing/jobs/{job_id}`, `GET /patients/{patient_id}/processing-results` | yes | yes | yes | yes |
+| Own session | `GET /auth/me` | yes | yes | yes | yes |
+| Log in | `POST /auth/login` | yes | anyone | anyone | anyone |
+| Manage users and roles | `POST /users`, `GET /users`, `GET /users/{user_id}`, `PATCH /users/{user_id}/role` | **no** | yes | no | no |
+| Cancel a processing job | `POST /processing/jobs/{job_id}/cancel` | **no** | yes | yes | no |
+
+Roles nest: every operation an `OPERATOR` may perform is available to an `ADMIN`, and every `USER` operation to an `OPERATOR`.
+
+The two unserved rows have authorization rules in `internal/authz/routes.go` but no handler in `internal/httpapi/handler.go`, so no route is registered for them. Accounts are created instead with the gateway's own command, which has no HTTP equivalent:
+
+```sh
+printf '%s\n' "$PASSWORD" | api-gateway users create <email> <ADMIN|OPERATOR|USER>
+```
+
+Job cancellation is deliberately absent from the internal contract's v1 as well (OPEN_QUESTIONS OQ-06); `CANCELLED` remains a reachable job state because the processor's own shutdown can produce it.
 
 Outcomes, in the order they are checked:
 

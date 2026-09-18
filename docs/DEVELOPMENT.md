@@ -77,15 +77,15 @@ service containers, and caches. Nothing it checks is CI-only.
 
 | CI job | Runs | What it needs |
 |---|---|---|
-| `go` | `make setup-go format-check-go lint-go test-go` | Go |
-| `rust` | `make setup-rust format-check-rust lint-rust test-rust` | Rust |
+| `go` | `make setup-go deps-verify-go format-check-go lint-go sast test-go` | Go |
+| `rust` | `make setup-rust deps-verify-rust format-check-rust lint-rust test-rust` | Rust |
 | `contracts` | `make contracts-check` | Go and Rust |
 | `integration` | `make test-go integration-test-postgres integration-test-redis e2e-test coverage-go` | Go, Rust, PostgreSQL and Redis (`make dev-db dev-redis`) |
 | `build` | `make build release-metadata line-endings` | Go, Rust, git |
-| `containers` | `make docker-build docker-verify docker-scan` | Docker |
+| `containers` | `make docker-build docker-verify docker-scan sbom db-restore-test` | Docker |
 | `stack end-to-end` | `make stack-test` | Docker and Go (see [The stack suite](#the-stack-suite)) |
 | `dependency scan` | `make deps-scan` | Docker (trivy) and Go (govulncheck) |
-| `secret scan` | `make secret-scan` | Docker (gitleaks), the full git history |
+| `secret scan` | `make secret-scan policy-check` | Docker (gitleaks), the full git history |
 | `kubernetes manifests` | `make k8s-validate` | Docker |
 | `terraform` | `make tf-validate` | Docker |
 
@@ -157,10 +157,10 @@ lock file is a real finding, not flakiness); or the git history, which
 `secret-scan` reads in full and a shallow clone lacks.
 
 **Pins outside Dependabot's reach**, to review each quarter: the tool
-images in the Makefile (`TRIVY_IMAGE`, `GITLEAKS_IMAGE`, `GOVULNCHECK`)
-and in `scripts/k8s-validate.sh`, `scripts/tf-validate.sh` and
-`.github/workflows/deploy.yml` (kustomize, kubeconform, kube-linter,
-checkov, terraform, yq, actionlint), and the Helm charts in
+images and tools in the Makefile (`TRIVY_IMAGE`, `GITLEAKS_IMAGE`,
+`GOVULNCHECK`, `GOSEC`) and in `scripts/k8s-validate.sh`,
+`scripts/tf-validate.sh` and `.github/workflows/deploy.yml` (kustomize,
+kubeconform, kube-linter, checkov, terraform, yq), and the Helm charts in
 `infrastructure/kubernetes/platform`. Bump the pin, run `make ci-local`,
 triage anything new: a scanner update that surfaces a real finding is
 the update doing its job. `GOVULNCHECK` runs through `go run`, so the
@@ -398,6 +398,7 @@ it lives behind a compose profile and no gate touches it.
 ```bash
 make observability-up      # Prometheus :9090, Grafana :3000, collector :4318
 make observability-smoke   # asserts it is actually observing something
+make observability-down    # stop the three, leaving both services running
 ```
 
 Grafana needs no login locally and opens on four provisioned dashboards:
@@ -464,4 +465,18 @@ The gateway's full configuration surface, package layout and layering rules are 
 
 ## Repository layout
 
-See the structure table in the top-level [README.md](../README.md). Directories that are not yet populated contain a short `README.md` stating what will live there and which phase of [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md) delivers it.
+See the structure table in the top-level [README.md](../README.md), and
+[ARCHITECTURE.md](ARCHITECTURE.md) for how the parts fit together.
+
+Three directories still carry a placeholder `README.md` that says "not yet
+populated". Do not read them as current: the work they describe landed
+elsewhere, and the placeholders have not been retired.
+
+| Directory | What its README says | Where the work actually is |
+|---|---|---|
+| `deployments/` | Dockerfiles and Compose arrive later | `services/*/Dockerfile` and the root `docker-compose.yml` |
+| `tests/` | cross-service suites arrive later | `services/api-gateway/tests/{e2e,stack}` and `tests/load/` for k6 |
+| `contracts/openapi/` | the public contract arrives later | still true: there is no public OpenAPI document; [API.md](API.md) is the reference |
+
+`contracts/internal-api/README.md` also still says the gateway has no client
+for the internal API. It has: `internal/infra/processorclient`.

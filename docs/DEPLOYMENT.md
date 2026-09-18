@@ -20,7 +20,8 @@ staging is promoted to production, by a person, behind a reviewer.
 ```text
 push to main
   └─ CI (ci.yml): go · rust · contracts · integration · build · containers ·
-     dependency scan · secret scan · kubernetes manifests · terraform → ci
+     stack end-to-end · dependency scan · secret scan · kubernetes manifests ·
+     terraform → ci
        └─ Release (release.yml), only if CI succeeded, for that exact commit
             images          build → verify → scan → tag sha-<commit> → push to ECR
             deploy-staging  secrets → render by digest → apply → migrations → rollout
@@ -95,7 +96,8 @@ Nothing waits for longer than a person would.
 | rollback rollout (if any) | 5 minutes each | same step |
 | smoke: first `/health` | up to 5 minutes of retries (a new load balancer target takes about a minute to pass its checks) | `RETRY_SECONDS` |
 | smoke and E2E jobs | 15 minutes | `timeout-minutes` |
-| any single HTTP call in the tests | 10 seconds | `curl --max-time` |
+| any single HTTP call in the smoke test | 10 seconds | `curl --max-time` in `smoke.sh` |
+| any single API call in the E2E demo | 60 seconds, and 5 for `/health`, `/ready` and `/metrics` | `curl --max-time` in `demo.sh` |
 
 ## Failure detection
 
@@ -106,7 +108,7 @@ What fails the run, in order of when it is found:
 | a HIGH or CRITICAL vulnerability in an image or Dockerfile | `docker-scan`, before any registry credential exists; the image is never pushed |
 | the registry holds a different image under this commit's tag | the digest check at the start of the deploy |
 | a migration that fails or hangs | the Job wait; its logs are printed and collected |
-| pods that never become Ready (bad config, crash on start, failing readiness, image cannot be pulled) | `rollout status` with a timeout; the rollout is rolled back in staging |
+| pods that never become Ready (bad config, crash on start, failing readiness, image cannot be pulled) | `rollout status` with a timeout; the rollout is rolled back, in staging and in production — both callers pass `rollback_on_failure: true` |
 | the load balancer not registering the new pods | the same, through the readiness gate |
 | the released build not in service, the certificate wrong, the hostname unresolvable, plain HTTP not redirected, an endpoint answering unauthenticated | `scripts/smoke.sh` |
 | a sign-in, a write, the Rust engine, the results, or idempotency broken end to end | `scripts/demo.sh` in `e2e-staging` |
@@ -122,6 +124,9 @@ a recovery, not a success, and the run must be red for someone to look.
 | `e2e-staging-<run>-<attempt>` | `e2e.log`: every request the demo made and every response, with the access token never printed | 14 days |
 | `release` | `release.json`: the commit, version, tag, digests, each image's own release record (toolchains, lockfile digests, schema and algorithm versions; docs/RELEASE.md) and what staging ran; exists only if every staging stage passed; what a promotion deploys from | 90 days |
 | `deploy-production-<run>-<attempt>` | as the staging one, for a promotion | 14 days |
+| `sbom-<image_tag>` | a CycloneDX bill of materials per image, generated after the scan gate and before the push, so it describes what was pushed | 90 days |
+| `sbom-<run>-<attempt>` | the same, for a CI run rather than a release | 14 days |
+| `go-coverage-<run>-<attempt>` | `coverage*.out`: the per-suite Go profiles and the merged one | 14 days |
 | the run summary | the digests, the version, the hostname, the load balancer address; for the images job, the digest table | with the run |
 | CloudWatch | Container Insights ships the pods' logs in production; in staging, `kubectl logs` through the cluster (the platform README) | `log_retention_days` |
 
@@ -202,8 +207,10 @@ is dispatched by hand with the **run ID of a Release run**, and:
    have the right shape, and that the version is that commit's short form.
    The candidate — commit, subject, digests, what staging ran — goes into
    the run summary.
-2. **Waits for approval.** The `deploy-production` job declares
-   `environment: production`; it does not start until a required reviewer
+2. **Waits for approval.** The `deploy-production` job calls `deploy.yml`
+   with `environment: production`, and the called `deploy` job declares
+   `environment: ${{ inputs.environment }}` — that declaration is what
+   creates the gate. It does not start until a required reviewer
    (not the person who dispatched it: prevent-self-review is on) approves
    it on the run's page, having read the summary. Only then is an OIDC
    token for the production role issued. Rejecting cancels the run.
@@ -227,7 +234,7 @@ To promote:
 ```sh
 gh run list --workflow Release --branch main --limit 5          # find the run that passed staging
 gh workflow run promote.yml --ref main -f release_run_id=<run id>
-gh run watch                                                    # then approve on the run's page as a reviewer
+gh run watch <run id>                                           # then approve on the run's page as a reviewer
 ```
 
 ### Rolling production back
@@ -285,6 +292,11 @@ files.
   from any other branch in words before the environment does so silently.
 - **Every workflow starts from `permissions: {}`** and each job asks for
   what it uses; `id-token: write` appears only on jobs that assume a role.
+  One job keeps the empty set and still checks out: `ci`, the verdict job,
+  reads `ci.yml` itself to confirm the required list matches the file. That
+  works because an unauthenticated clone of a public repository needs no
+  token, so it is the least privilege that does the job rather than an
+  oversight; on a private repository it would need `contents: read`.
 - **Inputs are untrusted.** `release_run_id` is checked to be a number
   before it reaches a shell, and every value read from the release record
   is checked for shape and cross-checked against the run itself, the git
@@ -313,7 +325,7 @@ files.
 | Area | Finding | Fix |
 |---|---|---|
 | Verdict job | `ci` computed its list of failed jobs through a pipe without `pipefail`; a `jq` failure would have produced an empty list and a green verdict | `set -euo pipefail`; the verdict now fails unless every required job reports `success`, the count matches, **and** the required list equals the jobs in `ci.yml` itself (a job added to the file but not to `needs` fails the verdict). Rehearsed against the real file: success, failure, skipped, cancelled, a missing job and an empty list each give the right answer |
-| Token exposure | every checkout persisted `GITHUB_TOKEN` into `.git/config` for the rest of the job; no job pushes | `persist-credentials: false` on all 17 checkouts |
+| Token exposure | every checkout persisted `GITHUB_TOKEN` into `.git/config` for the rest of the job; no job pushes | `persist-credentials: false` on all 19 checkouts |
 | Shell pipelines | eighteen piped steps ran under `set -eu` only, so a failing left-hand command could pass unnoticed | `set -euo pipefail` in every step that pipes |
 | Dispatch from a branch | a manual Release or Terraform plan from a non-`main` branch built for minutes and was then refused by STS | a `wrong-branch` job fails immediately in words; the real jobs are conditioned on `main` |
 | Scanners | trivy 0.58.2 and checkov 3.2.334 were twenty and nine months old | updated to 0.74.0 and 3.3.17; every gate re-run and green |

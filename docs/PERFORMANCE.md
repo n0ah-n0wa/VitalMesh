@@ -38,7 +38,7 @@ and two runs are quoted where one would not do.
 The final state of the code, from an empty database, on the machine above.
 
 **Mixed load** (k6 standard profile, 120 s, client side): about 7,860
-requests at 60 req/s, 77,000 readings at 580 to 610 readings/s, 241 jobs,
+requests at 60 req/s, 77,000 readings at about 582 readings/s, 241 jobs,
 zero errors, the rate-limit probe refused a third of its requests as
 designed.
 
@@ -60,12 +60,13 @@ three passes); batch ingestion 28 ms for 100 readings, 95 for 500, 183 to
 
 **The engine in process** (Criterion): descriptive statistics at 13
 million values a second; the full pipeline at 1.2 million readings a
-second over one window and 385,000 a second over every window; rule
-evaluation the largest single cost inside it (4× the analysis without
-rules).
+second over one window and 308,000 to 386,000 a second over every window;
+rule evaluation the largest single cost inside it (analysis *with* rules
+costs about 4× analysis without them, 218.5 ms against 53.7 ms; the rule
+evaluation itself is about 3×).
 
-**Against the baseline:** a 1,000-reading batch went from 494 to about 200
-ms (2.3 to 2.5×), a 60,000-reading job from 1,742 to about 500 ms (3.1 to
+**Against the baseline:** a 1,000-reading batch went from 494 to 211 ms
+(2.3×), a 60,000-reading job from 1,742 to about 500 ms (3.1 to
 3.7×), the gateway's share of that job from about 1,340 ms to about 300
 ms; everything the changes did not touch measures the same.
 
@@ -96,10 +97,18 @@ tail, as a range.
 
 ## Memory behaviour under sustained load
 
-The k6 standard profile for 300 s (18,516 requests, 189,121 readings,
-591 jobs, zero errors), with the gateway's resident set, Go heap and
-goroutines read from Prometheus every 30 s and the other containers from
-`docker stats` every 10 s:
+The k6 standard profile at `DURATION=300s` (18,516 requests, 189,121
+readings, 591 jobs, no failed requests), with the gateway's resident set,
+Go heap and goroutines read from Prometheus every 30 s and the other
+containers from `docker stats` every 10 s. The timestamps below run past
+300 s because they are wall-clock from the start of sampling, which
+includes k6's setup and teardown.
+
+**This run was saturated, and that matters for how to read it.** k6
+recorded 216 dropped iterations and a job p99 of 3.6 s against a 5.2 s
+maximum: the arrival rate was not sustained on this machine. No request
+failed, but the run is evidence about *memory under sustained pressure*
+rather than evidence that the machine can carry this rate.
 
 | Time into the run | gateway RSS (MiB) | Go heap in use (MiB) | goroutines |
 |---|---|---|---|
@@ -129,7 +138,7 @@ measurement.
 **Bounded memory.** Every structure that could grow with traffic has a
 bound: request bodies at 1 MiB (`http.MaxBytesReader`), batches at 1,000
 readings, a job at 100,000 readings and the processor's body limit
-derived from it, the processor's response at 64 MiB in the gateway's
+validated against it, the processor's response at 64 MiB in the gateway's
 client, metadata at 2 KiB per reading, the rate limiter's local fallback
 at 100,000 keys, the processor's finished-job records at 1,024 or fifteen
 minutes whichever comes first, idempotency records at a 24-hour TTL with
@@ -157,8 +166,9 @@ planner's correct choice for a 58-row table. The row-level validation
 trigger became a per-statement one, and no new index was added.
 
 **Batch sizes.** The API accepts up to 1,000 readings a batch; the
-measured cost is about 0.2 ms a reading at 500 and 1,000, and the
-per-request overhead about 25 ms, so 100 to 1,000 is the useful range and
+measured cost is about 0.2 ms a reading at 500 and 1,000, and a
+100-reading batch costs about 28 ms in all, so 100 to 1,000 is the useful
+range and
 the load test's 100 and the loader's 500 are inside it. A job's results
 (about 1,200 rows for 60,000 readings over every window) are one
 statement.
@@ -169,7 +179,8 @@ readiness checks at 2 s, Redis commands at 250 ms, shutdown at 10 s; the
 processor bounds a request at 30 s and a job at 300 s. One nuance stays as
 documented in [FAILURE_MODES.md](FAILURE_MODES.md): three attempts at 5 s
 exceed the 10 s request bound, so a hung processor is reported as the
-request's timeout rather than the more specific processor timeout; the
+request's `REQUEST_TIMEOUT` rather than the more specific
+`PROCESSOR_UNAVAILABLE`; the
 outcome (a bounded call and a `FAILED` job) is the same.
 
 **No N+1 queries.** A batch checks each distinct patient it references
@@ -177,7 +188,7 @@ once, not each reading; a job reads each requested type once (the types
 are bounded by the seven-entry catalogue), then one statement for the
 results; listings are one query each; authentication is one indexed user
 lookup per request, and the patient cache absorbs 99% of patient reads
-under load. The measured per-request query rates (about 37 selects and
+under load. The measured per-request query rates (about 39 selects and
 23 inserts a second at 60 requests a second in the baseline) are
 consistent with one to three statements per request.
 
@@ -185,7 +196,8 @@ consistent with one to three statements per request.
 windowing, threshold and z-score rules and the summation statistics are
 `O(n)`; percentiles sort each window once, `O(n log n)`; the
 rolling-deviation rule is `O(n × window)` by design and measured at the
-configured window (30) to be a small share, so its `O(n)` form was
+window the benchmark configures (30) to be a small share, so its `O(n)`
+form was
 rejected on the numbers and on the fixtures' exactness (see the
 optimizations page). The engine's cost is linear in readings across the
 1,000 to 100,000 range Criterion measures.
@@ -201,12 +213,26 @@ network distance, one replica, no search for a saturation point.
 
 ```bash
 make up
-make load-test                             # the mixed load and its report
-RESET=1 make perf-baseline                 # the whole baseline, about six minutes
+make load-test                             # the mixed load at the 60 s standard profile
+DURATION=120s make load-test               # the 120 s run the table above quotes
+DURATION=300s make load-test               # the soak under "Memory behaviour"
+RESET=1 make perf-baseline                 # the whole baseline
 SKIP_LOAD=1 RESET=1 make perf-baseline     # the single-client sections, about 90 s
-cd services/processor && cargo bench --locked
-cd services/api-gateway && go test -tags integration -run xxx -bench 'Job60k|Batch1200' -benchmem ./internal/infra/postgres/
 ```
+
+The benchmarks are separate, and each needs its own working directory. The Go
+ones are integration benchmarks, so they need a database and the variable that
+names it:
+
+```bash
+(cd services/processor && cargo bench --locked)
+
+(cd services/api-gateway &&   TEST_DATABASE_URL='postgres://vitalmesh:vitalmesh@localhost:5432/vitalmesh?sslmode=disable'   go test -tags integration -run xxx -bench 'Job60k|Batch1200' -benchmem ./internal/infra/postgres/)
+```
+
+`make dev-db` provides that database. Without `TEST_DATABASE_URL` the
+benchmark stops with "TEST_DATABASE_URL is required for integration tests"
+rather than running.
 
 Reports and raw summaries land in `tests/load/results/`, git-ignored;
 keep a report with its environment block when quoting it.

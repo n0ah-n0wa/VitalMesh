@@ -6,6 +6,27 @@
 
 Companion document: [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 
+> ### What actually happened to these questions
+>
+> The lifecycle above was not followed. **All 38 items are still `OPEN`, no
+> ADR was written, and `docs/adr/` does not exist** — yet the system was built
+> through Phase 12. The decisions were taken in the code and recorded in the
+> documents that explain it rather than in ADRs.
+>
+> So read this file as **the questions that were asked**, not as a list of
+> things still undecided in the implementation. Where an item has in practice
+> been settled, the answer is in the code and in
+> [ARCHITECTURE.md](ARCHITECTURE.md), [SECURITY.md](SECURITY.md),
+> [DATABASE.md](DATABASE.md) or [RESILIENCE.md](RESILIENCE.md). OQ-01, for
+> example, reads as undecided but was settled in the build: the processor has
+> no database access at all. One item is genuinely still open and visible in
+> the tree: the ingress domain is a placeholder that never resolves (OQ-18),
+> and production refuses to plan until it is set.
+>
+> Endpoints proposed below — user management, logout, job cancellation — are
+> **not served**. They have authorization rules and no handlers; see
+> [API.md](API.md), which marks them.
+
 ## Legend
 
 | Field | Meaning |
