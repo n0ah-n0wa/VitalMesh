@@ -2,6 +2,16 @@ SHELL := /bin/sh
 .SHELLFLAGS := -eu -c
 .DEFAULT_GOAL := help
 
+# Git Bash on Windows rewrites any argument that looks like an absolute
+# POSIX path into a Windows path before the program sees it, so a
+# container-side path such as /repo reaches the tool as C:/Git/repo and it
+# fails on a directory that does not exist. Every script under scripts/
+# already sets this for itself; exporting it here covers the recipes that
+# call `docker run` directly, which were the ones left uncovered. The
+# variable means nothing outside Git Bash, so Linux, macOS and CI are
+# unaffected.
+export MSYS_NO_PATHCONV := 1
+
 GO_DIR    := services/api-gateway
 RUST_DIR  := services/processor
 BIN_DIR   := bin
