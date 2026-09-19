@@ -1,0 +1,184 @@
+# The monitoring namespace gets the same treatment as the application's:
+# deny everything, then open exactly what is needed, so a component added
+# here later has to declare what it talks to.
+#
+# The application side of the scrape is already open and is not repeated
+# here: base/networkpolicy-baseline.yaml admits ingress on 8080 and 8081
+# from any pod in a namespace labelled `monitoring`. What follows is the
+# egress half, which until now had nothing to allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS, for everything here. Prometheus resolves the Kubernetes API and its
+# targets, Alertmanager resolves SNS, the collector resolves nothing but is
+# given it for symmetry with the rest of the cluster.
+#
+# TCP as well as UDP: a response larger than 512 bytes sets the truncated
+# bit and the resolver retries over TCP, and a policy allowing only UDP
+# turns that into an intermittent resolution failure.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# Prometheus reaches out to three kinds of thing: the application's two
+# services, the other components in this namespace, and the Kubernetes API
+# for service discovery.
+#
+# The API server has no pod to select — it is reached through a Service in
+# the default namespace that resolves to a node address or a cloud endpoint
+# outside the cluster network — so it is allowed by port rather than by
+# selector. 443 covers both the in-cluster ClusterIP and the EKS endpoint.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: prometheus-egress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Egress
+  egress:
+    # Scrape both application services, in whichever namespace this
+    # environment put them. Selected by the namespace's own part-of label
+    # rather than by name, because every overlay renames the namespace and a
+    # name here would deny the scrape in every environment but one.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+    # Alertmanager, and the collector's own metrics.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 9093
+        - protocol: TCP
+          port: 8888
+    # The Kubernetes API, for endpoint discovery.
+    #
+    # Both ports, and the reason is worth knowing. A pod reaches the API
+    # through the `kubernetes` Service on 443, but kube-proxy rewrites the
+    # destination to the real endpoint before the policy is applied, so what
+    # the CNI actually sees is the API server's own port. That is 443 on EKS
+    # and 6443 on kind, and allowing only 443 produced exactly the failure
+    # this rule exists to prevent: Prometheus healthy, every rule loaded,
+    # `dial tcp 10.96.0.1:443: i/o timeout` in its log, and no targets at
+    # all. `make k8s-monitoring-test` is what found it.
+    #
+    # There is no `to` selector because the API server has no pod to select:
+    # it is outside the cluster network on a managed cluster, and on the host
+    # network on kind.
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
+# Alertmanager sends notifications out of the cluster. In a deployed
+# environment that is the SNS endpoint over HTTPS; on kind it reaches
+# nothing, because the base configuration notifies nobody.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: alertmanager-egress
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Egress
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+---
+# Ingress into the namespace, stated per component so that each opening has
+# a reason next to it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-scrape-and-alerting
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: vitalmesh
+  policyTypes:
+    - Ingress
+  ingress:
+    # Prometheus scrapes the collector's metrics and Alertmanager's, and
+    # posts alerts to Alertmanager.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: prometheus
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 8888
+        - protocol: TCP
+          port: 9093
+    # Both application services export traces to the collector. This is the
+    # egress the deployed overlay's networkpolicy-egress-patch already
+    # allows from the other side. Selected by label rather than by name, for
+    # the same reason as the egress rule above.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: vitalmesh
+      ports:
+        - protocol: TCP
+          port: 4318
+        - protocol: TCP
+          port: 4317

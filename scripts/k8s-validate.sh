@@ -38,6 +38,10 @@ KUBECONFORM_IMAGE="ghcr.io/yannh/kubeconform:v0.6.7"
 KUBE_LINTER_IMAGE="stackrox/kube-linter:v0.7.1"
 TRIVY_IMAGE="aquasec/trivy:0.74.0"
 CHECKOV_IMAGE="bridgecrew/checkov:3.3.17"
+# promtool, for the alerting and recording rules. The same Prometheus
+# version infrastructure/kubernetes/monitoring runs, so a rule that passes
+# here is a rule that a release parses.
+PROMETHEUS_IMAGE="prom/prometheus:v3.1.0"
 
 # The versions the manifests are claimed to work on. 1.30 is the floor: the
 # preStop sleep handler is GA there. Both are checked so that a field valid
@@ -50,7 +54,7 @@ KUBE_DIR="infrastructure/kubernetes"
 # an MSYS temporary path. It is git-ignored and rebuilt every run.
 RENDER_DIR="$KUBE_DIR/.rendered"
 
-TARGETS="base overlays/local overlays/staging overlays/production"
+TARGETS="base overlays/local overlays/staging overlays/production monitoring"
 
 failures=0
 ok()   { printf '  ok    %s\n' "$1"; }
@@ -242,6 +246,35 @@ if out="$(docker run --rm \
 else
     fail "checkov findings"
     printf '%s\n' "$out" | grep -E "^Check:|FAILED for resource" | sed 's/^/        /' | head -20
+fi
+
+printf '\nPrometheus rules (promtool, then drift against the local copy)\n'
+
+# Both copies are checked, not just the deployed one. A local rule file
+# that does not parse is a local stack that silently evaluates nothing,
+# which is how an untested rule reaches a deployment.
+for rules in observability/prometheus/rules infrastructure/kubernetes/monitoring/config/rules; do
+    if out="$(docker run --rm --entrypoint promtool \
+        -v "$repo/$rules:/rules:ro" "$PROMETHEUS_IMAGE" \
+        check rules /rules/recording.yml /rules/alerts.yml 2>&1)"; then
+        ok "$rules: $(printf '%s' "$out" | grep -c SUCCESS) file(s) valid"
+    else
+        fail "$rules: promtool rejected the rules"
+        printf '%s\n' "$out" | sed 's/^/        /'
+    fi
+done
+
+# The two copies must measure the same things. scripts/check-alert-rules.py
+# says what is allowed to differ between them, and why.
+if out="$(docker run --rm --entrypoint python \
+    -v "$repo/scripts/check-alert-rules.py:/check.py:ro" \
+    -v "$repo/observability/prometheus/rules:/local:ro" \
+    -v "$repo/infrastructure/kubernetes/monitoring/config/rules:/deployed:ro" \
+    "$CHECKOV_IMAGE" /check.py /local /deployed 2>&1)"; then
+    ok "deployed rules match the local ones: $out"
+else
+    fail "the deployed and local Prometheus rules disagree"
+    printf '%s\n' "$out" | sed 's/^/        /'
 fi
 
 printf '\n'

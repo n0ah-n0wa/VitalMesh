@@ -53,6 +53,11 @@ output "load_balancer_controller_role_arn" {
   value       = var.enable_load_balancer_controller ? aws_iam_role.irsa["load_balancer_controller"].arn : null
 }
 
+output "alertmanager_role_arn" {
+  description = "IRSA role for Alertmanager's service account (monitoring/alertmanager), or null when no alarm topic was given. scripts/eks-platform-install.sh annotates the service account with it."
+  value       = var.enable_alertmanager ? aws_iam_role.irsa["alertmanager"].arn : null
+}
+
 output "cluster_autoscaler_role_arn" {
   description = "IRSA role for the Cluster Autoscaler's service account (kube-system/cluster-autoscaler), or null when disabled."
   value       = var.enable_cluster_autoscaler ? aws_iam_role.irsa["cluster_autoscaler"].arn : null

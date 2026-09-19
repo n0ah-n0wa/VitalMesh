@@ -18,4 +18,4 @@ data:
   # synthetic data, not clinical ones.
   ANOMALY_RULES: '{"rules":[{"name":"heart-rate-bounds","kind":"THRESHOLD","measurement_types":["HEART_RATE"],"tiers":{"warning":{"lower":50,"upper":100},"critical":{"lower":40,"upper":150}}}]}'
 
-  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"

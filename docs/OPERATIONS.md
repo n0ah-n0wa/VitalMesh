@@ -277,12 +277,99 @@ start-up. During a rollout, two replicas reporting different values is the
 signal that a migration landed between their starts.
 
 **Traces.** Both services propagate W3C trace context and export OTLP when
-`OTEL_EXPORTER_OTLP_ENDPOINT` is set. **Nothing collects them in a deployed
-environment today** — there is no collector, Prometheus or Alertmanager in the
-manifests or in Terraform (see PRODUCTION_READINESS.md, the P1 blocker). So in
-staging and production the trace id in the logs is what you have; a browsable
-trace exists only in the local compose stack, where a collector runs. Export
+`OTEL_EXPORTER_OTLP_ENDPOINT` is set. A deployed cluster runs a collector at
+the name the ConfigMaps point to, so the export arrives; what it does with a
+span is count it and print it, because there is no trace store wired up. In
+practice that means the trace id in the logs is still what you follow, and
+the collector's metrics are how you know the path is working at all. Export
 to an unreachable endpoint degrades silently and never affects a request.
+
+### Turn data retention on, or check what it removed
+
+Readings and results are kept for ever unless a window is set
+(SPECIFICATIONS.md section 81). Both are days, both default to zero, and
+zero means keep everything:
+
+```sh
+MEASUREMENT_RETENTION_DAYS=90    # remove readings recorded more than 90 days ago
+RESULT_RETENTION_DAYS=365        # remove results produced more than a year ago
+RETENTION_INTERVAL=1h            # how often the sweep runs
+RETENTION_BATCH_LIMIT=1000       # rows per statement, which bounds the locks
+```
+
+The gateway says which it is at startup, so a service quietly keeping
+everything says so rather than leaving it to be inferred:
+
+```text
+"retention is disabled; stored data is kept indefinitely"
+"retention enabled" measurement_retention_days=90 result_retention_days=365
+```
+
+**What a pass did.** Each pass records `vitalmesh_operation_*` under
+`retention.sweep` and the batch sizes `retention.measurements` and
+`retention.results`. A pass that removed anything also writes an audit
+entry, which is the durable record:
+
+```sql
+SELECT created_at, metadata FROM audit_logs
+WHERE action = 'RETENTION_RUN' ORDER BY created_at DESC LIMIT 10;
+```
+
+The entry carries counts and the windows in force, never an identifier of
+anything removed.
+
+**Turning it on for the first time.** The first pass has the whole backlog
+to remove and is bounded: it deletes at most `RETENTION_BATCH_LIMIT` rows
+per statement and at most 200 statements per pass, so it takes as many
+passes as it needs rather than one long transaction. Nothing waits on it,
+and the write path is not blocked while it runs.
+
+**It only ever removes readings and results.** Processing jobs are kept
+whatever happens, because section 94 requires a failed job to keep its
+diagnosis. A job whose readings have been removed still reads back, with its
+results, which an integration test asserts.
+
+### Look at the monitoring stack
+
+Installed once per cluster by a cluster admin, not by a release
+(`infrastructure/kubernetes/monitoring`). There is no Ingress in front of
+either UI; both are reached by port-forward.
+
+```sh
+kubectl -n monitoring get deploy prometheus alertmanager otel-collector
+kubectl -n monitoring port-forward svc/prometheus 9090:9090
+kubectl -n monitoring port-forward svc/alertmanager 9093:9093
+```
+
+| Where | Answers |
+|---|---|
+| `localhost:9090/targets` | which pods are being scraped, and why one is not |
+| `localhost:9090/alerts` | what is firing, and what is pending its `for` clause |
+| `localhost:9090/rules` | whether a rule failed to evaluate (`lastError`) |
+| `localhost:9093/#/alerts` | what reached Alertmanager and how it was grouped |
+| `localhost:9093/#/status` | the loaded configuration, including where it sends |
+
+**A target is missing.** Prometheus discovers endpoints through the
+Kubernetes API, filtered to the `vitalmesh` namespace and the `http` port, so
+a target vanishes when the Service's `app.kubernetes.io/part-of` label
+changes, when the pod is not Ready, or when the scrape is blocked. The
+scrape is admitted by `allow-metrics-scrape` in the application's base, which
+selects on the namespace label `kubernetes.io/metadata.name: monitoring`; a
+namespace renamed without patching that policy is denied, not merely
+unhealthy.
+
+**An alert fired and nobody heard.** Check where Alertmanager would send it,
+on `/#/status`. A cluster installed by `scripts/eks-platform-install.sh` has
+a receiver publishing to the environment's alarm topic; a cluster that has
+had only the base manifests applied has a receiver named `default` that
+notifies nobody, which is the safe default and not the finished state. The
+install script refuses to run without the topic, so this should only be seen
+on a kind cluster.
+
+**Nothing has ever been delivered to SNS from here.** The receiver, the IRSA
+role and the topic are configured; no message has been published to a real
+topic, because there is no account. Treat the first real alert as also being
+a test of delivery, or publish a test message to the topic first.
 
 ### Troubleshoot a failing rollout
 
@@ -393,8 +480,12 @@ results table. It complements the two cluster tests that came before it:
 enforced, one rollout is clean) and `make k8s-failure-test` (each dependency
 outage at single-replica scale) and `make rollback-test` (a release deployed,
 replaced, and rolled back by digest, with every part of the result verified;
-docs/ROLLBACK.md). `make k8s-validate` checks every overlay
-against the API schema and four linters without a cluster, and runs in CI;
-the four cluster tests need `kind` and `kubectl` and are run on demand,
+docs/ROLLBACK.md) and `make k8s-monitoring-test` (the monitoring stack: both
+services discovered and scraped, the rules evaluating, spans reaching the
+collector, and a real failure firing an alert that arrives at Alertmanager;
+infrastructure/kubernetes/monitoring). `make k8s-validate` checks every
+overlay against the API schema and four linters without a cluster, and runs
+in CI; the five cluster tests need `kind` and `kubectl` and are run on
+demand,
 because kind builds its nodes as containers on the host's Docker and so
 cannot itself run inside CI's container.

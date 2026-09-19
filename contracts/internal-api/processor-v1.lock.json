@@ -1,6 +1,6 @@
 {
   "contract": "processor-v1",
   "version": "1.1.2",
-  "fingerprint": "sha256:88b90dd72c391789bb7b38aa585295809abbeb61fbc0bd939808783079aebe0c",
+  "fingerprint": "sha256:8de277a91055b79075d21c5b23f97309e826bec8258a9060b2d57de09a9014d5",
   "note": "Regenerate with `make contracts-lock` after reviewing the change. A change that removes or narrows anything a client may rely on requires a new major version and a new path prefix; see contracts/internal-api/README.md."
 }

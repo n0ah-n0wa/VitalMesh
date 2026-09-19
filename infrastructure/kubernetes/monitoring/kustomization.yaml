@@ -1,0 +1,74 @@
+# The monitoring stack: what reads the metrics both services have always
+# served, evaluates the alert rules this repository has always shipped, and
+# answers the trace endpoint the deployed ConfigMaps have always named.
+#
+# It is a separate kustomization from the application's, not an overlay of
+# it, because it has a different lifecycle and a different owner. The
+# application is deployed on every release by CI; this is installed once per
+# cluster by a cluster admin alongside the load balancer controller and the
+# autoscaler (infrastructure/kubernetes/platform/README.md), and a release
+# must not be able to restart the thing that would tell you the release went
+# wrong.
+#
+# It applies unchanged to kind, which is how the whole path — scrape, record,
+# evaluate, fire, deliver to Alertmanager — is tested without an AWS account
+# (`make k8s-monitoring-test`).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: monitoring
+
+resources:
+  - namespace.yaml
+
+  # Identity and permissions before the workload that uses them.
+  - prometheus-rbac.yaml
+
+  - prometheus.yaml
+  - alertmanager.yaml
+  - collector.yaml
+
+  # Default-deny first, then the openings.
+  - networkpolicy.yaml
+
+# Generated rather than written as ConfigMap objects, so that kustomize
+# appends a hash of the content to the name and rewrites the references. An
+# edited scrape config or rule file therefore changes the pod template and
+# rolls the pod, instead of landing in a mounted file that the running
+# process never reloaded. That failure is quiet and is usually discovered
+# during the incident the rule was meant to catch.
+#
+# It also keeps the rule files as plain YAML on disk, which is what lets
+# `promtool check rules` and the drift check in scripts/k8s-validate.sh read
+# them directly.
+configMapGenerator:
+  - name: prometheus-config
+    files:
+      - config/prometheus.yml
+  - name: prometheus-rules
+    files:
+      - recording.yml=config/rules/recording.yml
+      - alerts.yml=config/rules/alerts.yml
+  - name: otel-collector-config
+    files:
+      - collector.yaml=config/collector.yaml
+
+  # Alertmanager's is the exception: no hash. The platform install replaces
+  # this ConfigMap with one that routes to SNS, and it has to be able to
+  # name the object it is replacing. A generated suffix would change under
+  # it on every edit.
+  - name: alertmanager-config
+    options:
+      disableNameSuffixHash: true
+    files:
+      - alertmanager.yml=config/alertmanager.yml
+
+generatorOptions:
+  labels:
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+
+labels:
+  - includeSelectors: false
+    pairs:
+      app.kubernetes.io/managed-by: kustomize

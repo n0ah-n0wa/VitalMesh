@@ -699,7 +699,7 @@
       },
       "MeasurementType": {
         "type": "string",
-        "description": "The kind of measurement. Each type has one canonical unit and one technical value range.",
+        "description": "The kind of measurement. Each type has one canonical unit and one technical value range, both published in `x-value-ranges`. Each service validates against its own copy of that catalogue, because neither can import the other's, so the contract is what keeps the two from drifting apart.",
         "enum": [
           "HEART_RATE",
           "BLOOD_PRESSURE_SYSTOLIC",
@@ -708,7 +708,16 @@
           "BODY_TEMPERATURE",
           "BLOOD_GLUCOSE",
           "RESPIRATORY_RATE"
-        ]
+        ],
+        "x-value-ranges": {
+          "HEART_RATE": { "unit": "bpm", "min": 0, "max": 300 },
+          "BLOOD_PRESSURE_SYSTOLIC": { "unit": "mmHg", "min": 0, "max": 300 },
+          "BLOOD_PRESSURE_DIASTOLIC": { "unit": "mmHg", "min": 0, "max": 200 },
+          "SPO2": { "unit": "%", "min": 0, "max": 100 },
+          "BODY_TEMPERATURE": { "unit": "C", "min": 20, "max": 45 },
+          "BLOOD_GLUCOSE": { "unit": "mg/dL", "min": 0, "max": 1000 },
+          "RESPIRATORY_RATE": { "unit": "breaths/min", "min": 0, "max": 100 }
+        }
       },
       "Unit": {
         "type": "string",

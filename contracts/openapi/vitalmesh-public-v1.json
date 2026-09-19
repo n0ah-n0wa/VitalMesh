@@ -1,0 +1,3589 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "VitalMesh public API",
+    "version": "1.0.0",
+    "summary": "The HTTP/JSON API the Go gateway serves to clients under /api/v1.",
+    "description": "The public API of the VitalMesh gateway (SPECIFICATIONS.md sections 9 to 13 and 25 to 29).\n\nNothing here is medical: all data is synthetic and every result is a technical data-processing output (SPECIFICATIONS.md sections 1 and 3).\n\nThis document describes exactly the operations the gateway registers. An operation that has an authorization rule but no handler, such as user management and job cancellation, is deliberately absent: it is not served and answers 404. `docs/API.md` is the prose reference for the same surface and explains the conventions in more depth.\n\nThe unversioned `/health` and `/ready` endpoints serve the platform rather than clients and need no credential. `/metrics` is not described here: it is a Prometheus exposition, not JSON, and deployments restrict it at the network.",
+    "contact": {
+      "name": "VitalMesh",
+      "url": "https://github.com/n0ah-n0wa/VitalMesh"
+    }
+  },
+  "servers": [
+    {
+      "url": "{scheme}://{host}:{port}",
+      "description": "The gateway. The defaults address a local `make up` stack; a deployed environment terminates TLS in front of it.",
+      "variables": {
+        "scheme": {
+          "default": "http",
+          "enum": [
+            "http",
+            "https"
+          ]
+        },
+        "host": {
+          "default": "localhost"
+        },
+        "port": {
+          "default": "8080"
+        }
+      }
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "platform",
+      "description": "Unversioned endpoints that serve the platform's probes."
+    },
+    {
+      "name": "authentication",
+      "description": "Obtaining and inspecting an access token."
+    },
+    {
+      "name": "patients",
+      "description": "Synthetic patient records."
+    },
+    {
+      "name": "measurements",
+      "description": "Synthetic readings attached to a patient."
+    },
+    {
+      "name": "processing",
+      "description": "Processing jobs and their results."
+    }
+  ],
+  "paths": {
+    "/health": {
+      "get": {
+        "operationId": "health",
+        "summary": "Liveness",
+        "description": "Reports that the process is up and says which service, version and environment answered. It touches no dependency, so it stays cheap and never fails because a database is slow. Tooling that writes data reads `environment` to check what it is talking to before it writes anything.",
+        "tags": [
+          "platform"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The process is up.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                },
+                "example": {
+                  "status": "ok",
+                  "service": "api-gateway",
+                  "version": "1.4.0",
+                  "environment": "local"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "operationId": "readiness",
+        "summary": "Readiness",
+        "description": "Reports whether the process can serve traffic, checking each dependency it needs. A failing check names itself and its status; why it failed stays server-side. Answers 503 when any check fails, so a load balancer stops sending traffic without an operator acting.",
+        "tags": [
+          "platform"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Every dependency check passed.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                },
+                "example": {
+                  "status": "ready",
+                  "service": "api-gateway",
+                  "version": "1.4.0",
+                  "checks": [
+                    {
+                      "name": "postgres",
+                      "status": "ok"
+                    },
+                    {
+                      "name": "redis",
+                      "status": "ok"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "At least one dependency check failed. The body has the same shape as the 200 and names which check failed.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Readiness"
+                },
+                "example": {
+                  "status": "not_ready",
+                  "service": "api-gateway",
+                  "version": "1.4.0",
+                  "checks": [
+                    {
+                      "name": "postgres",
+                      "status": "fail"
+                    },
+                    {
+                      "name": "redis",
+                      "status": "ok"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "operationId": "login",
+        "summary": "Exchange credentials for an access token",
+        "description": "Verifies an email and password and returns a signed bearer token. Email matching is case-insensitive. An unknown email and a wrong password are deliberately indistinguishable, so a caller cannot enumerate accounts. Every success is written to the audit log under the request's identifier; the credential and the token are never logged. There is no self-registration: accounts are created by an operator with `api-gateway users create`.",
+        "tags": [
+          "authentication"
+        ],
+        "security": [],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              },
+              "example": {
+                "email": "operator@synthetic.invalid",
+                "password": "correct-horse-battery-staple"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The credentials were accepted.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                },
+                "example": {
+                  "access_token": "example-access-token-not-a-real-credential",
+                  "token_type": "Bearer",
+                  "expires_in": 900,
+                  "expires_at": "2026-09-18T12:15:00Z",
+                  "user": {
+                    "id": "8a1f0c62-1f2a-4c7e-9c1d-2b6f5a0e7d31",
+                    "email": "operator@synthetic.invalid",
+                    "role": "OPERATOR",
+                    "status": "ACTIVE",
+                    "created_at": "2026-09-01T09:00:00Z"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "description": "The email is unknown or the password is wrong. The two are not distinguished.",
+            "x-error-codes": [
+              "INVALID_CREDENTIALS"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "WWW-Authenticate": {
+                "$ref": "#/components/headers/WwwAuthenticate"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "INVALID_CREDENTIALS",
+                    "message": "The email or password is incorrect.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "The credentials are valid but the account is disabled.",
+            "x-error-codes": [
+              "ACCOUNT_DISABLED"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "ACCOUNT_DISABLED",
+                    "message": "This account is disabled.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "operationId": "currentUser",
+        "summary": "The account behind the token",
+        "description": "Returns the calling account as the server resolved it from the verified token, which is the simplest way to check that a token is still good and which role it carries. A role change takes effect for tokens issued after it, so this reports the role the token was minted with.",
+        "tags": [
+          "authentication"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account behind the token.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/User"
+                },
+                "example": {
+                  "id": "8a1f0c62-1f2a-4c7e-9c1d-2b6f5a0e7d31",
+                  "email": "operator@synthetic.invalid",
+                  "role": "OPERATOR",
+                  "status": "ACTIVE",
+                  "created_at": "2026-09-01T09:00:00Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/patients": {
+      "post": {
+        "operationId": "createPatient",
+        "summary": "Create a synthetic patient",
+        "description": "Stores a synthetic patient record. `external_reference` is unique across patients, so re-creating the same reference is a conflict rather than a second record. Writes a `PATIENT_CREATED` audit record in the same transaction as the insert: if the audit record cannot be written, the patient is not created. Accepts an `Idempotency-Key`. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "patients"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePatientRequest"
+              },
+              "example": {
+                "external_reference": "synthetic-0001",
+                "date_of_birth": "1984-02-29",
+                "sex": "FEMALE"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The patient was created. `Location` addresses it.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Patient"
+                },
+                "example": {
+                  "id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "external_reference": "synthetic-0001",
+                  "date_of_birth": "1984-02-29",
+                  "sex": "FEMALE",
+                  "status": "ACTIVE",
+                  "created_at": "2026-09-18T12:00:00Z",
+                  "updated_at": "2026-09-18T12:00:00Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "description": "Another patient already has that `external_reference`, or the `Idempotency-Key` is in flight on an earlier request.",
+            "x-error-codes": [
+              "PATIENT_ALREADY_EXISTS",
+              "IDEMPOTENCY_IN_PROGRESS"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "PATIENT_ALREADY_EXISTS",
+                    "message": "A patient with that external reference already exists.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/ValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listPatients",
+        "summary": "List patients",
+        "description": "Returns a page of patients in creation order, keyset-paginated so concurrent inserts never cause a skipped or duplicated item. Deleted patients are never listed, whatever the caller's role. Any role may read.",
+        "tags": [
+          "patients"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of patients.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PatientPage"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                      "external_reference": "synthetic-0001",
+                      "date_of_birth": "1984-02-29",
+                      "sex": "FEMALE",
+                      "status": "ACTIVE",
+                      "created_at": "2026-09-18T12:00:00Z",
+                      "updated_at": "2026-09-18T12:00:00Z"
+                    }
+                  ],
+                  "next_cursor": "eyJjcmVhdGVkX2F0IjoiMjAyNi0wOS0xOFQxMjowMDowMFoifQ",
+                  "has_more": true
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidPagination"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/patients/{patient_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PatientId"
+        }
+      ],
+      "get": {
+        "operationId": "getPatient",
+        "summary": "Read one patient",
+        "description": "Returns the patient. A deleted patient answers 404 to OPERATOR and USER and is returned with `\"status\":\"DELETED\"` to ADMIN, so an administrator can still audit what was removed. An id that is not a UUID is a 404 rather than a parse error, because the two are indistinguishable to a client that should not be probing. Any role may read.",
+        "tags": [
+          "patients"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The patient.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Patient"
+                },
+                "example": {
+                  "id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "external_reference": "synthetic-0001",
+                  "date_of_birth": "1984-02-29",
+                  "sex": "FEMALE",
+                  "status": "ACTIVE",
+                  "created_at": "2026-09-18T12:00:00Z",
+                  "updated_at": "2026-09-18T12:00:00Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PatientNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deletePatient",
+        "summary": "Delete a patient",
+        "description": "Soft-deletes the patient: the record keeps its identity so measurements, jobs and results stay valid, `status` becomes `DELETED` and `updated_at` moves. Deleting a patient that was already deleted is a conflict. Writes a `PATIENT_DELETED` audit record in the same transaction. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "patients"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The patient was deleted. There is no body.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PatientNotFound"
+          },
+          "409": {
+            "description": "The patient was already deleted.",
+            "x-error-codes": [
+              "PATIENT_ALREADY_DELETED"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "PATIENT_ALREADY_DELETED",
+                    "message": "This patient was already deleted.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/patients/{patient_id}/measurements": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PatientId"
+        }
+      ],
+      "get": {
+        "operationId": "listPatientMeasurements",
+        "summary": "List a patient's readings",
+        "description": "Returns a page of the patient's readings ordered by `recorded_at` then id, so pages are stable under concurrent inserts. `from` is inclusive and `to` is exclusive. A deleted patient answers 404 except to ADMIN. Any role may read.",
+        "tags": [
+          "measurements"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/TypeFilter"
+          },
+          {
+            "$ref": "#/components/parameters/From"
+          },
+          {
+            "$ref": "#/components/parameters/To"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of readings.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeasurementPage"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": "b6e0c1d2-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+                      "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                      "type": "HEART_RATE",
+                      "value": 72,
+                      "unit": "bpm",
+                      "recorded_at": "2026-09-18T11:59:00Z",
+                      "created_at": "2026-09-18T12:00:00Z",
+                      "source": "synthetic-monitor",
+                      "metadata": {
+                        "lead": "II"
+                      }
+                    }
+                  ],
+                  "next_cursor": null,
+                  "has_more": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PatientNotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidPagination"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/patients/{patient_id}/processing-results": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/PatientId"
+        }
+      ],
+      "get": {
+        "operationId": "listPatientProcessingResults",
+        "summary": "List a patient's processing results",
+        "description": "Returns a page of the results produced for this patient by completed jobs, newest window first. `statistics` and `anomalies` are the processing service's own output, stored unchanged, and carry the algorithm and service versions that produced them so a result can always be attributed to a specific build. Any role may read.",
+        "tags": [
+          "processing"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          },
+          {
+            "$ref": "#/components/parameters/Cursor"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of results.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingResultPage"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": "c7f1d2e3-4b5c-4d6e-9f0a-1b2c3d4e5f60",
+                      "job_id": "d8a2e3f4-5c6d-4e7f-8a9b-0c1d2e3f4a51",
+                      "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                      "measurement_type": "HEART_RATE",
+                      "window": "1h",
+                      "window_start": "2026-09-18T11:00:00Z",
+                      "statistics": {
+                        "count": 60,
+                        "min": 58,
+                        "max": 185,
+                        "mean": 74.5,
+                        "median": 72,
+                        "variance": 246.25,
+                        "std_dev": 15.69,
+                        "percentiles": {
+                          "50": 72,
+                          "95": 118
+                        }
+                      },
+                      "anomalies": [
+                        {
+                          "measurement_type": "HEART_RATE",
+                          "window": "1h",
+                          "metric": "THRESHOLD",
+                          "value": 185,
+                          "threshold": 180,
+                          "severity": "WARNING",
+                          "detected_at": "2026-09-18T11:42:00Z",
+                          "algorithm_version": "1.0.0"
+                        }
+                      ],
+                      "algorithm_version": "1.0.0",
+                      "service_version": "0.1.0",
+                      "created_at": "2026-09-18T12:00:05Z"
+                    }
+                  ],
+                  "next_cursor": null,
+                  "has_more": false
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PatientNotFound"
+          },
+          "422": {
+            "$ref": "#/components/responses/InvalidPagination"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/measurements": {
+      "post": {
+        "operationId": "createMeasurement",
+        "summary": "Store one reading",
+        "description": "Validates and stores a single synthetic reading. `unit` must be exactly the canonical unit of `type`; no conversion is performed. The same reading, meaning the same patient, type, `recorded_at` and source, cannot be stored twice. `recorded_at` is stored with microsecond precision, so two readings differing only below a microsecond are the same reading. Accepts an `Idempotency-Key`. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "measurements"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMeasurementRequest"
+              },
+              "example": {
+                "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                "type": "HEART_RATE",
+                "value": 72,
+                "unit": "bpm",
+                "recorded_at": "2026-09-18T11:59:00Z",
+                "source": "synthetic-monitor",
+                "metadata": {
+                  "lead": "II"
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The reading was stored. `Location` addresses it.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Measurement"
+                },
+                "example": {
+                  "id": "b6e0c1d2-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+                  "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "type": "HEART_RATE",
+                  "value": 72,
+                  "unit": "bpm",
+                  "recorded_at": "2026-09-18T11:59:00Z",
+                  "created_at": "2026-09-18T12:00:00Z",
+                  "source": "synthetic-monitor",
+                  "metadata": {
+                    "lead": "II"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/MeasurementConflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/MeasurementValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/measurements/batch": {
+      "post": {
+        "operationId": "createMeasurementBatch",
+        "summary": "Store many readings at once",
+        "description": "Stores 1 to 1000 readings in one transaction: either all are stored or none is. Every failing field across the whole batch is reported in one response, addressed as `items[i].field`, so a client fixes everything in one pass rather than discovering faults one at a time. Two items describing the same reading are rejected against each other. Accepts an `Idempotency-Key`. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "measurements"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMeasurementBatchRequest"
+              },
+              "example": {
+                "items": [
+                  {
+                    "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                    "type": "HEART_RATE",
+                    "value": 72,
+                    "unit": "bpm",
+                    "recorded_at": "2026-09-18T11:59:00Z",
+                    "source": "synthetic-monitor"
+                  },
+                  {
+                    "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                    "type": "SPO2",
+                    "value": 98,
+                    "unit": "%",
+                    "recorded_at": "2026-09-18T11:59:30Z",
+                    "source": "synthetic-monitor"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Every reading was stored, returned in input order.",
+            "headers": {
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeasurementBatch"
+                },
+                "example": {
+                  "items": [
+                    {
+                      "id": "b6e0c1d2-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+                      "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                      "type": "HEART_RATE",
+                      "value": 72,
+                      "unit": "bpm",
+                      "recorded_at": "2026-09-18T11:59:00Z",
+                      "created_at": "2026-09-18T12:00:00Z",
+                      "source": "synthetic-monitor",
+                      "metadata": {}
+                    },
+                    {
+                      "id": "e9b3f4a5-6d7e-4f80-9a1b-2c3d4e5f6071",
+                      "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                      "type": "SPO2",
+                      "value": 98,
+                      "unit": "%",
+                      "recorded_at": "2026-09-18T11:59:30Z",
+                      "created_at": "2026-09-18T12:00:00Z",
+                      "source": "synthetic-monitor",
+                      "metadata": {}
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/MeasurementConflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "$ref": "#/components/responses/MeasurementValidationFailed"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/measurements/{measurement_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/MeasurementId"
+        }
+      ],
+      "get": {
+        "operationId": "getMeasurement",
+        "summary": "Read one reading",
+        "description": "Returns the reading. A reading whose patient is deleted answers 404 to OPERATOR and USER and stays visible to ADMIN, following the same rule as the patient itself. Any role may read.",
+        "tags": [
+          "measurements"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The reading.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Measurement"
+                },
+                "example": {
+                  "id": "b6e0c1d2-3a4b-4c5d-8e9f-0a1b2c3d4e5f",
+                  "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "type": "HEART_RATE",
+                  "value": 72,
+                  "unit": "bpm",
+                  "recorded_at": "2026-09-18T11:59:00Z",
+                  "created_at": "2026-09-18T12:00:00Z",
+                  "source": "synthetic-monitor",
+                  "metadata": {
+                    "lead": "II"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/MeasurementNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteMeasurement",
+        "summary": "Delete a reading",
+        "description": "Removes the reading permanently; unlike a patient, a reading is hard-deleted. Writes a `MEASUREMENT_DELETED` audit record in the same transaction, so the deletion itself survives the data. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "measurements"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "The reading was deleted. There is no body.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/MeasurementNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/processing/jobs": {
+      "post": {
+        "operationId": "createProcessingJob",
+        "summary": "Create and run a processing job",
+        "description": "Creates a job, dispatches it to the processing service and answers when it has finished, so a successful response carries the job in its terminal state and its results are already stored. `measurement_types` and `windows` are required and non-empty; both are normalised, so two requests differing only in order are the same request. `from` and `to` are half-open and optional.\n\nA job that could not be processed is kept rather than discarded: it is `FAILED` with `error_code`, `error_message`, `attempt_count` and its timestamps. A 5xx here is transient and worth retrying, and because a 5xx leaves no idempotency record the same `Idempotency-Key` may be reused for the retry. Requires the OPERATOR or ADMIN role.",
+        "tags": [
+          "processing"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          },
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProcessingJobRequest"
+              },
+              "example": {
+                "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                "measurement_types": [
+                  "HEART_RATE"
+                ],
+                "windows": [
+                  "1m",
+                  "1h"
+                ],
+                "percentiles": [
+                  50,
+                  95
+                ],
+                "from": "2026-09-18T00:00:00Z",
+                "to": "2026-09-19T00:00:00Z"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The job ran to completion and its results are stored. `Location` addresses the job.",
+            "headers": {
+              "Location": {
+                "$ref": "#/components/headers/Location"
+              },
+              "Idempotency-Replayed": {
+                "$ref": "#/components/headers/IdempotencyReplayed"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingJob"
+                },
+                "example": {
+                  "id": "d8a2e3f4-5c6d-4e7f-8a9b-0c1d2e3f4a51",
+                  "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "status": "COMPLETED",
+                  "parameters": {
+                    "measurement_types": [
+                      "HEART_RATE"
+                    ],
+                    "windows": [
+                      "1m",
+                      "1h"
+                    ],
+                    "percentiles": [
+                      50,
+                      95
+                    ]
+                  },
+                  "algorithm_version": "1.0.0",
+                  "service_version": "0.1.0",
+                  "requested_at": "2026-09-18T12:00:00Z",
+                  "started_at": "2026-09-18T12:00:00Z",
+                  "completed_at": "2026-09-18T12:00:05Z",
+                  "failed_at": null,
+                  "cancelled_at": null,
+                  "error_code": null,
+                  "error_message": null,
+                  "attempt_count": 1,
+                  "created_by": "8a1f0c62-1f2a-4c7e-9c1d-2b6f5a0e7d31",
+                  "created_at": "2026-09-18T12:00:00Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/PatientNotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/IdempotencyInProgress"
+          },
+          "413": {
+            "$ref": "#/components/responses/PayloadTooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMediaType"
+          },
+          "422": {
+            "description": "The request is well formed but cannot be processed: nothing in the range, too much in the range, the processing service refused the data, or the parameters are invalid. The job is kept, `FAILED`.",
+            "x-error-codes": [
+              "PROCESSING_VALIDATION_FAILED",
+              "PROCESSING_NO_MEASUREMENTS",
+              "PROCESSING_JOB_TOO_LARGE",
+              "PROCESSING_REJECTED",
+              "IDEMPOTENCY_KEY_REUSED",
+              "INVALID_IDEMPOTENCY_KEY"
+            ],
+            "x-retryable": false,
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "PROCESSING_NO_MEASUREMENTS",
+                    "message": "No measurements fall in the requested range.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "description": "The processing service could not complete the work. The job is kept, `FAILED`, and the same `Idempotency-Key` may be reused for a retry because a 5xx leaves no idempotency record.",
+            "x-error-codes": [
+              "PROCESSOR_UNAVAILABLE",
+              "PROCESSOR_BUSY",
+              "PROCESSING_INCOMPLETE",
+              "PROCESSOR_PROTOCOL_ERROR",
+              "PROCESSING_RESULTS_NOT_STORED",
+              "REQUEST_CANCELLED"
+            ],
+            "x-retryable": true,
+            "headers": {
+              "Retry-After": {
+                "$ref": "#/components/headers/RetryAfter"
+              },
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                },
+                "example": {
+                  "error": {
+                    "code": "PROCESSOR_BUSY",
+                    "message": "The processing service is at capacity. Retry shortly.",
+                    "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+                  }
+                }
+              }
+            }
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    },
+    "/api/v1/processing/jobs/{job_id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "get": {
+        "operationId": "getProcessingJob",
+        "summary": "Read a processing job",
+        "description": "Returns the job and its current state. This is how a client discovers the fate of a job whose creating request lost its connection: such a job stays `PROCESSING` until its lease expires and is then failed with `PROCESSING_INTERRUPTED` by the next sweep. Any role may read.",
+        "tags": [
+          "processing"
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/RequestId"
+          },
+          {
+            "$ref": "#/components/parameters/CorrelationId"
+          },
+          {
+            "$ref": "#/components/parameters/Traceparent"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The job.",
+            "headers": {
+              "X-Request-ID": {
+                "$ref": "#/components/headers/RequestId"
+              },
+              "X-Correlation-ID": {
+                "$ref": "#/components/headers/CorrelationId"
+              },
+              "RateLimit-Limit": {
+                "$ref": "#/components/headers/RateLimitLimit"
+              },
+              "RateLimit-Remaining": {
+                "$ref": "#/components/headers/RateLimitRemaining"
+              },
+              "RateLimit-Reset": {
+                "$ref": "#/components/headers/RateLimitReset"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProcessingJob"
+                },
+                "example": {
+                  "id": "d8a2e3f4-5c6d-4e7f-8a9b-0c1d2e3f4a51",
+                  "patient_id": "3f1a9d84-6c2b-4a51-9f77-1d0e8b4c2a63",
+                  "status": "FAILED",
+                  "parameters": {
+                    "measurement_types": [
+                      "HEART_RATE"
+                    ],
+                    "windows": [
+                      "1h"
+                    ]
+                  },
+                  "algorithm_version": "1.0.0",
+                  "service_version": "0.1.0",
+                  "requested_at": "2026-09-18T12:00:00Z",
+                  "started_at": "2026-09-18T12:00:00Z",
+                  "completed_at": null,
+                  "failed_at": "2026-09-18T12:15:01Z",
+                  "cancelled_at": null,
+                  "error_code": "PROCESSING_INTERRUPTED",
+                  "error_message": "The gateway holding this job stopped before it finished.",
+                  "attempt_count": 1,
+                  "created_by": "8a1f0c62-1f2a-4c7e-9c1d-2b6f5a0e7d31",
+                  "created_at": "2026-09-18T12:00:00Z"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthenticated"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/JobNotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/InternalError"
+          },
+          "503": {
+            "$ref": "#/components/responses/DependencyUnavailable"
+          },
+          "504": {
+            "$ref": "#/components/responses/RequestTimeout"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "A JWT obtained from `POST /api/v1/auth/login` and sent as `Authorization: Bearer <access_token>` (SPECIFICATIONS.md section 9.1). It is signed with HS256 and carries `sub`, `role`, `iat`, `exp` and a unique `jti`, and expires after 15 minutes by default. There are no refresh tokens: log in again. Clients must treat the token as opaque; every authorization decision is made by the server from the verified token alone, and nothing else a client sends can widen it."
+      }
+    },
+    "parameters": {
+      "RequestId": {
+        "name": "X-Request-ID",
+        "in": "header",
+        "required": false,
+        "description": "A client-chosen identifier for this request. A valid value is kept and echoed; an unusable one is replaced rather than rejected, because a malformed identifier must not turn valid work into a failure.",
+        "schema": {
+          "$ref": "#/components/schemas/Identifier"
+        }
+      },
+      "CorrelationId": {
+        "name": "X-Correlation-ID",
+        "in": "header",
+        "required": false,
+        "description": "Ties one client request to everything it causes across services (SPECIFICATIONS.md section 85). A request that sends none starts one, taking the request id. It is propagated to the processing service and stored with any job the request creates, so a result can always be traced back to the call that asked for it.",
+        "schema": {
+          "$ref": "#/components/schemas/Identifier"
+        }
+      },
+      "Traceparent": {
+        "name": "traceparent",
+        "in": "header",
+        "required": false,
+        "description": "W3C trace context. Send it and your trace continues through the gateway, the processing service and the databases they touch rather than restarting at the edge. Without it a trace starts here.",
+        "schema": {
+          "type": "string",
+          "description": "A W3C `traceparent` value: version, trace id, parent id and flags.",
+          "pattern": "^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$"
+        }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": false,
+        "description": "Makes a write safe to repeat (SPECIFICATIONS.md section 24). The key is chosen by the client, scoped to the calling account and the operation, and kept for 24 hours by default. A repeat with the same body returns the stored response with `Idempotency-Replayed: true`; a repeat with a different body is refused; a repeat while the first is still running is refused with 409. Responses with a 4xx status are stored and replayed like successes, because they are the final answer to that request; a 5xx leaves no record, so a retry may reuse the key.",
+        "schema": {
+          "type": "string",
+          "description": "1 to 255 characters of `[A-Za-z0-9._:-]`. A UUID is a good choice.",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[A-Za-z0-9._:-]+$"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "description": "Page size. Values outside 1 to 200 are rejected rather than clamped, so a client never silently receives a different page than it asked for.",
+        "schema": {
+          "type": "integer",
+          "description": "Between 1 and 200; 50 when omitted.",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 50
+        }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Continues from a previous page. Only a value returned in `next_cursor` is valid; a tampered cursor is rejected.",
+        "schema": {
+          "$ref": "#/components/schemas/Cursor"
+        }
+      },
+      "TypeFilter": {
+        "name": "type",
+        "in": "query",
+        "required": false,
+        "description": "Return only readings of this measurement type.",
+        "schema": {
+          "$ref": "#/components/schemas/MeasurementType"
+        }
+      },
+      "From": {
+        "name": "from",
+        "in": "query",
+        "required": false,
+        "description": "Lower bound on `recorded_at`, inclusive.",
+        "schema": {
+          "$ref": "#/components/schemas/Timestamp"
+        }
+      },
+      "To": {
+        "name": "to",
+        "in": "query",
+        "required": false,
+        "description": "Upper bound on `recorded_at`, exclusive.",
+        "schema": {
+          "$ref": "#/components/schemas/Timestamp"
+        }
+      },
+      "PatientId": {
+        "name": "patient_id",
+        "in": "path",
+        "required": true,
+        "description": "The patient's identifier.",
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
+      "MeasurementId": {
+        "name": "measurement_id",
+        "in": "path",
+        "required": true,
+        "description": "The reading's identifier.",
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      },
+      "JobId": {
+        "name": "job_id",
+        "in": "path",
+        "required": true,
+        "description": "The processing job's identifier.",
+        "schema": {
+          "$ref": "#/components/schemas/Uuid"
+        }
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "The identifier this request was handled under. It equals `error.request_id` in a failure body and appears in the server logs.",
+        "schema": {
+          "$ref": "#/components/schemas/Identifier"
+        }
+      },
+      "CorrelationId": {
+        "description": "The correlation identifier for this request. Quote it in a support request.",
+        "schema": {
+          "$ref": "#/components/schemas/Identifier"
+        }
+      },
+      "Location": {
+        "description": "The address of the resource that was just created.",
+        "schema": {
+          "type": "string",
+          "description": "A path under `/api/v1`."
+        }
+      },
+      "RetryAfter": {
+        "description": "How long to wait before retrying, in seconds.",
+        "schema": {
+          "type": "integer",
+          "description": "Seconds.",
+          "minimum": 0
+        }
+      },
+      "WwwAuthenticate": {
+        "description": "The authentication challenge. Every 401 carries one.",
+        "schema": {
+          "type": "string",
+          "description": "Always `Bearer`, optionally with an error parameter."
+        }
+      },
+      "IdempotencyReplayed": {
+        "description": "Present and `true` when this response was replayed from a previous request under the same `Idempotency-Key`. The replay is the same JSON document; byte-for-byte equality is not promised.",
+        "schema": {
+          "type": "string",
+          "description": "Always `true` when present.",
+          "enum": [
+            "true"
+          ]
+        }
+      },
+      "RateLimitLimit": {
+        "description": "Requests allowed in the current window.",
+        "schema": {
+          "type": "integer",
+          "description": "The budget.",
+          "minimum": 0
+        }
+      },
+      "RateLimitRemaining": {
+        "description": "How many requests are left in the current window.",
+        "schema": {
+          "type": "integer",
+          "description": "What is left of the budget.",
+          "minimum": 0
+        }
+      },
+      "RateLimitReset": {
+        "description": "Seconds until the window rolls over.",
+        "schema": {
+          "type": "integer",
+          "description": "Seconds.",
+          "minimum": 0
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "The request could not be read: malformed JSON, a value of the wrong type, an unknown field, more than one JSON value, or a body that was required and not sent. Request schemas reject unknown fields, so a typo is reported rather than ignored.",
+        "x-error-codes": [
+          "INVALID_JSON",
+          "EMPTY_BODY"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "INVALID_JSON",
+                "message": "The request body is not valid JSON.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "Unauthenticated": {
+        "description": "No access token was sent, or the one sent could not be verified: malformed, tampered with, signed with an unknown key, expired, or its subject no longer exists. The challenge is returned whatever role the token claims.",
+        "x-error-codes": [
+          "AUTHENTICATION_REQUIRED",
+          "INVALID_TOKEN",
+          "TOKEN_EXPIRED"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "WWW-Authenticate": {
+            "$ref": "#/components/headers/WwwAuthenticate"
+          },
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "AUTHENTICATION_REQUIRED",
+                "message": "This operation requires an access token.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The token is valid but the account may not perform this operation, or the account is disabled. The response does not say which permission was missing; the server logs the account, role and permission.",
+        "x-error-codes": [
+          "PERMISSION_DENIED",
+          "ACCOUNT_DISABLED"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "PERMISSION_DENIED",
+                "message": "This account may not perform that operation.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "PatientNotFound": {
+        "description": "No patient has that id, the id is not a UUID, or the patient is deleted and the caller is not ADMIN. The three are deliberately indistinguishable.",
+        "x-error-codes": [
+          "PATIENT_NOT_FOUND"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "PATIENT_NOT_FOUND",
+                "message": "No such patient.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "MeasurementNotFound": {
+        "description": "No reading has that id, the id is not a UUID, or the reading belongs to a patient the caller cannot see.",
+        "x-error-codes": [
+          "MEASUREMENT_NOT_FOUND"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "MEASUREMENT_NOT_FOUND",
+                "message": "No such measurement.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "JobNotFound": {
+        "description": "No processing job has that id, or the id is not a UUID.",
+        "x-error-codes": [
+          "PROCESSING_JOB_NOT_FOUND"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "PROCESSING_JOB_NOT_FOUND",
+                "message": "No such processing job.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "MeasurementConflict": {
+        "description": "The same reading, meaning the same patient, type, `recorded_at` and source, is already stored. In a batch the failing item is named.",
+        "x-error-codes": [
+          "MEASUREMENT_ALREADY_EXISTS",
+          "IDEMPOTENCY_IN_PROGRESS"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "MEASUREMENT_ALREADY_EXISTS",
+                "message": "That reading is already stored.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "IdempotencyInProgress": {
+        "description": "The first request under this `Idempotency-Key` is still running. `Retry-After` says when to try again.",
+        "x-error-codes": [
+          "IDEMPOTENCY_IN_PROGRESS"
+        ],
+        "x-retryable": true,
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "IDEMPOTENCY_IN_PROGRESS",
+                "message": "An earlier request with this key is still running.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "ValidationFailed": {
+        "description": "The input was understood but breaks a rule. `details` names every field at fault, so one response is enough to fix the request.",
+        "x-error-codes": [
+          "VALIDATION_FAILED",
+          "INVALID_IDEMPOTENCY_KEY",
+          "IDEMPOTENCY_KEY_REUSED"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "VALIDATION_FAILED",
+                "message": "The request is invalid.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT",
+                "details": [
+                  {
+                    "field": "email",
+                    "message": "is required"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "MeasurementValidationFailed": {
+        "description": "One or more readings break a validation rule. Every failing field across the whole request is reported at once; batch items are addressed as `items[i].field`.",
+        "x-error-codes": [
+          "MEASUREMENT_VALIDATION_FAILED",
+          "INVALID_IDEMPOTENCY_KEY",
+          "IDEMPOTENCY_KEY_REUSED"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "MEASUREMENT_VALIDATION_FAILED",
+                "message": "One or more readings are invalid.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT",
+                "details": [
+                  {
+                    "field": "items[0].unit",
+                    "message": "must be bpm for HEART_RATE"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      },
+      "InvalidPagination": {
+        "description": "A pagination argument is unusable: `limit` outside 1 to 200, or a cursor this API did not produce.",
+        "x-error-codes": [
+          "VALIDATION_FAILED",
+          "INVALID_CURSOR"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "INVALID_CURSOR",
+                "message": "The pagination cursor is not valid.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "PayloadTooLarge": {
+        "description": "The request body exceeds the configured limit, 1 MiB by default. It is refused before the body is read when the length is declared, and as soon as the limit is crossed otherwise.",
+        "x-error-codes": [
+          "REQUEST_BODY_TOO_LARGE"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "REQUEST_BODY_TOO_LARGE",
+                "message": "The request body is too large.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "UnsupportedMediaType": {
+        "description": "`Content-Type` is not `application/json`. A `charset` parameter is accepted.",
+        "x-error-codes": [
+          "UNSUPPORTED_MEDIA_TYPE"
+        ],
+        "x-retryable": false,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "UNSUPPORTED_MEDIA_TYPE",
+                "message": "The request must be application/json.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "The caller is over budget (SPECIFICATIONS.md section 29). An authenticated request counts against the account behind the token; an unauthenticated one against the client address. Pace from the `RateLimit-*` headers rather than by hitting the limit.",
+        "x-error-codes": [
+          "RATE_LIMIT_EXCEEDED"
+        ],
+        "x-retryable": true,
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "RateLimit-Limit": {
+            "$ref": "#/components/headers/RateLimitLimit"
+          },
+          "RateLimit-Remaining": {
+            "$ref": "#/components/headers/RateLimitRemaining"
+          },
+          "RateLimit-Reset": {
+            "$ref": "#/components/headers/RateLimitReset"
+          },
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "RATE_LIMIT_EXCEEDED",
+                "message": "Too many requests. Retry shortly.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "InternalError": {
+        "description": "An unexpected failure. The cause is logged server-side under `request_id` and is never returned: a client cannot be shown a stack trace, SQL, or a hostname.",
+        "x-error-codes": [
+          "INTERNAL_ERROR"
+        ],
+        "x-retryable": true,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "INTERNAL_ERROR",
+                "message": "Something went wrong.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "DependencyUnavailable": {
+        "description": "The request was cancelled before it completed, usually because the client went away or the server began shutting down. Worth retrying. Operations that call the processing service declare their own richer set of 503 codes.",
+        "x-error-codes": [
+          "REQUEST_CANCELLED"
+        ],
+        "x-retryable": true,
+        "headers": {
+          "Retry-After": {
+            "$ref": "#/components/headers/RetryAfter"
+          },
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "REQUEST_CANCELLED",
+                "message": "The request was cancelled before it completed.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      },
+      "RequestTimeout": {
+        "description": "The request exceeded the server's processing bound. Whether the work completed is not promised; read the resource back to find out.",
+        "x-error-codes": [
+          "REQUEST_TIMEOUT"
+        ],
+        "x-retryable": true,
+        "headers": {
+          "X-Request-ID": {
+            "$ref": "#/components/headers/RequestId"
+          },
+          "X-Correlation-ID": {
+            "$ref": "#/components/headers/CorrelationId"
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            },
+            "example": {
+              "error": {
+                "code": "REQUEST_TIMEOUT",
+                "message": "The request took too long.",
+                "request_id": "DBYEUHL7YNZT4MHMR6CQZI55CT"
+              }
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "description": "The envelope returned by every failed request on every endpoint of this API.",
+        "additionalProperties": false,
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "description": "One failure. `code` is stable and is what a client branches on; `message` is human-readable, safe to display, and may be reworded without a contract change.",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "description": "A stable, machine-readable failure code. The codes an operation can return are listed in that response's `x-error-codes`.",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$"
+          },
+          "message": {
+            "type": "string",
+            "description": "A human-readable sentence, safe to display. It never contains stack traces, SQL, hostnames or other implementation detail.",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "request_id": {
+            "$ref": "#/components/schemas/Identifier"
+          },
+          "details": {
+            "type": "array",
+            "description": "Present only when specific input fields are at fault. Every failing field is listed, so one response is enough to repair the request.",
+            "items": {
+              "$ref": "#/components/schemas/FieldError"
+            }
+          }
+        }
+      },
+      "FieldError": {
+        "type": "object",
+        "description": "One field that failed validation.",
+        "additionalProperties": false,
+        "required": [
+          "field",
+          "message"
+        ],
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "The field at fault, addressed from the root of the request body. Batch items are addressed as `items[i].field`.",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string",
+            "description": "What is wrong with it, in words a client can show a user.",
+            "minLength": 1
+          }
+        }
+      },
+      "Identifier": {
+        "type": "string",
+        "description": "An opaque correlation identifier: 1 to 128 characters from `[A-Za-z0-9._-]`. Used for request and correlation ids.",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9._-]+$"
+      },
+      "Uuid": {
+        "type": "string",
+        "description": "A UUID in canonical hyphenated form. Every resource this API creates is identified by one.",
+        "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "An RFC 3339 instant with a UTC offset. Input may carry any offset; output is always UTC with a `Z` suffix. Stored with microsecond precision, so finer digits are dropped on input.",
+        "minLength": 20,
+        "maxLength": 64
+      },
+      "Cursor": {
+        "type": "string",
+        "description": "An opaque, URL-safe pagination cursor. Only a value this API returned in `next_cursor` is valid; a tampered value is rejected with `INVALID_CURSOR`.",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "Health": {
+        "type": "object",
+        "description": "The liveness answer.",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "service",
+          "version",
+          "environment"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "Always `ok`; the endpoint answers 200 or not at all.",
+            "enum": [
+              "ok"
+            ]
+          },
+          "service": {
+            "type": "string",
+            "description": "Which service answered.",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string",
+            "description": "The build that answered.",
+            "minLength": 1
+          },
+          "environment": {
+            "type": "string",
+            "description": "The deployment environment the process was configured with. Tooling that writes data reads this to check what it is talking to before it writes anything.",
+            "enum": [
+              "local",
+              "test",
+              "staging",
+              "production"
+            ]
+          }
+        }
+      },
+      "Readiness": {
+        "type": "object",
+        "description": "The readiness answer: whether the process can serve traffic, and the state of each dependency it needs.",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "service",
+          "version",
+          "checks"
+        ],
+        "properties": {
+          "status": {
+            "type": "string",
+            "description": "`ready` when every check passed, `not_ready` otherwise.",
+            "enum": [
+              "ready",
+              "not_ready"
+            ]
+          },
+          "service": {
+            "type": "string",
+            "description": "Which service answered.",
+            "minLength": 1
+          },
+          "version": {
+            "type": "string",
+            "description": "The build that answered.",
+            "minLength": 1
+          },
+          "checks": {
+            "type": "array",
+            "description": "One entry per dependency, in a stable order.",
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            }
+          }
+        }
+      },
+      "Check": {
+        "type": "object",
+        "description": "One dependency check. Why a check failed stays server-side: a probe response is not a place to describe internal topology.",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "status"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The dependency checked.",
+            "minLength": 1
+          },
+          "status": {
+            "type": "string",
+            "description": "`ok` or `fail`.",
+            "enum": [
+              "ok",
+              "fail"
+            ]
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "description": "The single role an account holds (SPECIFICATIONS.md section 9.1). Roles nest: every operation an OPERATOR may perform is available to an ADMIN, and every USER operation to an OPERATOR.",
+        "enum": [
+          "ADMIN",
+          "OPERATOR",
+          "USER"
+        ]
+      },
+      "UserStatus": {
+        "type": "string",
+        "description": "Whether the account may authenticate. A disabled account is refused with 403 even when its credentials are correct.",
+        "enum": [
+          "ACTIVE",
+          "DISABLED"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "description": "The client view of an account. It never includes a credential.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "email",
+          "role",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "The account's email, matched case-insensitively at login.",
+            "minLength": 3,
+            "maxLength": 320
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "status": {
+            "$ref": "#/components/schemas/UserStatus"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "description": "A credential. It is never logged, never echoed and never stored outside the password hash it is checked against.",
+        "additionalProperties": false,
+        "required": [
+          "email",
+          "password"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "The account's email. Matching is case-insensitive.",
+            "minLength": 3,
+            "maxLength": 320
+          },
+          "password": {
+            "type": "string",
+            "description": "The account's password, up to 1024 bytes.",
+            "minLength": 1,
+            "maxLength": 1024
+          }
+        }
+      },
+      "LoginResponse": {
+        "type": "object",
+        "description": "A newly issued access token and the account it belongs to.",
+        "additionalProperties": false,
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "expires_at",
+          "user"
+        ],
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "The bearer token. Treat it as opaque: its internal structure is not part of this contract.",
+            "minLength": 1
+          },
+          "token_type": {
+            "type": "string",
+            "description": "Always `Bearer`.",
+            "enum": [
+              "Bearer"
+            ]
+          },
+          "expires_in": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The token's lifetime in seconds from issue, 900 by default.",
+            "minimum": 1
+          },
+          "expires_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        }
+      },
+      "Sex": {
+        "type": "string",
+        "description": "The synthetic record's sex field. It is stored and returned and drives no logic.",
+        "enum": [
+          "FEMALE",
+          "MALE",
+          "OTHER",
+          "UNKNOWN"
+        ]
+      },
+      "PatientStatus": {
+        "type": "string",
+        "description": "The patient record's lifecycle state. `DELETED` is a soft delete: the record keeps its identity so measurements, jobs and results stay valid.",
+        "enum": [
+          "ACTIVE",
+          "INACTIVE",
+          "DELETED"
+        ]
+      },
+      "CreatePatientRequest": {
+        "type": "object",
+        "description": "A new synthetic patient. Unknown fields are rejected, so a typo never passes silently.",
+        "additionalProperties": false,
+        "required": [
+          "external_reference",
+          "date_of_birth",
+          "sex"
+        ],
+        "properties": {
+          "external_reference": {
+            "type": "string",
+            "description": "The caller's own identifier for this synthetic record: 1 to 128 characters after trimming, no control characters, unique across patients.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "date_of_birth": {
+            "type": "string",
+            "description": "A calendar date, `YYYY-MM-DD`, between 1900-01-01 and today in UTC.",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "sex": {
+            "$ref": "#/components/schemas/Sex"
+          }
+        }
+      },
+      "Patient": {
+        "type": "object",
+        "description": "A synthetic patient (SPECIFICATIONS.md section 11). The API stores and returns identifiers and demographics and applies no clinical logic.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "external_reference",
+          "date_of_birth",
+          "sex",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "external_reference": {
+            "type": "string",
+            "description": "The caller's own identifier for this record, unique across patients.",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "date_of_birth": {
+            "type": "string",
+            "description": "A calendar date, `YYYY-MM-DD`.",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "sex": {
+            "$ref": "#/components/schemas/Sex"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PatientStatus"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "updated_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "PatientPage": {
+        "type": "object",
+        "description": "One page of patients, in creation order.",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The patients on this page. Always an array, never null.",
+            "items": {
+              "$ref": "#/components/schemas/Patient"
+            }
+          },
+          "next_cursor": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cursor"
+              }
+            ],
+            "description": "Pass as `cursor` to fetch the next page. Null on the last page.",
+            "nullable": true
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether a further page exists."
+          }
+        }
+      },
+      "MeasurementType": {
+        "type": "string",
+        "description": "The kind of reading. Each type has exactly one canonical unit and one technical value range; the ranges reject values that cannot be a reading at all and are not medical thresholds.",
+        "enum": [
+          "HEART_RATE",
+          "BLOOD_PRESSURE_SYSTOLIC",
+          "BLOOD_PRESSURE_DIASTOLIC",
+          "SPO2",
+          "BODY_TEMPERATURE",
+          "BLOOD_GLUCOSE",
+          "RESPIRATORY_RATE"
+        ]
+      },
+      "MeasurementUnit": {
+        "type": "string",
+        "description": "The canonical unit of a measurement type: `bpm` for HEART_RATE, `mmHg` for either blood pressure, `%` for SPO2, `C` for BODY_TEMPERATURE, `mg/dL` for BLOOD_GLUCOSE and `breaths/min` for RESPIRATORY_RATE. It must match the type exactly; no conversion is performed.",
+        "enum": [
+          "bpm",
+          "mmHg",
+          "%",
+          "C",
+          "mg/dL",
+          "breaths/min"
+        ]
+      },
+      "Metadata": {
+        "type": "object",
+        "description": "Free-form JSON accompanying a reading: at most 2048 bytes as compact JSON and at most 8 levels deep. Absent or null on input means an empty object. Request logs never include it.",
+        "additionalProperties": true
+      },
+      "CreateMeasurementRequest": {
+        "type": "object",
+        "description": "One synthetic reading to store. Also the item shape of a batch.",
+        "additionalProperties": false,
+        "required": [
+          "patient_id",
+          "type",
+          "value",
+          "unit",
+          "recorded_at",
+          "source"
+        ],
+        "properties": {
+          "patient_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "type": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "A finite number inside the type's technical range, inclusive."
+          },
+          "unit": {
+            "$ref": "#/components/schemas/MeasurementUnit"
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "source": {
+            "type": "string",
+            "description": "What produced the reading: 1 to 64 characters after trimming, no control characters. Together with the patient, type and `recorded_at` it identifies the reading, so the same four values cannot be stored twice.",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          }
+        }
+      },
+      "CreateMeasurementBatchRequest": {
+        "type": "object",
+        "description": "A batch of readings, stored in one transaction: either all of them or none.",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "1 to 1000 readings, configurable per deployment. Two items describing the same reading are rejected against each other.",
+            "minItems": 1,
+            "maxItems": 1000,
+            "items": {
+              "$ref": "#/components/schemas/CreateMeasurementRequest"
+            }
+          }
+        }
+      },
+      "Measurement": {
+        "type": "object",
+        "description": "A stored synthetic reading (SPECIFICATIONS.md section 12). The API validates and stores it and applies no clinical interpretation.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "patient_id",
+          "type",
+          "value",
+          "unit",
+          "recorded_at",
+          "created_at",
+          "source",
+          "metadata"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "patient_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "type": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The stored value, in the type's canonical unit."
+          },
+          "unit": {
+            "$ref": "#/components/schemas/MeasurementUnit"
+          },
+          "recorded_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "source": {
+            "type": "string",
+            "description": "What produced the reading.",
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Metadata"
+          }
+        }
+      },
+      "MeasurementBatch": {
+        "type": "object",
+        "description": "The readings a batch stored, in input order.",
+        "additionalProperties": false,
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The stored readings, positionally matching the request.",
+            "items": {
+              "$ref": "#/components/schemas/Measurement"
+            }
+          }
+        }
+      },
+      "MeasurementPage": {
+        "type": "object",
+        "description": "One page of readings, ordered by `recorded_at` then id.",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The readings on this page. Always an array, never null.",
+            "items": {
+              "$ref": "#/components/schemas/Measurement"
+            }
+          },
+          "next_cursor": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cursor"
+              }
+            ],
+            "description": "Pass as `cursor` to fetch the next page. Null on the last page.",
+            "nullable": true
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether a further page exists."
+          }
+        }
+      },
+      "Window": {
+        "type": "string",
+        "description": "An aggregation window. Windows are tumbling and aligned to the Unix epoch in UTC, so a 24h window starts at midnight UTC (SPECIFICATIONS.md section 15).",
+        "enum": [
+          "1m",
+          "5m",
+          "15m",
+          "1h",
+          "6h",
+          "24h",
+          "7d"
+        ]
+      },
+      "Percentile": {
+        "type": "integer",
+        "description": "A percentile rank between 1 and 99 inclusive. Percentiles use the nearest-rank method, so every reported percentile is an observed value.",
+        "minimum": 1,
+        "maximum": 99
+      },
+      "ProcessingStatus": {
+        "type": "string",
+        "description": "Where a job is in its lifecycle (SPECIFICATIONS.md section 92). `PENDING` when created, `PROCESSING` while the processing service holds it, then one terminal state. A failed job is kept rather than removed, so a failure never disappears.",
+        "enum": [
+          "PENDING",
+          "PROCESSING",
+          "COMPLETED",
+          "FAILED",
+          "CANCELLED"
+        ]
+      },
+      "CreateProcessingJobRequest": {
+        "type": "object",
+        "description": "What to process. `measurement_types` and `windows` are normalised, so two requests differing only in order are the same request.",
+        "additionalProperties": false,
+        "required": [
+          "patient_id",
+          "measurement_types",
+          "windows"
+        ],
+        "properties": {
+          "patient_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "measurement_types": {
+            "type": "array",
+            "description": "Which kinds of reading to process. Required and non-empty; repeated entries are rejected.",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/MeasurementType"
+            }
+          },
+          "windows": {
+            "type": "array",
+            "description": "Which aggregation windows to compute. Required and non-empty; repeated entries are rejected.",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/Window"
+            }
+          },
+          "percentiles": {
+            "type": "array",
+            "description": "Which percentile ranks to report, at most 20. May be omitted.",
+            "maxItems": 20,
+            "uniqueItems": true,
+            "items": {
+              "$ref": "#/components/schemas/Percentile"
+            }
+          },
+          "from": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "to": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "ProcessingJob": {
+        "type": "object",
+        "description": "A processing job as the API returns it (SPECIFICATIONS.md sections 13 and 94). A FAILED job carries everything needed to diagnose it without reaching into the server: the stable code, a safe message, how many attempts were made, and when each transition happened.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "patient_id",
+          "status",
+          "parameters",
+          "algorithm_version",
+          "requested_at",
+          "attempt_count",
+          "created_by",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "patient_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProcessingStatus"
+          },
+          "parameters": {
+            "type": "object",
+            "description": "The normalised parameters the job ran with, stored as given to the processing service so a result can be reproduced.",
+            "additionalProperties": true
+          },
+          "algorithm_version": {
+            "type": "string",
+            "description": "The processing algorithm version the job requested.",
+            "minLength": 1
+          },
+          "service_version": {
+            "type": "string",
+            "description": "The build of the processing service that handled the job. Null until a service has taken it.",
+            "nullable": true
+          },
+          "requested_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "started_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "description": "When the job moved to PROCESSING. Null while PENDING.",
+            "nullable": true
+          },
+          "completed_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "description": "When the job completed. Null unless COMPLETED.",
+            "nullable": true
+          },
+          "failed_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "description": "When the job failed. Null unless FAILED.",
+            "nullable": true
+          },
+          "cancelled_at": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Timestamp"
+              }
+            ],
+            "description": "When the job was cancelled. Null unless CANCELLED.",
+            "nullable": true
+          },
+          "error_code": {
+            "type": "string",
+            "description": "A stable, safe failure code. Set only on a FAILED job.",
+            "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+            "nullable": true
+          },
+          "error_message": {
+            "type": "string",
+            "description": "A safe sentence describing the failure. The processing service's own messages are never repeated here: they are written for that service's operators and can name internal detail.",
+            "maxLength": 512,
+            "nullable": true
+          },
+          "attempt_count": {
+            "type": "integer",
+            "description": "How many times the job has been started.",
+            "minimum": 0
+          },
+          "created_by": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "Statistics": {
+        "type": "object",
+        "description": "Descriptive statistics of the values in one window, produced by the processing service and stored unchanged. The relations `count >= 1` and `min <= mean, median and every percentile <= max` always hold, and spread is never negative (SPECIFICATIONS.md section 15).",
+        "additionalProperties": false,
+        "required": [
+          "count",
+          "min",
+          "max",
+          "mean",
+          "median",
+          "variance",
+          "std_dev"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many values fell in the window. A window with no values produces no result at all rather than an empty one.",
+            "minimum": 1
+          },
+          "min": {
+            "type": "number",
+            "format": "double",
+            "description": "The smallest value in the window."
+          },
+          "max": {
+            "type": "number",
+            "format": "double",
+            "description": "The largest value in the window."
+          },
+          "mean": {
+            "type": "number",
+            "format": "double",
+            "description": "The arithmetic mean, computed with compensated summation."
+          },
+          "median": {
+            "type": "number",
+            "format": "double",
+            "description": "The middle value, interpolated between the two middles for an even count."
+          },
+          "variance": {
+            "type": "number",
+            "format": "double",
+            "description": "The sample variance with Bessel's correction. A single value has zero variance.",
+            "minimum": 0
+          },
+          "std_dev": {
+            "type": "number",
+            "format": "double",
+            "description": "The square root of the variance.",
+            "minimum": 0
+          },
+          "percentiles": {
+            "type": "object",
+            "description": "The requested percentiles, keyed by rank as a decimal string such as `\"95\"`. Omitted entirely when the job requested none.",
+            "additionalProperties": {
+              "type": "number",
+              "format": "double"
+            }
+          }
+        }
+      },
+      "AnomalyMetric": {
+        "type": "string",
+        "description": "The kind of rule that flagged a value.",
+        "enum": [
+          "THRESHOLD",
+          "Z_SCORE",
+          "ROLLING_DEVIATION"
+        ]
+      },
+      "Severity": {
+        "type": "string",
+        "description": "Technical severity of an anomaly. It classifies how far a value departs from a rule's expectation and carries no medical meaning (SPECIFICATIONS.md section 16).",
+        "enum": [
+          "INFO",
+          "WARNING",
+          "CRITICAL"
+        ]
+      },
+      "Anomaly": {
+        "type": "object",
+        "description": "One flagged value, carrying everything needed to interpret it on its own (SPECIFICATIONS.md section 16).",
+        "additionalProperties": false,
+        "required": [
+          "measurement_type",
+          "window",
+          "metric",
+          "value",
+          "threshold",
+          "severity",
+          "detected_at",
+          "algorithm_version"
+        ],
+        "properties": {
+          "measurement_type": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "window": {
+            "$ref": "#/components/schemas/Window"
+          },
+          "metric": {
+            "$ref": "#/components/schemas/AnomalyMetric"
+          },
+          "value": {
+            "type": "number",
+            "format": "double",
+            "description": "The measured value that was flagged."
+          },
+          "threshold": {
+            "type": "number",
+            "format": "double",
+            "description": "The bound the value crossed."
+          },
+          "severity": {
+            "$ref": "#/components/schemas/Severity"
+          },
+          "detected_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "algorithm_version": {
+            "type": "string",
+            "description": "The algorithm build that flagged it.",
+            "minLength": 1
+          }
+        }
+      },
+      "ProcessingResult": {
+        "type": "object",
+        "description": "One result of a job, for one measurement type and one window instance. `statistics` and `anomalies` are the processing service's own output, stored unchanged and attributed to the algorithm and service versions that produced them.",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "job_id",
+          "patient_id",
+          "measurement_type",
+          "window",
+          "window_start",
+          "statistics",
+          "anomalies",
+          "algorithm_version",
+          "service_version",
+          "created_at"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "job_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "patient_id": {
+            "$ref": "#/components/schemas/Uuid"
+          },
+          "measurement_type": {
+            "$ref": "#/components/schemas/MeasurementType"
+          },
+          "window": {
+            "$ref": "#/components/schemas/Window"
+          },
+          "window_start": {
+            "$ref": "#/components/schemas/Timestamp"
+          },
+          "statistics": {
+            "$ref": "#/components/schemas/Statistics"
+          },
+          "anomalies": {
+            "type": "array",
+            "description": "Every value this window flagged. Empty when nothing was flagged.",
+            "items": {
+              "$ref": "#/components/schemas/Anomaly"
+            }
+          },
+          "algorithm_version": {
+            "type": "string",
+            "description": "The algorithm build that produced this result.",
+            "minLength": 1
+          },
+          "service_version": {
+            "type": "string",
+            "description": "The processing service build that produced this result.",
+            "minLength": 1
+          },
+          "created_at": {
+            "$ref": "#/components/schemas/Timestamp"
+          }
+        }
+      },
+      "ProcessingResultPage": {
+        "type": "object",
+        "description": "One page of processing results.",
+        "additionalProperties": false,
+        "required": [
+          "items",
+          "next_cursor",
+          "has_more"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "description": "The results on this page. Always an array, never null.",
+            "items": {
+              "$ref": "#/components/schemas/ProcessingResult"
+            }
+          },
+          "next_cursor": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Cursor"
+              }
+            ],
+            "description": "Pass as `cursor` to fetch the next page. Null on the last page.",
+            "nullable": true
+          },
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether a further page exists."
+          }
+        }
+      }
+    }
+  }
+}

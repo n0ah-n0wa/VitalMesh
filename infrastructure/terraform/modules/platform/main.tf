@@ -62,9 +62,22 @@ module "eks" {
 
   enable_load_balancer_controller = true
   enable_cluster_autoscaler       = true
-  node_auto_repair                = true
-  enable_zonal_shift              = var.enable_zonal_shift
-  deletion_protection             = var.cluster_deletion_protection
+
+  # Alertmanager publishes to the same topic the infrastructure alarms
+  # notify, so a database alarm and an application alert arrive in one
+  # place rather than two.
+  enable_alertmanager = true
+  # Composed rather than read from aws_sns_topic.alarms.arn. The topic is
+  # created in this same plan, so its ARN is unknown until apply, and an
+  # unknown here propagates into the IRSA policy value, then into the keys of
+  # the inline-policy map, and Terraform cannot plan a for_each whose keys it
+  # does not know. Every part of this string is known at plan time and the
+  # topic name is the one the resource above sets, so the role is scoped
+  # exactly as tightly as it would be either way.
+  alertmanager_sns_topic_arn = "arn:${data.aws_partition.current.partition}:sns:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:${local.name}-alarms"
+  node_auto_repair           = true
+  enable_zonal_shift         = var.enable_zonal_shift
+  deletion_protection        = var.cluster_deletion_protection
 
   tags = local.tags
 }

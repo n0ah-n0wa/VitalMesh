@@ -43,6 +43,7 @@ type Config struct {
 	Processing   Processing
 	Processor    Processor
 	Idempotency  Idempotency
+	Retention    Retention
 	Redis        Redis
 	Tracing      Tracing
 	RateLimit    RateLimit
@@ -211,6 +212,36 @@ type Idempotency struct {
 	RetentionInterval time.Duration
 }
 
+// Retention configures how long stored synthetic data is kept
+// (SPECIFICATIONS.md section 81).
+//
+// Both windows default to zero, which disables removal. That is the right
+// default for a system of record: deleting data is irreversible, so it
+// happens because an operator asked for it, never because nobody set a
+// variable. A deployment that wants retention sets the days it wants.
+//
+// Processing jobs are deliberately not covered. Section 94 requires a
+// failed job to keep its diagnosis rather than disappear, and a job row is
+// small and bounded by how many were requested; the readings and the
+// results are what grow without limit.
+type Retention struct {
+	// MeasurementDays is how long a reading is kept after the time it was
+	// recorded. Zero keeps readings for ever.
+	MeasurementDays int
+	// ResultDays is how long a processing result is kept after it was
+	// produced. Zero keeps results for ever.
+	ResultDays int
+	// Interval is how often the sweep runs.
+	Interval time.Duration
+	// BatchLimit is how many rows one statement removes, bounding both the
+	// transaction and the locks it takes so a sweep never blocks the write
+	// path it shares a table with.
+	BatchLimit int
+}
+
+// Enabled reports whether anything is removed at all.
+func (r Retention) Enabled() bool { return r.MeasurementDays > 0 || r.ResultDays > 0 }
+
 // Bounds enforced on measurement and idempotency settings.
 // DefaultAlgorithmVersion is the processing algorithm version this build of
 // the gateway asks the processor for. It matches the processor's
@@ -268,6 +299,13 @@ const (
 	MaxIdempotencyTTL          = 7 * 24 * time.Hour
 	// Bounds on the retention sweep: often enough that expired records do
 	// not pile up, rarely enough that the sweep is not itself load.
+	// MaxRetentionBatch bounds one delete statement, and so the locks it
+	// takes on a table the write path is also using.
+	MaxRetentionBatch = 10_000
+	// MaxRetentionDays is about a century: past it the value is far more
+	// likely to be a units mistake than an intention.
+	MaxRetentionDays = 36_500
+
 	MinRetentionInterval = time.Second
 	MaxRetentionInterval = 24 * time.Hour
 )
@@ -433,6 +471,12 @@ func Load(lookup Lookup) (Config, error) {
 			TTL:               p.duration("IDEMPOTENCY_TTL", 24*time.Hour),
 			RetentionInterval: p.duration("IDEMPOTENCY_RETENTION_INTERVAL", time.Hour),
 		},
+		Retention: Retention{
+			MeasurementDays: int(p.uint32("MEASUREMENT_RETENTION_DAYS", 0)),
+			ResultDays:      int(p.uint32("RESULT_RETENTION_DAYS", 0)),
+			Interval:        p.duration("RETENTION_INTERVAL", time.Hour),
+			BatchLimit:      int(p.uint32("RETENTION_BATCH_LIMIT", 1000)),
+		},
 		Redis: Redis{
 			URL:              p.string("REDIS_URL", ""),
 			DialTimeout:      p.duration("REDIS_DIAL_TIMEOUT", 2*time.Second),
@@ -503,6 +547,21 @@ func Load(lookup Lookup) (Config, error) {
 	}
 	if cfg.Idempotency.RetentionInterval < MinRetentionInterval || cfg.Idempotency.RetentionInterval > MaxRetentionInterval {
 		p.fail("IDEMPOTENCY_RETENTION_INTERVAL: must be between %s and %s", MinRetentionInterval, MaxRetentionInterval)
+	}
+	if cfg.Retention.Interval < MinRetentionInterval || cfg.Retention.Interval > MaxRetentionInterval {
+		p.fail("RETENTION_INTERVAL: must be between %s and %s", MinRetentionInterval, MaxRetentionInterval)
+	}
+	if cfg.Retention.BatchLimit < 1 || cfg.Retention.BatchLimit > MaxRetentionBatch {
+		p.fail("RETENTION_BATCH_LIMIT: must be between 1 and %d", MaxRetentionBatch)
+	}
+	// A window shorter than a day would delete readings a job might still
+	// be about to process, and is far more likely to be a units mistake
+	// (seconds or hours entered as days) than an intention.
+	if cfg.Retention.MeasurementDays < 0 || cfg.Retention.MeasurementDays > MaxRetentionDays {
+		p.fail("MEASUREMENT_RETENTION_DAYS: must be between 0 (keep for ever) and %d", MaxRetentionDays)
+	}
+	if cfg.Retention.ResultDays < 0 || cfg.Retention.ResultDays > MaxRetentionDays {
+		p.fail("RESULT_RETENTION_DAYS: must be between 0 (keep for ever) and %d", MaxRetentionDays)
 	}
 	if cfg.Environment.Deployed() && cfg.Database.URL != "" && !databaseURLRequiresTLS(cfg.Database.URL) {
 		p.fail("DATABASE_URL: sslmode must be require, verify-ca or verify-full in %s (SPECIFICATIONS.md section 30)", cfg.Environment)

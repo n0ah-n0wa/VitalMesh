@@ -7,60 +7,95 @@ and anything not verified is marked as an assumption rather than a finding.
 
 **Verdict.** The application and its infrastructure are in good shape: the
 failure behaviour, the security posture, the deployment path and the backups
-have each been reviewed and, where it was possible, tested. **One blocker
-remains: nothing collects the application's metrics or delivers its alerts
-in any environment.** Launching in that state means operating blind to error
-rate, latency and saturation, and the nine alert rules this repository
-already ships would never fire. Everything else on the list below is either
-fixed, accepted with a compensating control, or scheduled.
+have each been reviewed and, where it was possible, tested. **The blocker
+this review originally raised — that nothing collected the application's
+metrics or delivered its alerts — has been closed**, and the section below
+records what was built and what about it is still unproven. Everything else
+on the list is fixed, accepted with a compensating control, or scheduled.
 
-## The blocker
-
-### P1 — No application metrics collection and no alert delivery
-
-**Evidence.** Both services expose `/metrics`, `observability/prometheus/rules/alerts.yml`
-defines nine alerts (service down, 5xx rate, latency, pool exhaustion, Redis
-degraded, processing failures, processor saturation, processing slow, span
-export failing), and four Grafana dashboards exist. The staging and
-production ConfigMaps point `OTEL_EXPORTER_OTLP_ENDPOINT` at
-`otel-collector.monitoring.svc.cluster.local:4318`, and
-`networkpolicy-baseline.yaml` admits scraping from a namespace called
-`monitoring`.
-
-Nothing creates any of it. There is no `monitoring` namespace, no collector,
-no Prometheus, no Alertmanager and no Grafana in the Kubernetes manifests or
-in Terraform, and `infrastructure/kubernetes/platform/README.md` lists only
-two components installed out of band: the load balancer controller and the
-cluster autoscaler. There is no Alertmanager even in the local compose
-stack, and Grafana's alerting is explicitly not used.
-
-**Impact.** On launch: `/metrics` is served and never read; the nine alert
-rules are files that nothing evaluates; traces are exported to a name that
-does not resolve, which the gateway degrades over silently and correctly.
-Infrastructure *is* watched — CloudWatch alarms on RDS and ElastiCache, and
-an RDS event subscription including `backup` and `failover`, all to SNS — so
-the database and cache have an owner. The application does not. The first
-sign of a bad deploy would be a user telling someone.
-
-**What it needs.** A metrics path and an alert path, in that order:
-
-1. A collector and a Prometheus (or Amazon Managed Prometheus behind the
-   OTLP endpoint the ConfigMaps already name) in a `monitoring` namespace,
-   scraping both services' `/metrics`. The NetworkPolicy already admits it,
-   so no application change is required.
-2. `alerts.yml` and `recording.yml` loaded by whatever evaluates them.
-3. An Alertmanager, or Grafana alerting, routed to the same SNS topic the
-   infrastructure alarms already use, so there is one place alerts arrive.
-4. The install added to the platform script and its README, beside the two
-   components already there.
-
-**Why this review did not build it.** It is a platform installation that
-needs a cluster and an AWS account to validate, and an untested monitoring
-stack is worse than a documented gap: it looks like coverage. The
-boundary is now stated in the platform README instead, so the assumption the
-manifests make is visible to whoever installs the cluster.
+This document still does not declare the system production-ready. Closing
+the blocker removes the reason a launch was impossible; it does not by
+itself make one advisable, and nothing here has ever run in a cloud
+account.
 
 ## Fixed in this review
+
+### P1 — Nothing collected the application's metrics or delivered its alerts
+
+**What was wrong.** Both services served `/metrics`,
+`observability/prometheus/rules/alerts.yml` defined nine alerts, four Grafana
+dashboards existed, the staging and production ConfigMaps pointed
+`OTEL_EXPORTER_OTLP_ENDPOINT` at `otel-collector.monitoring.svc.cluster.local:4318`,
+and `networkpolicy-baseline.yaml` admitted scraping from a namespace called
+`monitoring`.
+
+Nothing created any of it. There was no `monitoring` namespace, no collector,
+no Prometheus, no Alertmanager. On launch: `/metrics` served and never read;
+nine alert rules that nothing evaluated; traces exported to a name that did
+not resolve, which the gateway degraded over silently and correctly.
+Infrastructure was watched — CloudWatch alarms on RDS and ElastiCache, an RDS
+event subscription, all to SNS — so the database and cache had an owner. The
+application did not. The first sign of a bad deploy would have been a user
+telling someone.
+
+**Why this review did not build it, and what changed.** The original entry
+argued: "It is a platform installation that needs a cluster and an AWS
+account to validate, and an untested monitoring stack is worse than a
+documented gap: it looks like coverage." The first half of that is right and
+the second half is the standard it set for itself. What it missed is that a
+cluster was already available. `kind` runs a real API server, a real
+admission chain and a real CNI enforcing NetworkPolicies, which is enough to
+exercise every hop that was missing. The AWS account is only needed for the
+last one, SNS delivery, and that one is still called out below rather than
+claimed.
+
+**What was built.** `infrastructure/kubernetes/monitoring/`, a kustomization
+of this repository's own manifests rather than a Helm chart, so it passes the
+same kubeconform, kube-linter, Trivy and Checkov gates as everything else —
+the component that watches the system should not be the one component nothing
+checks. It contains the `monitoring` namespace under the restricted Pod
+Security Standard, Prometheus with read-only Kubernetes discovery, the
+recording and alerting rules, Alertmanager, the OpenTelemetry Collector, and
+a default-deny NetworkPolicy with each opening argued.
+
+`make k8s-validate` now also runs `promtool check rules` over both copies of
+the rules and compares them: the recording rules must be identical, and the
+alerts must have the same names, expressions and severities with deployed
+`for` clauses at least as long as the local ones.
+
+**What was tested, on a kind cluster running Calico so the policies are
+enforced rather than accepted and ignored** (`make k8s-monitoring-test`):
+
+1. both services discovered through the Kubernetes API and scraped, proven
+   by the pod label a static target could not carry;
+2. the collector's own metrics scraped;
+3. recording rules producing series, which can only happen if the scrape,
+   the parse and the group evaluation all worked;
+4. all eleven alerting rules loaded, with no rule reporting an evaluation
+   error;
+5. spans arriving at the collector, which proves the service name resolves
+   and the NetworkPolicy on both sides allows 4318;
+6. a real outage — the gateway's Service repointed at a port nothing listens
+   on, so the pod stays Ready and its endpoint stays in discovery while the
+   scrape is refused — firing `ServiceDown` after its two-minute `for` clause
+   and **arriving at Alertmanager**;
+7. the alert clearing once the Service answered again.
+
+**What is still not proven, and will not be until there is an account.** SNS
+delivery. `scripts/eks-platform-install.sh` substitutes the environment's
+`alarm_topic_arn` into `infrastructure/kubernetes/platform/alertmanager-sns.yml.template`,
+annotates the service account with `alertmanager_role_arn` — an IRSA role
+whose policy is `sns:Publish` on that one topic — and **refuses to install at
+all if either output is missing**, because an Alertmanager with no receiver
+looks exactly like a working one from the outside. Nothing in this repository
+has published to a real topic. After the first install, publish a test
+message to the topic and confirm a subscriber receives it; the script prints
+that instruction on the way out.
+
+Two further limits, stated so they are not discovered later: Prometheus keeps
+fifteen days on an `emptyDir`, so history does not survive the pod, and the
+collector exports spans to `debug` rather than to a trace store.
+
 
 ### P2 — A migration could stall a hot table for as long as the query in front of it
 
@@ -138,7 +173,7 @@ an omission.
 | **CI/CD** | Eleven security gates, all green, plus a policy-drift gate that fails if a threshold is lowered, a gate dropped, or a suppression left unargued — proven by running it against a deliberately weakened configuration |
 | **Backups** | Automated with configurable retention (14 days production, 3 staging), PITR implemented as code, a final snapshot required, backup failures alarmed through RDS events, and a restore tested and verified row by row |
 | **Logging** | Redaction applied at the exit rather than at call sites, so it cannot be forgotten; the one format that bypassed it is now refused in deployed environments |
-| **Observability (traces, metrics cardinality)** | No metric label can take a patient, user, request or trace id; span attributes carry route patterns rather than paths. The *collection* of both is the P1 blocker above |
+| **Observability (traces, metrics cardinality)** | No metric label can take a patient, user, request or trace id; span attributes carry route patterns rather than paths. Collection and alert evaluation are installed and tested (P1 above); SNS delivery is configured and unproven |
 | **Database migrations** | Applied by a Job before the deployment, each file one implicit transaction, an advisory lock serialising concurrent deploys, expand/contract across two releases for destructive changes, and now a lock timeout |
 
 ## How to re-run this review
@@ -150,8 +185,9 @@ make sast deps-scan secret-scan docker-scan sbom k8s-validate tf-validate
 make db-restore-test     # point-in-time recovery, verified
 make stack-test          # 21 flows including every failure injection
 make k8s-resilience-test # 3 nodes, 2 replicas: drain, PDB, HPA, outages
+make k8s-monitoring-test # scrape, rules, traces, and an alert reaching Alertmanager
 make rollback-images rollback-test # the rollback procedure, rehearsed and verified
 ```
 
-The first three run in CI on every change. The rest need Docker, and the two
-Kubernetes ones need `kind`.
+The first three run in CI on every change. The rest need Docker, and the
+three Kubernetes ones need `kind`.

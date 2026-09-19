@@ -1,11 +1,18 @@
 # API reference
 
 **This document is the API reference.** It describes the conventions every
-public endpoint follows and then each endpoint in turn. There is no OpenAPI
-document for the public API: `contracts/openapi/` holds a placeholder README
-and nothing else, so this file is the catalogue rather than a companion to
-one. (The *internal* gateway-to-processor API does have a contract, with a
-fingerprint lock and tests on both sides: `contracts/internal-api/`.)
+public endpoint follows and then each endpoint in turn, and it is the better
+place to start reading.
+
+Its machine-readable companion is
+[`contracts/openapi/vitalmesh-public-v1.json`](../contracts/openapi/vitalmesh-public-v1.json),
+an OpenAPI 3.0.3 document covering the same surface, with a fingerprint lock
+and tests that confront it with the routes the gateway actually mounts and
+with the error codes its source defines. Generate a client from that; read
+this to understand why the API behaves as it does. Where the two disagree the
+contract wins, and `make contracts-check` is what stops them disagreeing.
+(The *internal* gateway-to-processor API has its own contract on the same
+terms: `contracts/internal-api/`.)
 
 Nothing here is medical: all data is synthetic and all results are technical
 data-processing outputs (SPECIFICATIONS.md sections 1 and 3).

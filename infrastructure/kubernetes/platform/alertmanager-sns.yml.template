@@ -1,0 +1,60 @@
+# Alertmanager's configuration for a deployed environment: the same routing
+# and inhibition as infrastructure/kubernetes/monitoring/config/alertmanager.yml,
+# with a receiver that actually delivers.
+#
+# It is a template rather than a committed configuration because the topic
+# ARN contains the AWS account id, which does not belong in this repository,
+# and because a receiver naming an ARN that does not exist is worse than no
+# receiver: it looks like delivery and is not. scripts/eks-platform-install.sh
+# substitutes the three placeholders from the environment's Terraform
+# outputs and refuses to install if any of them is missing.
+#
+# Placeholders: @TOPIC_ARN@ @REGION@ @ENVIRONMENT@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "service"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: sns
+
+receivers:
+  - name: sns
+    sns_configs:
+      # Credentials come from the IRSA role the install annotates onto this
+      # service account (`alertmanager_role_arn`), which may publish to this
+      # one topic and make no other AWS call. No key is configured here and
+      # none is mounted.
+      - topic_arn: "@TOPIC_ARN@"
+        sigv4:
+          region: "@REGION@"
+        # The subject is what an email subscriber sees in their inbox list,
+        # so it has to carry the environment and the alert without being
+        # opened. SNS subjects are limited to 100 characters.
+        subject: '[@ENVIRONMENT@] {{ .CommonLabels.alertname }} ({{ .Alerts | len }})'
+        message: |-
+          {{ .Status | toUpper }}: {{ .CommonLabels.alertname }}
+          Environment: @ENVIRONMENT@
+          Service: {{ .CommonLabels.service }}
+          Severity: {{ .CommonLabels.severity }}
+
+          {{ range .Alerts -}}
+          {{ .Annotations.summary }}
+          {{ .Annotations.description }}
+          {{ end }}
+        send_resolved: true
+
+inhibit_rules:
+  - source_matchers:
+      - alertname = "ServiceDown"
+    target_matchers:
+      - severity =~ "warning|critical"
+    equal: ["service"]
+
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "service"]

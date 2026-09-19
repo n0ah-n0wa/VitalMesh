@@ -8,30 +8,39 @@ manifests assume is there. Nothing here is applied to the kind cluster;
 |---|---|---|---|
 | AWS Load Balancer Controller v3.5.0 | `eks/aws-load-balancer-controller` 3.5.0 | Turns the `Ingress` in `components/deployed` into an Application Load Balancer with pods as targets, finds the ACM certificate for its host, and injects readiness gates in labelled namespaces | `load_balancer_controller_role_arn` |
 | Cluster Autoscaler 1.34.5 | `autoscaler/cluster-autoscaler` 9.59.0 | Resizes the managed node group between the Terraform minimum and maximum as pods go Pending or nodes sit empty | `cluster_autoscaler_role_arn` |
+| Monitoring stack | this repository (`../monitoring`) | Prometheus scrapes both services, evaluates the recording and alerting rules, and posts to Alertmanager, which publishes to the environment alarm topic; the OpenTelemetry Collector answers the OTLP endpoint the ConfigMaps name | `alertmanager_role_arn` |
 
-## Missing, and required before launch: metrics collection and alerting
+## Monitoring, and what it does not cover
 
-The application manifests assume a third component that this directory does
-not yet install, and saying so here is the point of this section.
+This section used to say that metrics collection and alerting were missing
+and that their absence blocked a launch. They are installed now, from
+`../monitoring`, and the path is tested on kind by `make k8s-monitoring-test`:
+both services discovered and scraped through the Kubernetes API, the
+recording rules producing series, all eleven alerting rules evaluating, spans
+reaching the collector, and a real outage firing `ServiceDown` and arriving
+at Alertmanager.
 
-Both services serve `/metrics`, `observability/prometheus/rules/alerts.yml`
-defines nine alerts, and `networkpolicy-baseline.yaml` already admits
-scraping from a namespace called `monitoring`. The staging and production
-ConfigMaps point `OTEL_EXPORTER_OTLP_ENDPOINT` at
-`otel-collector.monitoring.svc.cluster.local:4318`. Nothing in this
-repository creates that namespace, a collector, a Prometheus or an
-Alertmanager.
+Unlike the two charts above, it is this repository's own manifests. That is
+deliberate: manifests go through `make k8s-validate` and a chart installed by
+a script goes through none of it, and the component that watches everything
+else should not be the one component nothing checks.
 
-Until one is installed, a deployed environment serves metrics nobody reads
-and evaluates no alerts: the database and the cache are watched by
-CloudWatch alarms and RDS events, and the application is not watched at all.
-It is the one gap that blocks a production launch
-(docs/PRODUCTION_READINESS.md). What it needs, in order: a collector and a
-Prometheus (or Amazon Managed Prometheus behind the OTLP endpoint already
-named) scraping both services; `alerts.yml` and `recording.yml` loaded by
-whatever evaluates them; and an Alertmanager routed to the same SNS topic
-the infrastructure alarms use, so alerts arrive in one place. No application
-change is needed for any of it.
+Two things are configured here and not proven here, and both are stated
+rather than implied:
+
+- **SNS delivery.** The install substitutes the environment `alarm_topic_arn`
+  into `alertmanager-sns.yml.template` and annotates the service account with
+  `alertmanager_role_arn`, whose policy is one action on one topic. Nothing
+  in this repository has published to a real topic, because there is no
+  account. After installing, publish a test message to the topic and confirm
+  a subscriber receives it; the script prints that instruction.
+- **A trace store.** The collector exports spans to `debug`. What a deployed
+  environment gains is the collector own metrics, which are what
+  `SpanExportFailing` reads. Attaching a backend is one exporter and one name
+  in the pipeline, and no application change.
+
+`../monitoring/README.md` has the rest, including why Prometheus and
+Alertmanager each run a single replica and what that costs.
 
 ## Installing
 
@@ -46,8 +55,14 @@ sh scripts/eks-platform-install.sh staging
 
 The script pins both chart versions and reads the cluster name, VPC and
 role ARNs from the Terraform outputs; the values files here hold
-everything else. The deploy role cannot run it: it has no rights outside
-the application namespace, which is the point of it.
+everything else. It then renders `../monitoring` with the same kustomize
+version the validation gates use and applies it, and **refuses to run at all
+if `alertmanager_role_arn` or `alarm_topic_arn` is missing from the
+outputs** — an Alertmanager with no receiver looks exactly like a working one
+from the outside, and that is the failure the component exists to end.
+
+The deploy role cannot run any of it: it has no rights outside the
+application namespace, which is the point of it.
 
 ## Why these, and not the alternatives
 

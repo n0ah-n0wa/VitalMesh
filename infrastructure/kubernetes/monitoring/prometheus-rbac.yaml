@@ -1,0 +1,56 @@
+# Prometheus discovers what to scrape from the Kubernetes API rather than
+# from a static list, so it follows the HorizontalPodAutoscaler: a replica
+# added under load is scraped from its first scrape interval, and one
+# removed stops being scraped rather than being reported down.
+#
+# That discovery is the only reason this ServiceAccount has cluster-wide
+# permissions, and they are read-only. There is no create, update, patch,
+# delete or any verb on secrets: a scraper that can read every Secret in the
+# cluster is a much larger thing than a scraper.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vitalmesh-prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+rules:
+  # Endpoint discovery needs the Endpoints and the Service behind them; the
+  # Pod is what carries the labels the relabelling keys on. Namespaces are
+  # read so that a scrape target can be attributed to one.
+  - apiGroups: [""]
+    resources:
+      - namespaces
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vitalmesh-prometheus
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vitalmesh-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring

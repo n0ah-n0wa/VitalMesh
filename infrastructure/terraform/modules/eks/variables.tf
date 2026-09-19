@@ -166,6 +166,18 @@ variable "enable_cluster_autoscaler" {
   default     = true
 }
 
+variable "enable_alertmanager" {
+  description = "Create the IRSA role for Alertmanager, which publishes firing alerts to alertmanager_sns_topic_arn. A static boolean rather than a test on the ARN, because the ARN is not known until apply and an IRSA role set keyed on it could not be planned. Alertmanager itself is installed from infrastructure/kubernetes/monitoring."
+  type        = bool
+  default     = false
+}
+
+variable "alertmanager_sns_topic_arn" {
+  description = "SNS topic Alertmanager may publish to. Used only as the resource in the role policy, so it may be unknown until apply. Ignored unless enable_alertmanager is true."
+  type        = string
+  default     = ""
+}
+
 variable "node_auto_repair" {
   description = "Let EKS replace a node it detects as unhealthy (node monitoring agent plus managed repair). Free, and one fewer thing for a person to notice."
   type        = bool

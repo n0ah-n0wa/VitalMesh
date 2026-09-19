@@ -12,7 +12,7 @@ data:
   # of turning JSON into structures.
   MAX_CONCURRENT_JOBS: "8"
 
-  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"
 
   # ANOMALY_RULES is deliberately not set here, and this is the one
   # difference from staging that is a decision rather than a size.

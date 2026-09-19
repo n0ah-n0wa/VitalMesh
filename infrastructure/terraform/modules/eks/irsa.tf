@@ -56,6 +56,19 @@ locals {
       policy_json     = data.aws_iam_policy_document.cluster_autoscaler.json
     }
 
+    # Alertmanager: publishes a firing alert to the environment's alarm
+    # topic, which is the same topic the RDS and ElastiCache alarms notify,
+    # so everything that can wake someone arrives in one place. It is the
+    # only IRSA role that belongs to something in the monitoring namespace,
+    # and its policy is one action on one resource.
+    alertmanager = {
+      enabled         = var.enable_alertmanager
+      namespace       = "monitoring"
+      service_account = "alertmanager"
+      policy_arns     = []
+      policy_json     = data.aws_iam_policy_document.alertmanager.json
+    }
+
     cloudwatch = {
       enabled         = var.enable_cloudwatch_observability
       namespace       = "amazon-cloudwatch"
@@ -140,6 +153,21 @@ data "aws_iam_policy_document" "irsa_assume" {
       variable = "${local.oidc_issuer}:aud"
       values   = ["sts.amazonaws.com"]
     }
+  }
+}
+
+# Publish, to one topic, and nothing else. Alertmanager needs no other AWS
+# call: it does not subscribe, does not list topics, and does not read the
+# topic's attributes. A role that can publish to every topic in the account
+# would let a compromised notifier speak as any alarm in it.
+#
+# The document is created unconditionally because a data source cannot be
+# made conditional, and it is only attached when the topic ARN is set.
+data "aws_iam_policy_document" "alertmanager" {
+  statement {
+    sid       = "PublishAlertsToTheAlarmTopic"
+    actions   = ["sns:Publish"]
+    resources = [var.alertmanager_sns_topic_arn == "" ? "arn:aws:sns:::none" : var.alertmanager_sns_topic_arn]
   }
 }
 

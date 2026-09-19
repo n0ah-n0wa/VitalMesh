@@ -1,0 +1,28 @@
+# The namespace the application manifests already expect. Both the metrics
+# scrape and the trace endpoint are addressed by this name and always have
+# been: `base/networkpolicy-baseline.yaml` admits scraping from a namespace
+# labelled `monitoring`, and the staging and production ConfigMaps point
+# OTEL_EXPORTER_OTLP_ENDPOINT at `otel-collector.monitoring.svc.cluster.local`.
+# Until this directory existed, nothing created it, so both pointed at
+# nothing (docs/PRODUCTION_READINESS.md, P1).
+#
+# kubernetes.io/metadata.name is set by the API server on every namespace
+# since 1.22, so the NetworkPolicy selector would match without this line.
+# It is written out anyway: the selector in another directory depends on it,
+# and a reader of that policy should be able to find the thing it selects.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: monitoring
+  labels:
+    kubernetes.io/metadata.name: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+    # Enforce the restricted Pod Security Standard. Everything here runs
+    # unprivileged, as a non-root user, with a read-only root filesystem and
+    # no capabilities, so the namespace can afford the strictest profile;
+    # saying so means a future addition that cannot meet it is rejected at
+    # admission rather than discovered later.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

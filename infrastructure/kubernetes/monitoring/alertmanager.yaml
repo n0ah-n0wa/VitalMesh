@@ -1,0 +1,172 @@
+# Alertmanager: where Prometheus sends a firing alert, and what decides
+# whether a human hears about it.
+#
+# The configuration here routes to a receiver that notifies nobody. That is
+# deliberate and it is not the finished state: an alert arrives, is grouped,
+# inhibited and visible through the API and the UI, and goes no further.
+# Delivery to SNS is added at install time by scripts/eks-platform-install.sh
+# from the environment's `alarm_topic_arn` Terraform output, because a
+# receiver naming an ARN that does not exist is worse than no receiver — it
+# looks like delivery and is not. The script refuses to install without that
+# output, so a deployed cluster cannot end up with this base config alone.
+#
+# It also means this base applies unchanged to a kind cluster, which is how
+# the scrape-to-alert path is tested without an AWS account
+# (`make k8s-monitoring-test`).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+  # The platform install annotates this with the IRSA role that may publish
+  # to the alarm topic (`alertmanager_role_arn`). It is not annotated here
+  # because the ARN contains the account id, which does not belong in a
+  # manifest that is committed.
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+  annotations:
+    # Scoped here rather than excluded globally, for the same reason as
+    # Prometheus: the application Deployments need this check. Two
+    # Alertmanagers that are not gossiping with each other both notify, so
+    # an overlap during a surge means duplicate pages.
+    ignore-check.kube-linter.io/no-rolling-update-strategy: >-
+      A single Alertmanager must not overlap with itself during an update:
+      two independent instances each notify. Recreate is correct here.
+spec:
+  # One replica for the same reason as Prometheus: Alertmanager's high
+  # availability is a gossip cluster with deduplication, not a replica
+  # count, and two independent instances would each notify. The cost is
+  # that a restart can drop an in-flight notification and re-send it on the
+  # next evaluation.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: alertmanager
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: alertmanager
+        app.kubernetes.io/component: monitoring
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      serviceAccountName: alertmanager
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: alertmanager
+          image: prom/alertmanager:v0.28.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/alertmanager/alertmanager.yml
+            - --storage.path=/alertmanager
+            - --web.external-url=http://localhost:9093
+          ports:
+            - name: http
+              containerPort: 9093
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 25m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+
+          startupProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/alertmanager
+              readOnly: true
+            - name: data
+              mountPath: /alertmanager
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: config
+          configMap:
+            name: alertmanager-config
+        # Notification state: which alerts have been sent and silenced.
+        # Losing it on a restart re-sends an active notification, which is
+        # the harmless direction to fail in.
+        - name: data
+          emptyDir:
+            sizeLimit: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: alertmanager
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: alertmanager
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: http
+      port: 9093
+      targetPort: http
+      protocol: TCP

@@ -89,7 +89,7 @@ SBOM_DIR        ?= sbom
 TRIVY_SEVERITY  := --severity HIGH,CRITICAL --exit-code 1 --quiet
 TRIVY_VULN      := --scanners vuln,secret,misconfig $(TRIVY_SEVERITY)
 
-.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build release-metadata line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan sbom sast policy-check db-restore-test deps-verify deps-verify-go deps-verify-rust deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test rollback-images rollback-test tf-validate up down demo synth-generate synth-load stack-test load-test perf-baseline
+.PHONY: help setup setup-go setup-rust format format-check format-check-go format-check-rust lint lint-go lint-rust test test-go test-rust contracts-check contracts-lock integration-test integration-test-postgres integration-test-redis e2e-test coverage-go build release-metadata line-endings verify ci-local clean dev-db dev-redis dev-db-down migrate observability-up observability-down observability-smoke docker-build docker-verify docker-scan sbom sast policy-check db-restore-test deps-verify deps-verify-go deps-verify-rust deps-scan secret-scan k8s-validate k8s-local-test k8s-failure-test k8s-resilience-test rollback-images rollback-test tf-validate up down dev demo synth-generate synth-load stack-test load-test perf-baseline bench bench-go bench-rust smoke
 
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -140,10 +140,11 @@ test-rust: ## Rust unit and integration tests
 
 contracts-check: ## Check the API contracts and that both services agree with them
 	cd $(GO_DIR) && go test ./internal/contract/...
+	cd $(GO_DIR) && go test ./internal/httpapi/ -run 'PublicContract|UnservedAuthorizationRules'
 	cd $(RUST_DIR) && cargo test --locked --test contract
 
 contracts-lock: ## Re-record a reviewed contract change in its lock file
-	cd $(GO_DIR) && UPDATE_CONTRACT_LOCK=1 go test ./internal/contract/... -run TestContractMatchesItsLock
+	cd $(GO_DIR) && UPDATE_CONTRACT_LOCK=1 go test ./internal/contract/... -run 'ContractMatchesItsLock'
 
 # Split by the service each package needs, so CI can report "PostgreSQL"
 # and "Redis" as separate steps and a developer with only one of them
@@ -301,6 +302,9 @@ k8s-validate: ## Validate the manifests (kustomize, kubeconform, kube-linter, tr
 k8s-local-test: k8s-validate ## Deploy the local overlay to a kind cluster and test it
 	sh scripts/k8s-local-test.sh
 
+k8s-monitoring-test: k8s-validate ## Deploy the monitoring stack to a kind cluster and test scrape, rules and alert delivery
+	sh scripts/k8s-monitoring-test.sh
+
 # Controlled failure scenarios. Section 52 asks for these and section 90
 # says what each dependency should do; docs/FAILURE_MODES.md records what
 # they actually do.
@@ -341,6 +345,12 @@ rollback-test: ## Rehearse the production rollback on a kind cluster and verify 
 tf-validate: ## Validate the Terraform without touching AWS (fmt, validate, trivy, checkov)
 	sh scripts/tf-validate.sh
 
+# SPECIFICATIONS.md section 111 names `make dev` in the local workflow. It
+# is the same thing as `make up`, which the rest of the documentation uses;
+# the alias exists so the workflow the specification writes out can be
+# followed literally.
+dev: up ## Start the whole local environment (an alias for make up)
+
 up: ## Start the whole local environment (the same as: docker compose up -d --wait)
 	docker compose up -d --wait
 	@echo "Gateway    http://localhost:8080"
@@ -379,6 +389,20 @@ load-test: ## Run the k6 load test (LOAD_PROFILE=smoke|standard) and write the r
 perf-baseline: ## Measure the performance baseline (RESET=1 for an empty database first); report in tests/load/results/ (docs/PERFORMANCE_BASELINE.md)
 	sh scripts/perf-baseline.sh
 
+# Micro-benchmarks, as distinct from the load tests above: these measure one
+# function, those measure the system. Section 107 asks for both to be
+# reachable, and `make help` is where a developer looks.
+bench: bench-go bench-rust ## Run the Go and Rust micro-benchmarks
+
+bench-go: ## Go benchmarks (needs PostgreSQL for the repository ones: make dev-db)
+	cd $(GO_DIR) && TEST_DATABASE_URL="$${TEST_DATABASE_URL:-$(TEST_DATABASE_URL)}" 		go test -tags integration -run '^$$' -bench . -benchmem ./...
+
+bench-rust: ## Rust Criterion benchmarks (services/processor/benches)
+	cd $(RUST_DIR) && cargo bench --locked
+
+smoke: ## Smoke-test a deployed gateway (GATEWAY_URL=https://...), as release.yml does after a deploy
+	sh scripts/smoke.sh
+
 # Synthetic data (SPECIFICATIONS.md sections 106 and 107; docs/SYNTHETIC_DATA.md).
 # SYNTH_ARGS passes flags through: make synth-generate SYNTH_ARGS="--seed 7 --patients 50 --days 30"
 SYNTH_DIR  ?= .synth/default
@@ -388,7 +412,8 @@ synth-generate: ## Write a synthetic fixture to SYNTH_DIR (flags in SYNTH_ARGS; 
 	cd $(GO_DIR) && go run ./cmd/synth generate --out ../../$(SYNTH_DIR) --overwrite $(SYNTH_ARGS)
 
 synth-load: ## Load SYNTH_DIR into the local environment (make up): creates its accounts, patients, readings and jobs
-	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/synth load --from ../../$(SYNTH_DIR) \n		--target "$${GATEWAY_URL:-http://localhost:8080}" --environment local --users --jobs $(SYNTH_ARGS)
+	cd $(GO_DIR) && DATABASE_URL="$${DATABASE_URL:-$(TEST_DATABASE_URL)}" go run ./cmd/synth load --from ../../$(SYNTH_DIR) \
+		--target "$${GATEWAY_URL:-http://localhost:8080}" --environment local --users --jobs $(SYNTH_ARGS)
 
 observability-smoke: ## Check the running stack is scraping, recording and receiving spans
 	sh scripts/observability-smoke.sh

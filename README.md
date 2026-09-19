@@ -344,11 +344,13 @@ are rejected, so typos never pass silently.
 SQL or hostnames. The full reference, endpoint by endpoint, is
 [docs/API.md](docs/API.md).
 
-> **Note.** The public API has no OpenAPI document yet —
-> `contracts/openapi/` is a placeholder. The **internal** gateway↔processor
-> contract *is* written: `contracts/internal-api/processor-v1.json` (OpenAPI
-> 3.0.3, version 1.1.2) with a fingerprint lock, and `make contracts-check`
-> confronts both services' types with it.
+> **Note.** Both APIs have a machine-readable contract, each with a
+> fingerprint lock that `make contracts-check` enforces. The public API is
+> `contracts/openapi/vitalmesh-public-v1.json` (OpenAPI 3.0.3), checked
+> against the routes the gateway actually mounts and against the error codes
+> its source defines. The **internal** gateway↔processor contract is
+> `contracts/internal-api/processor-v1.json`, confronted with both services'
+> types.
 
 ---
 
@@ -406,8 +408,18 @@ Locally, `docker compose up` also starts Prometheus, Grafana (four dashboards)
 and an OpenTelemetry collector. Nine alert rules ship in
 `observability/prometheus/rules/`. See [observability/README.md](observability/README.md).
 
-> The observability **stack** is local only. Nothing collects these metrics or
-> delivers these alerts in a deployed environment — see
+A deployed cluster runs the same rules from
+[infrastructure/kubernetes/monitoring](infrastructure/kubernetes/monitoring):
+Prometheus discovers both services through the Kubernetes API and scrapes
+them, evaluates the recording and alerting rules, and posts to Alertmanager,
+which publishes to the environment's alarm topic — the same SNS topic the
+RDS and ElastiCache alarms use, so everything that can wake someone arrives
+in one place. `make k8s-monitoring-test` proves the path on a kind cluster,
+up to and including a real outage firing `ServiceDown` and arriving at
+Alertmanager.
+
+> SNS delivery itself is configured and has never been exercised against a
+> real account, because there is none — see
 > [Limitations](#limitations-and-known-gaps).
 
 ---
@@ -635,14 +647,20 @@ measurable benefit — are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 Stated plainly, because a portfolio that only lists strengths is not evidence
 of engineering judgement.
 
-**The blocker.** *Nothing collects the application's metrics or delivers its
-alerts in any deployed environment.* Both services expose `/metrics`, nine
-alert rules and four dashboards exist, and the NetworkPolicy already admits a
-`monitoring` namespace — but no collector, Prometheus or Alertmanager is
-installed by the manifests or by Terraform. Running in that state means
-operating blind to error rate, latency and saturation. This was documented
-rather than built, because an untested monitoring stack looks like coverage
-without being it.
+**Nothing here has ever run in a cloud account.** That is the honest frame
+for everything below: the Terraform validates and plans and has never been
+applied, and no staging or production environment exists. Every AWS claim in
+this repository is a claim about configuration.
+
+**Alert delivery is configured and unproven.** The monitoring stack itself is
+built and tested — Prometheus scrapes both services, the rules evaluate, and
+an alert reaches Alertmanager, all verified on kind by
+`make k8s-monitoring-test`. The last hop is not: `scripts/eks-platform-install.sh`
+points Alertmanager at the environment's SNS topic through an IRSA role that
+may publish to that one topic, and refuses to install without it, but nothing
+has published to a real topic. Prometheus also keeps fifteen days of history
+on an `emptyDir`, so it does not survive the pod, and the collector exports
+spans to `debug` rather than to a trace store.
 
 **Accepted, each with a compensating control** (argued in
 [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md)):
@@ -662,8 +680,6 @@ without being it.
 
 **Not yet written**
 
-- The public API has no OpenAPI document. `contracts/openapi/` is a
-  placeholder; the internal contract is written and enforced.
 - User-management endpoints and job cancellation have authorization rules but
   no handlers, so they are not served.
 - No `LICENSE` file is present yet.
@@ -737,3 +753,6 @@ SPECIFICATIONS.md          The authoritative specification
 | [DISASTER_RECOVERY.md](docs/DISASTER_RECOVERY.md) | Backups, the tested restore, RPO and RTO |
 | [PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | The launch review and the ranked risks |
 | [SYNTHETIC_DATA.md](docs/SYNTHETIC_DATA.md) | The generator, the loader, and what they never produce |
+| [observability/](observability/README.md) | The local stack: scrapes, dashboards, rules and traces |
+| [infrastructure/kubernetes/monitoring/](infrastructure/kubernetes/monitoring/README.md) | The deployed stack: what reads the metrics and delivers the alerts |
+| [contracts/openapi/](contracts/openapi/README.md) | The public API contract, its gate and its versioning rules |

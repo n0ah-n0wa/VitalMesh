@@ -460,10 +460,21 @@ func TestProcessReportsAProcessorThatIsNotThere(t *testing.T) {
 	}
 }
 
+// countingTransport counts the attempts a client issues. It sits in the
+// client's own transport chain, so it sees each attempt at the moment the
+// client makes it.
+type countingTransport struct {
+	attempts *atomic.Int32
+	next     http.RoundTripper
+}
+
+func (t countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.attempts.Add(1)
+	return t.next.RoundTrip(r)
+}
+
 func TestProcessBoundsEachAttemptWithItsOwnTimeout(t *testing.T) {
-	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
 		// Outlast the client's per-attempt bound without outlasting the
 		// test, so Close never waits on a handler.
 		select {
@@ -473,9 +484,31 @@ func TestProcessBoundsEachAttemptWithItsOwnTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	// Attempts are counted in the transport rather than in the handler.
+	//
+	// Counting them in the handler made this test fail on a loaded machine,
+	// reporting two attempts where the client had made three: the
+	// per-attempt bound is 60ms, and a busy scheduler can take longer than
+	// that to run the handler, so an attempt that really happened went
+	// uncounted and the failure described a retry that did occur. What the
+	// test is about is how many attempts the client makes, and the
+	// RoundTripper sees each one as it is issued, before any of it depends
+	// on the server being scheduled.
+	var calls atomic.Int32
+
 	// A short per-attempt bound, and a caller deadline long enough for
 	// every attempt, so it is the attempt bound that fires.
-	c, _ := newClient(t, srv.URL, func(c *config.Processor) { c.Timeout = 60 * time.Millisecond })
+	cfg := testConfig(srv.URL)
+	cfg.Timeout = 60 * time.Millisecond
+	c := New(cfg, discardLogger(), Options{
+		HTTPClient: &http.Client{
+			Transport: countingTransport{attempts: &calls, next: http.DefaultTransport},
+		},
+		// Instant sleeps and no jitter, as newClient does: this test is
+		// about the attempt bound, not the backoff.
+		Sleep: func(context.Context, time.Duration) error { return nil },
+		Rand:  func() float64 { return 1 },
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 

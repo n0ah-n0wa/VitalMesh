@@ -20,5 +20,5 @@ data:
 
   # Every trace is recorded. The volume is small and staging is where
   # traces are looked at.
-  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"
   OTEL_TRACES_SAMPLER_ARG: "1.0"

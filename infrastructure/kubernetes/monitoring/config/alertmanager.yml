@@ -1,0 +1,38 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  # Group by the alert and the service it came from, so one bad service
+  # is one notification rather than one per replica.
+  group_by: ["alertname", "service"]
+  # Wait for other alerts of the same group before sending the first
+  # notification: a node going away usually produces several at once,
+  # and 30s of patience turns them into one page.
+  group_wait: 30s
+  group_interval: 5m
+  # How long before an unresolved alert is repeated. Four hours is long
+  # enough not to nag and short enough that a forgotten alert resurfaces
+  # within a working day.
+  repeat_interval: 4h
+  receiver: default
+
+receivers:
+  # Notifies nobody. See the note at the top of this file.
+  - name: default
+
+inhibit_rules:
+  # A service that is down will also breach its error-rate and latency
+  # alerts. Reporting all three says nothing the first does not, so the
+  # critical one suppresses the rest for the same service.
+  - source_matchers:
+      - alertname = "ServiceDown"
+    target_matchers:
+      - severity =~ "warning|critical"
+    equal: ["service"]
+
+  # A critical alert suppresses a warning about the same thing.
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["alertname", "service"]

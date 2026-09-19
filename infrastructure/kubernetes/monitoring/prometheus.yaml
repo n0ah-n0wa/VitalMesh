@@ -1,0 +1,181 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+  annotations:
+    # Scoped to this object rather than excluded in .kube-linter.yaml,
+    # because the application Deployments must keep this check: a rolling
+    # update is exactly right for them and exactly wrong here. Two
+    # Prometheus instances scraping the same targets during a surge produce
+    # duplicate samples for the same series and evaluate every alert twice.
+    # See the replica note below.
+    ignore-check.kube-linter.io/no-rolling-update-strategy: >-
+      A single-instance Prometheus must not overlap with itself during an
+      update; Recreate is the correct strategy and the ~1 minute gap it
+      causes is stated in the Deployment.
+    # Prometheus discovers its targets from the Kubernetes API, which is an
+    # authenticated call, so it is the one workload here that needs its
+    # token. The permissions it grants are read-only and are in
+    # prometheus-rbac.yaml.
+    checkov.io/skip1: CKV_K8S_38=Kubernetes service discovery is the reason this workload exists; the bound token is read-only over namespaces, services, endpoints and pods.
+spec:
+  # One replica, deliberately. Two Prometheis scraping the same targets
+  # duplicate every series and then disagree about them, which is worse than
+  # a gap: an alert that fires on one and not the other is an alert nobody
+  # trusts. Highly available Prometheus is a real design with real answers
+  # (federation, Thanos, an HA pair behind deduplicating Alertmanagers) and
+  # none of them is a replica count. The gap this leaves is honest: while
+  # this pod restarts, roughly a minute of samples is missing and alerts do
+  # not evaluate. `Recreate` rather than a rolling update for the same
+  # reason — two of these must never run at once over the same volume.
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: prometheus
+        app.kubernetes.io/component: monitoring
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      serviceAccountName: prometheus
+      enableServiceLinks: false
+      # The one workload here that needs its token: service discovery is an
+      # authenticated call to the Kubernetes API.
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 60
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+
+      containers:
+        - name: prometheus
+          # The same version the local stack runs, so a rule that works in
+          # `make up` works here.
+          image: prom/prometheus:v3.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            # Fifteen days on an emptyDir sized below. This is a monitoring
+            # window, not an archive: anything that needs to be kept for
+            # longer belongs in a remote-write target, which is where
+            # Amazon Managed Prometheus would attach.
+            - --storage.tsdb.retention.time=15d
+            - --storage.tsdb.retention.size=6GB
+            - --web.enable-lifecycle
+            - --web.external-url=http://localhost:9090
+          ports:
+            - name: http
+              containerPort: 9090
+              protocol: TCP
+
+          resources:
+            # Memory is set by series count, and series count here is small:
+            # two application services with a handful of histograms, plus
+            # the collector and Prometheus itself. The limit is well clear
+            # of the request because a Prometheus that is OOMKilled loses
+            # the head block, which is the most recent and most useful data.
+            requests:
+              cpu: 100m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+
+          startupProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /-/healthy
+              port: http
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /-/ready
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus/prometheus.yml
+              subPath: prometheus.yml
+              readOnly: true
+            - name: rules
+              mountPath: /etc/prometheus/rules
+              readOnly: true
+            - name: data
+              mountPath: /prometheus
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            runAsGroup: 65534
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-rules
+        # emptyDir, not a PersistentVolumeClaim, and this is the compromise
+        # to be aware of: history does not survive the pod. For alerting it
+        # costs little, because every alert here evaluates over five-minute
+        # windows and the data is rebuilt within one. For looking back at
+        # last week it costs everything. An environment that wants that
+        # attaches remote write to Amazon Managed Prometheus, which is
+        # storage rather than another replica.
+        - name: data
+          emptyDir:
+            sizeLimit: 8Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: prometheus
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: http
+      port: 9090
+      targetPort: http
+      protocol: TCP

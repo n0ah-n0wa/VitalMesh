@@ -1,0 +1,6 @@
+{
+  "contract": "vitalmesh-public-v1",
+  "version": "1.0.0",
+  "fingerprint": "sha256:b62b6028d95afdc1351a5f72b6565e5d32f884a9167d34d7a89c1c2bb14c0183",
+  "note": "Regenerate with `make contracts-lock` after reviewing the change. A change that removes or narrows anything a client may rely on requires a new major version and a new path prefix; see contracts/openapi/README.md."
+}

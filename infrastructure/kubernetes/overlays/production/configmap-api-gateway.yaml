@@ -19,5 +19,5 @@ data:
   # One trace in ten. Full sampling is affordable in staging and is not
   # here; a decision made upstream is still honoured, so a request already
   # being traced stays traced end to end.
-  OTEL_EXPORTER_OTLP_ENDPOINT: "https://otel-collector.monitoring.svc.cluster.local:4318"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring.svc.cluster.local:4318"
   OTEL_TRACES_SAMPLER_ARG: "0.1"

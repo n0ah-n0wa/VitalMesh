@@ -4,6 +4,12 @@ The local observability stack: Prometheus scrapes both services, Grafana
 renders the dashboards, and an OpenTelemetry collector receives their
 traces (SPECIFICATIONS.md sections 39–43).
 
+This directory is the local stack. Its deployed counterpart is
+[`infrastructure/kubernetes/monitoring`](../infrastructure/kubernetes/monitoring),
+which runs the same rules against the same two services and delivers alerts
+to the environment alarm topic; the differences between them, and why each
+exists, are set out there.
+
 ```bash
 docker compose up -d --wait   # everything, including this stack
 make observability-smoke      # check it is actually observing something
@@ -89,6 +95,22 @@ Check a rule change before reloading:
 docker compose exec prometheus promtool check rules /etc/prometheus/rules/recording.yml
 curl -X POST http://localhost:9090/-/reload
 ```
+
+### The deployed copy
+
+A deployed cluster evaluates its own copy of these rules, in
+`infrastructure/kubernetes/monitoring/config/rules/`. The two must agree
+about what they measure and may differ in how patient they are: the
+recording rules are identical, and the alerting rules share their names,
+expressions and severities but use longer `for` clauses, because a
+thirty-second `ServiceDown` would page on a node drain.
+
+`make k8s-validate` runs `promtool check rules` over both copies and then
+compares them (`scripts/check-alert-rules.py`), so editing a rule here and
+forgetting the other copy fails rather than drifting quietly. Adding an
+alert means adding it in both places and to `EXPECTED_ALERTS` in
+`scripts/k8s-monitoring-test.sh`, which asserts the deployed Prometheus has
+loaded every one of them.
 
 ## Traces
 

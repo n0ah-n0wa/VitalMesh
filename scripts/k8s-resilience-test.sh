@@ -313,7 +313,6 @@ step "4. Node disruption (drain a worker)"
 DRAIN="$(node_of api-gateway)"
 [ "$DRAIN" = "$CP" ] && DRAIN="$(echo "$WORKERS" | head -1)"
 note "draining $DRAIN"
-gw_before="$(ready_replicas vitalmesh-api-gateway)"; pr_before="$(ready_replicas vitalmesh-processor)"
 # Watch that neither Deployment ever drops below one ready while the drain runs.
 ( minr=9; i=0; while [ $i -lt 90 ]; do a=$(ready_replicas vitalmesh-api-gateway); b=$(ready_replicas vitalmesh-processor);
   [ "${a:-0}" -lt "$minr" ] && minr=$a || true; [ "${b:-0}" -lt "$minr" ] && minr=$b || true; sleep 1; i=$((i+1)); done; echo "$minr" > /tmp/minready ) &

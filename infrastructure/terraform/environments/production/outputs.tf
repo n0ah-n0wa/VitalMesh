@@ -71,6 +71,11 @@ output "app_secret_arn" {
   value       = module.platform.app_secret_arn
 }
 
+output "alertmanager_role_arn" {
+  description = "IRSA role Alertmanager assumes to publish to the alarm topic in production."
+  value       = module.platform.alertmanager_role_arn
+}
+
 output "alarm_topic_arn" {
   description = "SNS topic every alarm in production notifies."
   value       = module.platform.alarm_topic_arn

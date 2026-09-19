@@ -95,7 +95,7 @@ Adding a value to an enum is compatible only in the direction the value travels.
 
 ## How CI checks this
 
-Four gates run in `make verify`, so the contract cannot drift from either side unnoticed. `make contracts-check` runs them on their own.
+Five gates run in `make verify`, so the contract cannot drift from either side unnoticed. `make contracts-check` runs them on their own.
 
 **1. The document is well formed** — `services/api-gateway/internal/contract`. It parses, declares exactly the three agreed operations with unique operation ids, every operation documents itself and accepts the correlation headers, every response describes itself and echoes them, every failure uses the shared error envelope and declares both the codes it can return (`x-error-codes`) and whether it is worth retrying (`x-retryable`), every `$ref` resolves, every component schema is used and documented, and the health endpoint is reachable without a credential.
 
@@ -104,6 +104,10 @@ Four gates run in `make verify`, so the contract cannot drift from either side u
 **3. The server agrees with the document** — `services/processor/tests/contract.rs`. Every enumeration in the contract is compared against the wire values the Rust domain types actually serialise, the advertised limits are compared against the service's configuration defaults, the advertised algorithm version is compared against the one this build implements, every promised error code is one something in the service emits, and the request and result examples are deserialised into the real domain types, which apply every invariant on the way in.
 
 **4. An interface change cannot land silently** — the lock file, checked in gate 1. `processor-v1.lock.json` records a digest of everything a client can observe: paths, operations, parameters, schemas, security, status codes. Prose is excluded, so rewording a description does not touch it. Any change to the shape of a request or a response does, and the test then fails with instructions.
+
+**5. Both catalogues agree** — `internal/contract/catalogue_test.go` and `value_ranges_and_units_match_the_contract` in the Rust suite. Which unit each measurement type takes, and the inclusive bounds on its value, are written out twice: the gateway validates against `internal/measurement/catalog.go` and the processor against `src/domain/measurement.rs`, because neither service can import the other's. `x-value-ranges` on the `MeasurementType` schema publishes the catalogue, and each side is confronted with it.
+
+The enums were already gated and this was the part of the same catalogue that was not, which made it the quietest thing in the contract to get wrong: a range widened on one side only means the gateway accepts a reading the processor then rejects, so every job carrying one fails with `PROCESSING_REJECTED` and the client is told only that the processing service refused the data.
 
 That satisfies SPECIFICATIONS.md section 49 to the extent a digest can: it proves the interface changed and forces a reviewer to look, but it does not itself judge whether the change was compatible. That judgement is the reviewer's, against the rules above. When `oasdiff` is available in CI it replaces the lock with real breaking-change analysis.
 

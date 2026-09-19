@@ -76,3 +76,11 @@ data:
   # property of the environment, and with no endpoint the service still
   # propagates trace context and logs trace ids, exporting nothing. An
   # overlay sets it; nothing here breaks without it.
+  #
+  # Where an overlay does set it, the scheme is `http`, matching PROCESSOR_URL
+  # above: pod-to-pod traffic inside the cluster is plaintext, bounded by the
+  # NetworkPolicies, and the collector serves plain OTLP. The deployed
+  # overlays said `https` until the collector existed to disagree with, which
+  # would have failed every export while the gateway degraded over it
+  # silently. TLS terminates at the load balancer, which is the edge this
+  # system does encrypt.

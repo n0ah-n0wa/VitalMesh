@@ -1,0 +1,84 @@
+groups:
+  - name: api-gateway.traffic
+    interval: 10s
+    rules:
+      - record: job:gateway_http_requests:rate5m
+        expr: sum(rate(vitalmesh_http_requests_total[5m]))
+
+      - record: route:gateway_http_requests:rate5m
+        expr: sum by (method, route) (rate(vitalmesh_http_requests_total[5m]))
+
+      - record: job:gateway_http_errors:rate5m
+        expr: sum by (class) (rate(vitalmesh_http_errors_total[5m]))
+
+      - record: job:gateway_http_server_error_ratio:rate5m
+        expr: |
+          (sum(rate(vitalmesh_http_errors_total{class="server"}[5m])) or vector(0))
+            /
+          clamp_min(sum(rate(vitalmesh_http_requests_total[5m])), 0.001)
+
+      - record: route:gateway_http_server_error_ratio:rate5m
+        expr: |
+          sum by (route) (rate(vitalmesh_http_errors_total{class="server"}[5m]))
+            /
+          clamp_min(sum by (route) (rate(vitalmesh_http_requests_total[5m])), 0.001)
+
+  - name: api-gateway.latency
+    interval: 10s
+    rules:
+      - record: job:gateway_http_latency:p50
+        expr: histogram_quantile(0.50, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_http_latency:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_http_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+      - record: route:gateway_http_latency:p99
+        expr: histogram_quantile(0.99, sum by (le, route) (rate(vitalmesh_http_request_duration_seconds_bucket[5m])))
+
+  - name: api-gateway.dependencies
+    interval: 10s
+    rules:
+      - record: job:gateway_database_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_database_query_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_redis_latency:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_redis_command_duration_seconds_bucket[5m])))
+
+      - record: job:gateway_redis_unavailable:rate5m
+        expr: sum(rate(vitalmesh_redis_command_duration_seconds_count{outcome="unavailable"}[5m])) or vector(0)
+
+      - record: job:gateway_rate_limited:rate5m
+        expr: sum by (backend) (rate(vitalmesh_rate_limit_decisions_total{decision="limited"}[5m]))
+
+      - record: job:gateway_database_pool_saturation:ratio
+        expr: |
+          vitalmesh_database_connections_acquired
+            /
+          clamp_min(vitalmesh_database_connections_max, 1)
+
+  - name: processor.jobs
+    interval: 10s
+    rules:
+      - record: job:processor_jobs:rate5m
+        expr: sum by (outcome) (rate(vitalmesh_processor_jobs_total[5m]))
+
+      - record: job:processor_job_failure_ratio:rate5m
+        expr: |
+          sum(rate(vitalmesh_processor_jobs_total{outcome=~"failed|cancelled"}[5m]))
+            /
+          clamp_min(sum(rate(vitalmesh_processor_jobs_total{outcome=~"completed|failed|cancelled"}[5m])), 0.001)
+
+      - record: job:processor_job_duration:p95
+        expr: histogram_quantile(0.95, sum by (le) (rate(vitalmesh_processor_job_duration_seconds_bucket[5m])))
+
+      - record: job:processor_job_duration:p99
+        expr: histogram_quantile(0.99, sum by (le) (rate(vitalmesh_processor_job_duration_seconds_bucket[5m])))
+
+      - record: job:processor_saturation:ratio
+        expr: |
+          vitalmesh_processor_active_jobs
+            /
+          clamp_min(vitalmesh_processor_job_capacity, 1)

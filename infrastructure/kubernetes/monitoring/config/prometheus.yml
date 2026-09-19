@@ -1,0 +1,122 @@
+# Scrape interval and evaluation interval are 15s rather than the 5s the
+# local stack uses. A local stack is watched for minutes and wants to
+# react immediately; a deployed one is watched for weeks and 5s would
+# quadruple the series churn and the write volume for no operational
+# benefit. The `for` clauses in the alert rules are set against this
+# number.
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  external_labels:
+    # Replaced per environment by the deployed overlay, so an alert
+    # arriving in a shared receiver says which environment it came from.
+    environment: unset
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager.monitoring.svc.cluster.local:9093"]
+
+scrape_configs:
+  # Both services, discovered through their Services' endpoints. The
+  # gateway serves /metrics on the same port as its API and so does the
+  # processor, which is why there is no separate metrics port to select:
+  # the one named `http` is it.
+  #
+  # Discovery is cluster-wide and narrowed by the Service label below, not
+  # by namespace name. Every overlay renames the namespace —
+  # vitalmesh-local, vitalmesh-staging, vitalmesh-production — so a
+  # namespace filter would have to know which environment it was in, and
+  # would silently scrape nothing when it was wrong. The `keep` on
+  # app.kubernetes.io/part-of is the real filter and it travels: a scraper
+  # that picks up every endpoint in the cluster collects a great deal it was
+  # never asked for, and each series costs memory for as long as it is
+  # retained.
+  #
+  # This was written the other way first, pinned to a namespace called
+  # `vitalmesh` that no environment actually uses, and
+  # `make k8s-monitoring-test` is what found it: Prometheus healthy, every
+  # rule loaded, and no targets at all.
+  - job_name: vitalmesh
+    kubernetes_sd_configs:
+      - role: endpoints
+    relabel_configs:
+      # The two application Services by name, and only their `http` port.
+      #
+      # By name and not by `part-of`, which everything in this repository
+      # carries: Prometheus, Alertmanager and the collector are labelled
+      # part-of vitalmesh too, and two of them also have a port named
+      # `http`, so a part-of filter scraped them here as well as in their
+      # own jobs and produced the same target twice under two job names.
+      #
+      # Without the port filter, every endpoint would be scraped once per
+      # declared port.
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        action: keep
+        regex: api-gateway|processor
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: http
+      # `service` is the label the recording rules and the dashboards
+      # key on, so it has to be the service's own name rather than the
+      # Kubernetes object name: `api-gateway`, not `vitalmesh-api-gateway`.
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        target_label: service
+      # `job` defaults to the job_name for every target, which would make
+      # ServiceDown say "vitalmesh is not answering" whichever service it
+      # was. Setting it per service is what makes that alert name the
+      # thing that is down.
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        target_label: job
+      # Which pod a series came from, so a bad replica can be told from a
+      # bad release. It is a pod name, not a patient, user, request or
+      # trace id: those are never labels (SPECIFICATIONS.md section 41).
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  # The collector's own health: how many spans it accepted, refused or
+  # failed to send. It is what answers "is tracing working" without a
+  # trace store, and it is what SpanExportFailing alerts on.
+  #
+  # Discovered per pod, not scraped through the Service, and this one was a
+  # real bug rather than a preference. The collector runs two replicas, and
+  # a static target pointing at the Service resolves to the ClusterIP, which
+  # sends each scrape to whichever pod kube-proxy picks. The services hold
+  # their OTLP connection open to one of them, so the other has received no
+  # spans and does not export the receiver metrics at all — and a series that
+  # is present on one scrape and absent on the next is worse than missing,
+  # because rate() over it is nonsense. `make k8s-monitoring-test` found this
+  # as "no spans reached the collector" while the collector's own /metrics
+  # plainly showed 45 of them.
+  - job_name: otel-collector
+    kubernetes_sd_configs:
+      - role: endpoints
+        namespaces:
+          names: ["monitoring"]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        action: keep
+        regex: otel-collector
+      - source_labels: [__meta_kubernetes_endpoint_port_name]
+        action: keep
+        regex: metrics
+      - source_labels: [__meta_kubernetes_service_label_app_kubernetes_io_name]
+        target_label: service
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+        labels:
+          service: prometheus
+
+  - job_name: alertmanager
+    static_configs:
+      - targets: ["alertmanager.monitoring.svc.cluster.local:9093"]
+        labels:
+          service: alertmanager

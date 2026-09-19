@@ -1,0 +1,198 @@
+# The OpenTelemetry Collector both services already export to. The staging
+# and production ConfigMaps have pointed OTEL_EXPORTER_OTLP_ENDPOINT at
+# `otel-collector.monitoring.svc.cluster.local:4318` from the beginning;
+# until this directory existed, that name did not resolve, and the gateway
+# degraded over it silently and correctly. The Service below is what makes
+# the name answer, so the ConfigMaps do not change.
+#
+# Like the local collector, this one exports traces to `debug` rather than
+# to a trace store: there is no Jaeger, Tempo or X-Ray wired up, and
+# pretending otherwise would be the kind of coverage-shaped gap this work
+# exists to close. What it does give a deployed environment is the thing
+# that was actually missing — the collector's own metrics, scraped by
+# Prometheus, which are what answer "is tracing working at all" and what
+# SpanExportFailing alerts on. Adding a real backend is one exporter and one
+# name in the traces pipeline; no application change.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+  annotations:
+    # The concern is real and is already answered: replicas sharing one node
+    # is what the topologySpreadConstraints below prevent. This repository
+    # made that choice explicitly for the application Deployments, and the
+    # reasoning is recorded against the `no-node-affinity` exclusion in
+    # .kube-linter.yaml. Adding podAntiAffinity as well would express the
+    # same constraint twice, in two schedulers' vocabularies, and the two
+    # would eventually disagree.
+    ignore-check.kube-linter.io/no-anti-affinity: >-
+      Replica spreading is expressed with topologySpreadConstraints, which
+      this Deployment sets on kubernetes.io/hostname.
+spec:
+  # Two, unlike the singletons above. The collector is stateless between
+  # batches, so a second one costs nothing and means a restart does not
+  # drop every in-flight span. Export is batched off the request path, so
+  # losing one of these never fails a request.
+  replicas: 2
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+      app.kubernetes.io/part-of: vitalmesh
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+        app.kubernetes.io/component: monitoring
+        app.kubernetes.io/part-of: vitalmesh
+    spec:
+      serviceAccountName: otel-collector
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: otel-collector
+              app.kubernetes.io/part-of: vitalmesh
+
+      containers:
+        - name: otel-collector
+          # The same version the local stack runs.
+          image: otel/opentelemetry-collector-contrib:0.117.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config=/etc/otel/collector.yaml
+          ports:
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: metrics
+              containerPort: 8888
+              protocol: TCP
+            - name: health
+              containerPort: 13133
+              protocol: TCP
+
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              # Above memory_limiter's 384 + 96 MiB, so the collector sheds
+              # load before the kubelet kills it. A collector that is
+              # OOMKilled loses every span it was holding; one that refuses
+              # loses only what it refused, and says so in a metric.
+              memory: 512Mi
+
+          # The collector's Prometheus endpoint is the cheapest thing that
+          # proves the process is serving: it is produced by the same
+          # telemetry subsystem the pipelines run under. The health_check
+          # extension would be more precise, and would need enabling in the
+          # config above; this is what the config as written exposes.
+          startupProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 3
+            timeoutSeconds: 2
+            failureThreshold: 20
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+              readOnly: true
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            privileged: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop:
+                - ALL
+
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: monitoring
+  labels:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/component: monitoring
+    app.kubernetes.io/part-of: vitalmesh
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: otel-collector
+    app.kubernetes.io/part-of: vitalmesh
+  ports:
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+      protocol: TCP
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      protocol: TCP
+    - name: metrics
+      port: 8888
+      targetPort: metrics
+      protocol: TCP

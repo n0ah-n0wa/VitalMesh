@@ -116,6 +116,11 @@ output "load_balancer_controller_role_arn" {
   value       = module.eks.load_balancer_controller_role_arn
 }
 
+output "alertmanager_role_arn" {
+  description = "IRSA role Alertmanager assumes to publish to the alarm topic. scripts/eks-platform-install.sh annotates monitoring/alertmanager with it."
+  value       = module.eks.alertmanager_role_arn
+}
+
 output "cluster_autoscaler_role_arn" {
   description = "IRSA role for the Cluster Autoscaler. infrastructure/kubernetes/platform installs the autoscaler with it."
   value       = module.eks.cluster_autoscaler_role_arn

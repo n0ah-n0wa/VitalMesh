@@ -278,12 +278,31 @@ request, and `internal/processing/sweeper.go` is the whole of it.
 
 | Data | Owner | Lifetime |
 |---|---|---|
-| Users, patients, measurements, jobs, results, audit | PostgreSQL | durable; backed up, restore tested |
+| Users, patients, jobs, audit | PostgreSQL | durable; backed up, restore tested |
+| Measurements | PostgreSQL | `MEASUREMENT_RETENTION_DAYS`; kept for ever when unset (the default) |
+| Processing results | PostgreSQL | `RESULT_RETENTION_DAYS`; kept for ever when unset (the default) |
 | Idempotency records | PostgreSQL (the claim) + Redis (an advisory lock) | `IDEMPOTENCY_TTL`, 24h default |
 | Rate-limit counters | Redis, per window | seconds |
 | Patient cache | Redis | `CACHE_PATIENT_TTL` |
 | In-flight job registry | the processor's memory | bounded, evicted by age |
 | Traces | exported, held nowhere | — |
+
+**Retention** (SPECIFICATIONS.md section 81). Readings and results are the
+two things that grow without limit, so they are the two things a window can
+be set on. `internal/retention` sweeps on `RETENTION_INTERVAL`, in batches of
+`RETENTION_BATCH_LIMIT`, and each pass records a metric, a log line and, when
+it removed anything, a `RETENTION_RUN` audit entry carrying counts rather
+than identifiers.
+
+Both windows default to zero, which removes nothing: deleting data is
+irreversible, so it happens because an operator asked for it rather than
+because nobody set a variable. Processing jobs are deliberately not covered —
+section 94 requires a failed job to keep its diagnosis, and a job row is
+small and bounded by how many were requested. Nothing holds a foreign key to
+a measurement, and a result keys to its job rather than to the readings it
+came from, so neither delete can orphan a row; an integration test removes
+the readings under a completed job and asserts the job and its results are
+still there.
 
 Nothing in Redis is authoritative. The idempotency *claim* is a row in
 PostgreSQL; Redis only holds a lock that makes the common case cheaper, and

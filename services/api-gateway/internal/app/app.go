@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -33,6 +34,7 @@ import (
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/patient"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/processing"
 	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/ratelimit"
+	"github.com/n0ah-n0wa/VitalMesh/services/api-gateway/internal/retention"
 )
 
 // ServiceName identifies the gateway in logs and health responses.
@@ -54,6 +56,10 @@ type App struct {
 	// sweeper fails jobs whose lease expired: jobs a gateway that stopped
 	// mid-dispatch left PROCESSING.
 	sweeper *processing.Sweeper
+	// data removes readings and results past their retention window
+	// (SPECIFICATIONS.md section 81). Disabled unless configured, in which
+	// case it returns immediately and removes nothing.
+	data *retention.Sweeper
 }
 
 // New wires the application. The database pool connects lazily, so New
@@ -192,6 +198,10 @@ func New(ctx context.Context, cfg config.Config, logger *slog.Logger, version st
 		traces:    traces,
 		retention: idempotency.NewCollector(idempotencyStore, cfg.Idempotency.RetentionInterval, logger, idempotency.CollectorOptions{}),
 		sweeper:   processing.NewSweeper(jobStore, cfg.Processing.LeaseSweepInterval, logger, processing.SweeperOptions{}),
+		data: retention.New(
+			retentionStore{retention: postgres.NewRetention(pool), audit: postgres.NewAudit(pool)},
+			cfg.Retention, logger, retention.Options{Metrics: rec},
+		),
 	}, nil
 }
 
@@ -225,7 +235,7 @@ func (a *App) Run(ctx context.Context) error {
 	// batch of each.
 	background, stopBackground := context.WithCancel(ctx)
 	var sweeping sync.WaitGroup
-	sweeping.Add(2)
+	sweeping.Add(3)
 	go func() {
 		defer sweeping.Done()
 		a.retention.Run(background)
@@ -233,6 +243,10 @@ func (a *App) Run(ctx context.Context) error {
 	go func() {
 		defer sweeping.Done()
 		a.sweeper.Run(background)
+	}()
+	go func() {
+		defer sweeping.Done()
+		a.data.Run(background)
 	}()
 	// Deferred last-in-first-out: cancel, then wait for the sweeps to stop.
 	defer sweeping.Wait()
@@ -244,6 +258,34 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	a.logger.Info("stopped")
 	return nil
+}
+
+// retentionStore adapts two repositories to the one port the retention
+// sweep needs, so that package does not depend on persistence types.
+type retentionStore struct {
+	retention *postgres.Retention
+	audit     *postgres.Audit
+}
+
+func (s retentionStore) DeleteMeasurementsBefore(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	return s.retention.DeleteMeasurementsBefore(ctx, cutoff, limit)
+}
+
+func (s retentionStore) DeleteResultsBefore(ctx context.Context, cutoff time.Time, limit int) (int64, error) {
+	return s.retention.DeleteResultsBefore(ctx, cutoff, limit)
+}
+
+// RecordRetentionRun appends the entry section 81 requires. The actor is
+// the system rather than a user, and there is no request behind it, so the
+// request id is the empty string the column allows.
+func (s retentionStore) RecordRetentionRun(ctx context.Context, metadata json.RawMessage) error {
+	_, err := s.audit.Append(ctx, postgres.NewAuditEntry{
+		ActorType:    domain.ActorSystem,
+		Action:       retention.Action,
+		ResourceType: "retention",
+		Metadata:     metadata,
+	})
+	return err
 }
 
 // auditor adapts the audit repository to the events the auth service

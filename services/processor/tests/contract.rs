@@ -89,6 +89,49 @@ fn measurement_types_match() {
 }
 
 #[test]
+fn value_ranges_and_units_match_the_contract() {
+    // The catalogue -- which unit a type takes and what values are
+    // plausible for it -- is written out twice, here and in the gateway's
+    // internal/measurement/catalog.go, because neither service can import
+    // the other's. Nothing but this test and its Go counterpart keeps the
+    // two from drifting, and drift is quiet: the gateway would accept a
+    // reading the processor then rejects, so every job carrying one fails
+    // with PROCESSING_REJECTED and nothing says why.
+    let contract = contract();
+    let published = contract["components"]["schemas"]["MeasurementType"]["x-value-ranges"]
+        .as_object()
+        .expect("components.schemas.MeasurementType.x-value-ranges is missing");
+
+    assert_eq!(
+        published.len(),
+        MeasurementType::ALL.len(),
+        "the contract publishes {} types, the domain has {}",
+        published.len(),
+        MeasurementType::ALL.len()
+    );
+
+    for measurement_type in MeasurementType::ALL {
+        let name = measurement_type.as_str();
+        let entry = published
+            .get(name)
+            .unwrap_or_else(|| panic!("x-value-ranges has no entry for {name}"));
+
+        let unit = entry["unit"].as_str().expect("unit is a string");
+        assert_eq!(
+            unit,
+            wire(&measurement_type.canonical_unit()),
+            "{name}: the contract publishes unit {unit}"
+        );
+
+        let range = measurement_type.value_range();
+        let min = entry["min"].as_f64().expect("min is a number");
+        let max = entry["max"].as_f64().expect("max is a number");
+        assert_eq!(min, range.min.get(), "{name}: minimum");
+        assert_eq!(max, range.max.get(), "{name}: maximum");
+    }
+}
+
+#[test]
 fn units_match() {
     // Every canonical unit the domain can produce. A type whose unit is not
     // in the contract would make an accepted reading undescribable.

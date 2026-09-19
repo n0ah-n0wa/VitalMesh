@@ -1,19 +1,14 @@
-# Alerting rules for the local stack. They are deliberately few: an alert
-# that nobody would act on is noise that teaches people to ignore the ones
-# that matter.
-#
-# Each rule alerts on a symptom rather than a cause. "The API is failing" is
-# actionable; "the database pool is at 80%" is only interesting because it
-# might cause that, so saturation is a warning and failure is a page.
-#
-# The `for` clauses are short here because a local stack is watched for
-# minutes, not weeks. A deployment lengthens them.
 groups:
   - name: availability
     rules:
+      # Two minutes rather than the local thirty seconds. Rolling updates
+      # use maxUnavailable: 0, so a replica is replaced rather than
+      # removed, but a node drain or an evicted pod can still leave a
+      # target briefly unscrapeable. Paging for that would train people
+      # to ignore the alert that matters.
       - alert: ServiceDown
         expr: up == 0
-        for: 30s
+        for: 2m
         labels:
           severity: critical
         annotations:
@@ -35,7 +30,7 @@ groups:
       # clause here; that is the cost of covering the case at all.
       - alert: GatewayAbsent
         expr: absent(up{job="api-gateway"})
-        for: 1m
+        for: 5m
         labels:
           severity: critical
         annotations:
@@ -48,7 +43,7 @@ groups:
 
       - alert: ProcessorAbsent
         expr: absent(up{job="processor"})
-        for: 1m
+        for: 5m
         labels:
           severity: critical
         annotations:
@@ -62,7 +57,7 @@ groups:
     rules:
       - alert: GatewayServerErrorsHigh
         expr: job:gateway_http_server_error_ratio:rate5m > 0.05
-        for: 2m
+        for: 5m
         labels:
           severity: critical
         annotations:
@@ -74,7 +69,7 @@ groups:
 
       - alert: GatewayLatencyHigh
         expr: job:gateway_http_latency:p99 > 1
-        for: 5m
+        for: 10m
         labels:
           severity: warning
         annotations:
@@ -87,7 +82,7 @@ groups:
 
       - alert: DatabasePoolNearlyExhausted
         expr: job:gateway_database_pool_saturation:ratio > 0.9
-        for: 2m
+        for: 5m
         labels:
           severity: warning
         annotations:
@@ -99,7 +94,7 @@ groups:
 
       - alert: RedisDegraded
         expr: job:gateway_redis_unavailable:rate5m > 0
-        for: 2m
+        for: 5m
         labels:
           severity: warning
         annotations:
@@ -114,7 +109,7 @@ groups:
     rules:
       - alert: ProcessingFailuresHigh
         expr: job:processor_job_failure_ratio:rate5m > 0.1
-        for: 2m
+        for: 5m
         labels:
           severity: critical
         annotations:
@@ -126,7 +121,7 @@ groups:
 
       - alert: ProcessorSaturated
         expr: job:processor_saturation:ratio >= 1
-        for: 1m
+        for: 5m
         labels:
           severity: warning
         annotations:
@@ -138,7 +133,7 @@ groups:
 
       - alert: ProcessingSlow
         expr: job:processor_job_duration:p95 > 30
-        for: 5m
+        for: 10m
         labels:
           severity: warning
         annotations:
@@ -149,11 +144,12 @@ groups:
 
   - name: telemetry
     rules:
-      # The stack watching the services is itself worth watching, but only
-      # as a warning: losing telemetry is not losing the service.
+      # Fifteen minutes. Losing telemetry is not losing the service, and
+      # a collector restart during a platform upgrade should not wake
+      # anyone.
       - alert: SpanExportFailing
         expr: rate(otelcol_exporter_send_failed_spans[5m]) > 0
-        for: 5m
+        for: 15m
         labels:
           severity: warning
         annotations:
