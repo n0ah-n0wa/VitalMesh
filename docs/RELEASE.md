@@ -17,7 +17,7 @@ Seven facts, each derived from the build rather than written down beside it
 | Fact | Where it comes from | Looks like |
 |---|---|---|
 | Git commit | `-ldflags -X …buildinfo.Version` for Go, `VITALMESH_VERSION` for Rust, both set by the Makefile and both Dockerfiles from `git rev-parse --short HEAD` | `89fc016` |
-| Go version | `runtime.Version()` | `go1.25.14` |
+| Go version | `runtime.Version()` | `go1.26.10` |
 | Rust version | `rustc -V` at compile time, captured by `services/processor/build.rs` | `rustc 1.89.0 (29483883e 2025-08-04)` |
 | Dependency lockfiles | a digest per service, below | `sha256:900885fb…`, `fnv64:72f8f9e7…` |
 | Container image digest | the deployment passes `IMAGE_DIGEST`; a process cannot read its own | `sha256:0b1e5b…` |
@@ -41,7 +41,7 @@ processor version
 {
   "service": "api-gateway",
   "version": "89fc016",
-  "go_version": "go1.25.14",
+  "go_version": "go1.26.10",
   "dependencies": "sha256:900885fb77484aab1cfda735",
   "migration_version": 11,
   "algorithm_version": "1.0.0",
@@ -68,7 +68,7 @@ version rather than as a version.
 gauge whose value is always 1 and whose labels carry the facts:
 
 ```
-vitalmesh_build_info{version="89fc016",go_version="go1.25.14",dependencies="sha256:900885fb77484aab1cfda735",algorithm_version="1.0.0",image_digest="sha256:0b1e5b…"} 1
+vitalmesh_build_info{version="89fc016",go_version="go1.26.10",dependencies="sha256:900885fb77484aab1cfda735",algorithm_version="1.0.0",image_digest="sha256:0b1e5b…"} 1
 vitalmesh_processor_build_info{version="89fc016",rust_version="rustc 1.89.0 (29483883e 2025-08-04)",dependencies="fnv64:72f8f9e7dc4f8160",algorithm_version="1.0.0",contract_version="1.1.2",image_digest="sha256:…"} 1
 ```
 

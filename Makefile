@@ -85,9 +85,10 @@ TRIVY           := docker run --rm -v /var/run/docker.sock:/var/run/docker.sock 
 TRIVY_FS        := docker run --rm -v $(TRIVY_CACHE):/root/.cache/trivy
 GITLEAKS_IMAGE  ?= ghcr.io/gitleaks/gitleaks:v8.30.1
 # govulncheck runs through `go run`, so its own go directive must be within
-# the pinned toolchain (go.mod): v1.8.0 requires Go 1.26 and fails under
-# GOTOOLCHAIN=local. Check the directive before bumping this pin.
-GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.7.0
+# the pinned toolchain (go.mod): v1.9.0 requires Go 1.26 and fails under
+# GOTOOLCHAIN=local on anything older. Check the directive before bumping
+# this pin.
+GOVULNCHECK     ?= golang.org/x/vuln/cmd/govulncheck@v1.9.0
 # gosec reads this repository's own code rather than its dependencies, which
 # is the half govulncheck does not cover. Pinned for the same reason and with
 # the same caveat: the release must build under the toolchain in go.mod.

@@ -54,16 +54,19 @@ RUN --mount=type=cache,target=/src/target,sharing=locked \
 # It is a fixed bundle, not a package list, so it is not free of things
 # this binary never loads: `ldd` on the built binary names libgcc_s, libm
 # and libc and nothing else, while the base also ships libstdc++, libgomp
-# and libssl. They are scanned along with everything else and carry no
-# known high or critical vulnerability; if one appears, the musl route
-# below is the way out from under it.
+# and libssl. They are scanned along with everything else. debian12's
+# libssl3 stayed on 3.0.20 with a HIGH DTLS advisory (CVE-2026-84782) and
+# that tag is no longer rebuilt, so the runtime is debian13. The binary is
+# still built on bookworm; glibc is forward-compatible. If a HIGH appears
+# in a library this binary does not load, the musl route below is the way
+# out from under it.
 #
 # The alternative, a musl build on distroless/static, would drop libc from
 # the image entirely. It is not used here because musl's allocator is
 # markedly slower under the concurrent allocation this service does, and the
 # pipeline's throughput was measured and tuned against glibc. A smaller
 # image is not worth a slower engine.
-FROM gcr.io/distroless/cc-debian12:nonroot@sha256:9dac0a79194e45a7da0158a9c6da57b217585af0786db3845d1f0ec1a0dd182f
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
 
 # Restated rather than inherited: the base's default user is a property of
 # the base, and this line is what makes the image's own behaviour explicit

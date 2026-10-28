@@ -1,7 +1,7 @@
 # Reproducible toolchain for VitalMesh. Used by VS Code Dev Containers and for
 # running `make verify` in a container on hosts without Go or Rust installed
 # (see docs/DEVELOPMENT.md). Versions match go.mod and rust-toolchain.toml.
-FROM golang:1.25.14-bookworm AS go
+FROM golang:1.26.10-bookworm AS go
 
 FROM rust:1.89.0-bookworm
 

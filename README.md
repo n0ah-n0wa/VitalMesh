@@ -149,17 +149,17 @@ losing the collector costs traces but not requests.
 
 | Layer | Choice | Version |
 |---|---|---|
-| API gateway | Go, standard-library `http.ServeMux` routing | `go 1.25.14` |
+| API gateway | Go, standard-library `http.ServeMux` routing | `go 1.26.10` |
 | Processing service | Rust, `axum` on `tokio` | toolchain `1.89.0`, edition 2024 |
 | Database | PostgreSQL | 16 |
 | Cache and counters | Redis | 7 locally, 7.1 on ElastiCache |
 | Migrations | `golang-migrate/migrate` | v4.19.1 |
 | PostgreSQL driver | `jackc/pgx` | v5.10.0 |
 | Redis client | `redis/go-redis` | v9.22.0 |
-| Password hashing | `golang.org/x/crypto` (Argon2id) | v0.55.0 |
+| Password hashing | `golang.org/x/crypto` (Argon2id) | v0.57.0 |
 | Metrics | `prometheus/client_golang` · `prometheus` crate | v1.24.1 · 0.14 |
 | Tracing | OpenTelemetry Go SDK · `opentelemetry` crates | v1.46.0 · 0.32 |
-| Containers | distroless, non-root, digest-pinned bases | `static-debian12` · `cc-debian12` |
+| Containers | distroless, non-root, digest-pinned bases | `static-debian12` · `cc-debian13` |
 | Orchestration | Kubernetes with Kustomize overlays | manifests target 1.30+ |
 | Infrastructure | Terraform, AWS provider | `>= 1.11.0, < 2.0.0` · `~> 6.0` |
 | CI/CD | GitHub Actions with OIDC | — |

@@ -12,7 +12,7 @@
 # and a scan result stays meaningful.
 
 # ---------------------------------------------------------------- builder
-FROM golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS builder
+FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS builder
 
 WORKDIR /src
 

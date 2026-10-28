@@ -10,7 +10,7 @@ import (
 func releaseBuild() Build {
 	return Build{
 		Version:          "89fc016",
-		GoVersion:        "go1.25.14",
+		GoVersion:        "go1.26.10",
 		Modules:          "sha256:0b1e5b4c1a2f3d4e5f607182",
 		AlgorithmVersion: "1.0.0",
 		ImageDigest:      "sha256:0b1e5b4c1a2f3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6",
@@ -30,7 +30,7 @@ func TestTheBuildIsPublishedWithEveryLabelFilled(t *testing.T) {
 	}
 	for label, want := range map[string]string{
 		"version":           "89fc016",
-		"go_version":        "go1.25.14",
+		"go_version":        "go1.26.10",
 		"dependencies":      "sha256:0b1e5b4c1a2f3d4e5f607182",
 		"algorithm_version": "1.0.0",
 		"image_digest":      "sha256:0b1e5b4c1a2f3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6",

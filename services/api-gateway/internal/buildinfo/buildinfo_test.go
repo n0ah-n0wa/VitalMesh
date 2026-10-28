@@ -15,7 +15,7 @@ func complete() Record {
 	return Record{
 		Service:          "api-gateway",
 		Version:          "89fc016",
-		GoVersion:        "go1.25.14",
+		GoVersion:        "go1.26.10",
 		Dependencies:     "sha256:900885fb77484aab1cfda735",
 		MigrationVersion: 11,
 		AlgorithmVersion: "1.0.0",

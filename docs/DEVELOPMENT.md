@@ -4,7 +4,7 @@
 
 | Tool | Version | Notes |
 |---|---|---|
-| Go | 1.25.14 | pinned in `services/api-gateway/go.mod`. The Makefile exports `GOTOOLCHAIN=local`, as CI does, so the installed Go must be exactly this one; set `GOTOOLCHAIN=auto` in your own environment if you would rather have Go download it |
+| Go | 1.26.10 | pinned in `services/api-gateway/go.mod`. The Makefile exports `GOTOOLCHAIN=local`, as CI does, so the installed Go must be exactly this one; set `GOTOOLCHAIN=auto` in your own environment if you would rather have Go download it |
 | Rust | 1.89.0 | pinned in `services/processor/rust-toolchain.toml`; install via [rustup](https://rustup.rs), which picks up the pin and the `rustfmt`/`clippy` components automatically |
 | GNU make | 4.x | |
 | git | any recent | the line-ending gate reads the git index |
