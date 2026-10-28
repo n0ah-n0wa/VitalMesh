@@ -1,5 +1,7 @@
 # VitalMesh
 
+[![CI](https://github.com/n0ah-n0wa/VitalMesh/actions/workflows/ci.yml/badge.svg)](https://github.com/n0ah-n0wa/VitalMesh/actions/workflows/ci.yml)
+
 A cloud-native, production-oriented e-health data processing platform: a **Go**
 API gateway and a **Rust** processing engine, with PostgreSQL, Redis,
 Kubernetes, Terraform, OpenTelemetry and a GitHub Actions delivery pipeline.
