@@ -11,7 +11,7 @@
 # and a scan result stays meaningful.
 
 # ---------------------------------------------------------------- builder
-FROM rust:1.89.0-bookworm@sha256:948f9b08a66e7fe01b03a98ef1c7568292e07ec2e4fe90d88c07bb14563c84ff AS builder
+FROM rust:1.99.1-bookworm@sha256:9181b56c2a21ab1d5e73cffe04fc762426d30aa7fac3c91141dd033f49a7fc8b AS builder
 
 WORKDIR /src
 
@@ -66,7 +66,7 @@ RUN --mount=type=cache,target=/src/target,sharing=locked \
 # markedly slower under the concurrent allocation this service does, and the
 # pipeline's throughput was measured and tuned against glibc. A smaller
 # image is not worth a slower engine.
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:3ee00291cf386ec52a552e6a858d555debd74776eb4bfa53fa3df2cd6677515e
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:08476c244888bfb425bae1ae4dd7c17f093e972aab8426883d97f3c6f280f7c1
 
 # Restated rather than inherited: the base's default user is a property of
 # the base, and this line is what makes the image's own behaviour explicit
